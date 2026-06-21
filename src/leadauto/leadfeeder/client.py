@@ -160,6 +160,7 @@ class LeadfeederClient:
         wait = self._last_request_at + self._min_interval - self._clock()
         if wait > 0:
             self._sleep_fn(wait)
+        # record the post-sleep timestamp so pacing reflects when this request actually fires
         self._last_request_at = self._clock()
 
     def _retry_delay(self, resp, attempt: int) -> float:
@@ -188,6 +189,7 @@ class LeadfeederClient:
                 continue
             resp.raise_for_status()
             return resp.json()
+        raise LeadfeederError(f"LeadFeeder {kind} {path} exhausted retries without a response")
 
     def api_get(self, path: str, params=None) -> dict:
         return self._request("GET", path, params=params)
