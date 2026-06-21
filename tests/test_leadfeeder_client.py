@@ -277,3 +277,46 @@ def test_retries_on_500_without_retry_after_header():
     routes = {("GET", "/x"): [FakeResponse({}, status=500), FakeResponse({"data": []})]}
     client = _client(routes)
     assert client.api_get("/x") == {"data": []}
+
+
+# --- match_companies (batch) -------------------------------------------------
+
+def test_match_companies_aligns_results_by_input_index():
+    def handler(params, body):
+        return {"data": [
+            [{"id": "c1", "attributes": {"match_score": 0.95},
+              "relationships": {"company_summary": {"attributes": {"name": "Acme"}}}}],
+            [],  # second company: no match
+        ]}
+    client = _client({("POST", "/companies/match"): handler})
+    out = client.match_companies([{"company_name": "Acme"}, {"company_name": "Nope"}])
+    assert out == [{"company_id": "c1", "match_score": 0.95, "matched_name": "Acme"}, None]
+
+
+def test_match_companies_chunks_over_match_batch():
+    posts = []
+    def handler(params, body):
+        posts.append(len(body["companies"]))
+        return {"data": [[] for _ in body["companies"]]}
+    client = _client({("POST", "/companies/match"): handler}, match_batch=2)
+    out = client.match_companies([{"company_name": f"C{i}"} for i in range(5)])
+    assert posts == [2, 2, 1]
+    assert out == [None] * 5
+
+
+def test_match_companies_applies_score_floor():
+    handler = lambda p, b: {"data": [[
+        {"id": "c1", "attributes": {"match_score": 0.50},
+         "relationships": {"company_summary": {"attributes": {"name": "x"}}}}]]}
+    client = _client({("POST", "/companies/match"): handler}, min_match_score=0.70)
+    assert client.match_companies([{"company_name": "x"}]) == [None]
+
+
+def test_match_companies_chunk_failure_yields_none():
+    routes = {("POST", "/companies/match"): FakeResponse({}, status=500)}
+    client = _client(routes, max_retries=0)
+    assert client.match_companies([{"company_name": "x"}, {"company_name": "y"}]) == [None, None]
+
+
+def test_match_companies_empty_input():
+    assert _client({}).match_companies([]) == []

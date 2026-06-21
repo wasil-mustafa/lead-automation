@@ -231,18 +231,8 @@ class LeadfeederClient:
         self.log.info("Created LeadFeeder list %r (%s)", name, list_id)
         return list_id
 
-    # -- company match --
-    def match_company(self, company_name: str, email: str | None = None,
-                      country: str | None = None, country_code: str | None = None) -> dict | None:
-        account_id = self.get_account_id()
-        payload = {"company_name": company_name, "email": email or ""}
-        if country:
-            payload["country"] = country
-        if country_code:
-            payload["country_code"] = country_code
-        data = self.api_post("/companies/match", payload={"companies": [payload]},
-                             params={"account_id": account_id, "max_results_per_company": 3})
-        matches = (data.get("data", []) or [[]])[0]
+    # -- company match (batched) --
+    def _best_match(self, matches: list) -> dict | None:
         if not matches:
             return None
         best = max(matches, key=lambda m: m.get("attributes", {}).get("match_score", 0))
@@ -252,6 +242,41 @@ class LeadfeederClient:
         summary = best.get("relationships", {}).get("company_summary", {}).get("attributes", {})
         return {"company_id": best["id"], "match_score": score,
                 "matched_name": summary.get("name", "")}
+
+    def match_companies(self, payloads: list[dict]) -> list[dict | None]:
+        """Batch company match (free). `payloads` is a list of per-company dicts
+        (company_name, email, country, country_code, ...). Returns a list aligned to
+        `payloads`: {company_id, match_score, matched_name} or None per company. A chunk
+        that errors after retries degrades its entries to None (logged), never raising."""
+        if not payloads:
+            return []
+        account_id = self.get_account_id()
+        results: list[dict | None] = []
+        for i in range(0, len(payloads), self.match_batch):
+            chunk = payloads[i:i + self.match_batch]
+            try:
+                data = self.api_post(
+                    "/companies/match", payload={"companies": chunk},
+                    params={"account_id": account_id, "max_results_per_company": 3},
+                )
+            except requests.exceptions.HTTPError as e:
+                self.log.warning("Company match chunk failed (%d companies): %s", len(chunk), e)
+                results.extend([None] * len(chunk))
+                continue
+            per_company = data.get("data", []) or []
+            for j in range(len(chunk)):
+                matches = per_company[j] if j < len(per_company) else []
+                results.append(self._best_match(matches))
+        return results
+
+    def match_company(self, company_name: str, email: str | None = None,
+                      country: str | None = None, country_code: str | None = None) -> dict | None:
+        payload = {"company_name": company_name, "email": email or ""}
+        if country:
+            payload["country"] = country
+        if country_code:
+            payload["country_code"] = country_code
+        return self.match_companies([payload])[0]
 
     def add_company_to_list(self, company_id: str, list_id: str) -> None:
         self.api_post(f"/companies/{company_id}/lists",
