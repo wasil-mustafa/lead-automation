@@ -32,6 +32,9 @@ artifacts/
 !review/*.csv
 !state/
 !state/*.json
+# Exceptions: new scripts/ (probe scripts tracked; legacy Scripts/ content still ignored)
+!scripts/
+!scripts/*.py
 
 # OS
 .DS_Store
