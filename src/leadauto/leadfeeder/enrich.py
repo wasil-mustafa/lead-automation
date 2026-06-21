@@ -47,30 +47,37 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
     company_list_id = client.find_or_create_list(settings.lf_company_list, "company")
     contact_list_id = client.find_or_create_list(settings.lf_contact_list, "contact")
 
-    # Phase 1 — company match (free).
+    # Phase 1 — company match (free, batched).
     results: list[EnrichedLead] = []
+    match_payloads: list[dict] = []
+    match_index: list[int] = []  # results-index for each payload
     for e in extracteds:
         result = EnrichedLead(extracted=e)
         company_name = e.best_company
         if company_name:
             email = e.contact_email or e.lead_email
-            try:
-                match = client.match_company(
-                    company_name, email=email, country=e.region, country_code=e.country_code
-                )
-            except requests.exceptions.HTTPError as err:
-                log.warning("Company match failed for %r: %s", company_name, err)
-                match = None
-            if match:
-                result.matched = True
-                result.lf_company_id = match["company_id"]
-                result.matched_name = match.get("matched_name")
-                result.match_score = match.get("match_score")
-                try:
-                    client.add_company_to_list(result.lf_company_id, company_list_id)
-                except requests.exceptions.HTTPError:
-                    pass
+            payload = {"company_name": company_name, "email": email or ""}
+            if e.region:
+                payload["country"] = e.region
+            if e.country_code:
+                payload["country_code"] = e.country_code
+            match_payloads.append(payload)
+            match_index.append(len(results))
         results.append(result)
+
+    matches = client.match_companies(match_payloads) if match_payloads else []
+    for payload_i, match in enumerate(matches):
+        if not match:
+            continue
+        r = results[match_index[payload_i]]
+        r.matched = True
+        r.lf_company_id = match["company_id"]
+        r.matched_name = match.get("matched_name")
+        r.match_score = match.get("match_score")
+        try:
+            client.add_company_to_list(r.lf_company_id, company_list_id)
+        except requests.exceptions.HTTPError as err:
+            log.warning("add_company_to_list failed for %s: %s", r.lf_company_id, err)
 
     matched = [r for r in results if r.matched]
 
