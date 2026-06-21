@@ -14,6 +14,10 @@ leadfeeder:
   base_url: "https://api.leadfeeder.com/v1"
   company_list_name: "Lead_Automation"
   contact_list_name: "Lead_Automation"
+  max_requests_per_min: 95   # stay under LeadFeeder's 100/min/account hard limit
+  max_retries: 4             # retries on 429/5xx before surfacing HTTPError
+  retrieve_batch: 100        # GET /companies & /contacts (API max 100)
+  match_batch: 200           # POST /companies/match (API max 200)
 
 # Task Subjects the pipeline processes, mapped to their parser key.
 # Subjects not listed here are left for humans (e.g. Kontaktanfrage) or ignored (Ecom).
