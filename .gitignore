@@ -32,9 +32,11 @@ artifacts/
 !review/*.csv
 !state/
 !state/*.json
-# Exceptions: new scripts/ (probe scripts tracked; legacy Scripts/ content still ignored)
+# Exception: track ONLY the probe script. Re-ignore everything else in scripts/ —
+# on case-insensitive Windows this dir IS the legacy Scripts/ (live API key); keep it ignored.
 !scripts/
-!scripts/*.py
+scripts/*
+!scripts/leadfeeder_probe.py
 
 # OS
 .DS_Store
