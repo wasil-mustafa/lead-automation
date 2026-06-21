@@ -320,3 +320,37 @@ def test_match_companies_chunk_failure_yields_none():
 
 def test_match_companies_empty_input():
     assert _client({}).match_companies([]) == []
+
+
+# --- retrieve_contacts (batch) -----------------------------------------------
+
+def test_retrieve_contacts_maps_ids_to_attributes():
+    handler = lambda p, b: {"data": [
+        {"id": "k1", "attributes": {"first_name": "Jane"}},
+        {"id": "k2", "attributes": {"first_name": "John"}},
+    ]}
+    client = _client({("GET", "/contacts"): handler})
+    assert client.retrieve_contacts(["k1", "k2"]) == {
+        "k1": {"first_name": "Jane"}, "k2": {"first_name": "John"}}
+
+
+def test_retrieve_contacts_chunks_over_retrieve_batch():
+    seen = []
+    def handler(params, body):
+        seen.append(params["ids"])
+        return {"data": []}
+    client = _client({("GET", "/contacts"): handler}, retrieve_batch=2)
+    client.retrieve_contacts(["a", "b", "c"])
+    assert seen == ["a,b", "c"]
+
+
+def test_retrieve_contacts_chunk_failure_isolated():
+    routes = {("GET", "/contacts"): FakeResponse({}, status=500)}
+    client = _client(routes, max_retries=0)
+    assert client.retrieve_contacts(["k1"]) == {}  # logged + skipped, not raised
+
+
+def test_get_contact_details_flattens_single_contact():
+    handler = lambda p, b: {"data": [{"id": "k1", "attributes": {"position": {"title": "CEO"}}}]}
+    client = _client({("GET", "/contacts"): handler})
+    assert client.get_contact_details("k1")["position"] == "CEO"

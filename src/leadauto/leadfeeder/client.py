@@ -327,9 +327,26 @@ class LeadfeederClient:
         c = contacts[0]
         return {"contact_id": c["id"], "full_name": c.get("attributes", {}).get("full_name", "")}
 
+    def retrieve_contacts(self, contact_ids: list[str]) -> dict[str, dict]:
+        """Batch-retrieve contact `attributes` keyed by contact id (chunked, max 100/call).
+        1 credit per contact not accessed in the last 12 months. Per-chunk errors isolated."""
+        if not contact_ids:
+            return {}
+        account_id = self.get_account_id()
+        out: dict[str, dict] = {}
+        for i in range(0, len(contact_ids), self.retrieve_batch):
+            batch = contact_ids[i:i + self.retrieve_batch]
+            try:
+                data = self.api_get("/contacts", params={"ids": ",".join(batch), "account_id": account_id})
+                for contact in data.get("data", []) or []:
+                    out[contact["id"]] = contact.get("attributes", {})
+            except requests.exceptions.RequestException as e:
+                self.log.warning("Contact retrieve batch failed: %s", e)
+        return out
+
     def get_contact_details(self, contact_id: str) -> dict:
-        data = self.api_get(f"/contacts/{contact_id}", params={"account_id": self.get_account_id()})
-        return flatten_contact_details(data.get("data", {}).get("attributes", {}))
+        attrs = self.retrieve_contacts([contact_id]).get(contact_id, {})
+        return flatten_contact_details(attrs)
 
     def add_contact_to_list(self, contact_id: str, list_id: str) -> None:
         self.api_post(f"/contacts/{contact_id}/lists",
@@ -346,6 +363,6 @@ class LeadfeederClient:
                 data = self.api_get("/companies", params={"ids": ",".join(batch), "account_id": account_id})
                 for company in data.get("data", []):
                     enriched[company["id"]] = company.get("attributes", {})
-            except requests.exceptions.HTTPError as e:
+            except requests.exceptions.RequestException as e:
                 self.log.warning("Company retrieve batch failed: %s", e)
         return enriched
