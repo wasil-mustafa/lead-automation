@@ -1,0 +1,38 @@
+# Legacy local artifacts (kept on disk, not tracked)
+Archive/
+Import/
+Export/
+PQ/
+Scripts/
+*.csv
+*.xlsx
+*.xlsm
+
+# Secrets & local env
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# QA artifacts produced by runs (uploaded by CI, not committed)
+out/
+artifacts/
+
+# Exceptions: review-approval files and state ARE tracked
+!review/
+!review/*.csv
+!state/
+!state/*.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,81 @@
+name: Lead Automation — Stage 2 (convert, gated)
+
+# Convert ONLY the Leads a human approved in the QA artifact. The reviewer commits
+# review/approved_<date>.csv (the Review-sheet rows with Approve?=yes); this workflow
+# converts those, linking matched Accounts/Contacts. The conversion Apex re-filters
+# IsConverted=false, so re-running is a no-op.
+#
+# THE HUMAN GATE: the `lead-conversion` Environment below must have "Required reviewers"
+# configured in repo Settings -> Environments. GitHub then pauses this job until an
+# approver signs off — that approval IS the conversion gate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no conversions)"
+        type: boolean
+        default: true
+      batch_size:
+        description: "Leads converted per Apex run"
+        type: number
+        default: 50
+      approved:
+        description: "Approved CSV path (blank = newest review/approved_*.csv)"
+        type: string
+        default: ""
+
+concurrency:
+  group: lead-automation-stage2
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    environment: lead-conversion   # required-reviewers gate; configure in repo settings
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global @salesforce/cli
+          sf --version
+
+      - name: Authenticate to Salesforce
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+        run: |
+          printf '%s' "$SFDX_AUTH_URL" > auth.txt
+          sf org login sfdx-url --sfdx-url-file auth.txt --alias headless --set-default
+          rm -f auth.txt
+
+      - name: Run Stage 2
+        env:
+          PYTHONPATH: src
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi
+          if [ -n "${{ inputs.batch_size }}" ]; then FLAGS="$FLAGS --batch-size ${{ inputs.batch_size }}"; fi
+          if [ -n "${{ inputs.approved }}" ]; then FLAGS="$FLAGS --approved ${{ inputs.approved }}"; fi
+          echo "Running: python -m leadauto stage2 $FLAGS"
+          python -m leadauto stage2 $FLAGS | tee stage2_log.txt
+
+      - name: Upload conversion log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-automation-stage2-log-${{ github.run_id }}
+          path: stage2_log.txt
+          if-no-files-found: warn

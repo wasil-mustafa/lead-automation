@@ -1,0 +1,237 @@
+"""LeadfeederClient tests.
+
+The pure flatteners (flatten_company / flatten_contact_details) are tested directly with
+canned API JSON — that's where the field-extraction bugs live. The HTTP-orchestrating
+methods (match, contact cascade, batch retrieve) are tested through a FakeSession that
+stands in for `requests.Session` (the unavoidable external boundary) and records calls.
+"""
+import pytest
+
+from leadauto.leadfeeder.client import (
+    LeadfeederClient,
+    LeadfeederError,
+    flatten_company,
+    flatten_contact_details,
+)
+
+
+class FakeResponse:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.exceptions.HTTPError(f"HTTP {self.status_code}", response=self)
+
+
+class FakeSession:
+    """Routes by (method, url-fragment). Values may be a payload dict, a queue (list,
+    popped per call), or a callable(params, body)->payload. Longest fragment wins."""
+
+    def __init__(self, routes):
+        self._routes = routes
+        self.calls = []  # (method, url, params, body)
+
+    def get(self, url, headers=None, params=None):
+        return self._respond("GET", url, params, None)
+
+    def post(self, url, headers=None, json=None, params=None):
+        return self._respond("POST", url, params, json)
+
+    def _respond(self, method, url, params, body):
+        self.calls.append((method, url, params, body))
+        candidates = sorted(
+            (r for r in self._routes if r[0] == method and r[1] in url),
+            key=lambda r: len(r[1]), reverse=True,
+        )
+        if not candidates:
+            return FakeResponse({"data": []})
+        value = self._routes[candidates[0]]
+        if callable(value):
+            return FakeResponse(value(params, body))
+        if isinstance(value, list):
+            return FakeResponse(value.pop(0) if value else {"data": []})
+        return FakeResponse(value)
+
+    def posts_to(self, fragment):
+        return [c for c in self.calls if c[0] == "POST" and fragment in c[1]]
+
+
+def _client(routes, seed_account=True, **kw):
+    kw.setdefault("request_delay", 0)
+    client = LeadfeederClient(api_key="k", session=FakeSession(routes), **kw)
+    if seed_account:
+        client._account_id = "acc1"  # skip the /accounts round-trip for focused tests
+    return client
+
+
+# --- construction ------------------------------------------------------------
+
+def test_missing_api_key_raises():
+    with pytest.raises(LeadfeederError):
+        LeadfeederClient(api_key="", session=FakeSession({}))
+
+
+# --- pure: flatten_company ---------------------------------------------------
+
+def test_flatten_company_extracts_nested_fields():
+    attrs = {
+        "url": "https://acme.de",
+        "phones": [{"number": "+49 30 123"}],
+        "emails": [{"address": "info@acme.de"}],
+        "address": {"street_address": "Hauptstr 1", "postal_code": "10115",
+                    "city": "Berlin", "country": "Germany"},
+        "employee_count": 42, "employee_range": "11-50",
+        "industries": {"industry": [{"name": "Software"}, {"name": "IT"}]},
+        "revenue": {"value": 5, "currency": "EUR"},
+        "vat_id": "DE123456789",
+        "register": {"id": "HRB 1234", "status": "active"},
+        "social_media_profiles": {"linkedin": [{"url": "https://linkedin.com/company/acme"}]},
+        "description": "Line one\nLine two",
+    }
+    out = flatten_company(attrs)
+    assert out["Website"] == "https://acme.de"
+    assert out["Company_Phone"] == "+49 30 123"
+    assert out["Company_Email"] == "info@acme.de"
+    assert out["Street"] == "Hauptstr 1"
+    assert out["Postal_Code"] == "10115"
+    assert out["City"] == "Berlin"
+    assert out["Industry"] == "Software; IT"
+    assert out["VAT_Id"] == "DE123456789"
+    assert out["Register_Id"] == "HRB 1234"
+    assert out["Company_LinkedIn"] == "https://linkedin.com/company/acme"
+    assert "\n" not in out["Description"] and out["Description"] == "Line one Line two"
+
+
+def test_flatten_company_tolerates_empty_attrs():
+    out = flatten_company({})
+    assert out["Website"] == "" and out["VAT_Id"] == "" and out["Industry"] == ""
+
+
+# --- pure: flatten_contact_details -------------------------------------------
+
+def test_flatten_contact_prioritizes_direct_over_mobile_and_office():
+    attrs = {
+        "position": {"title": "CEO"},
+        "emails": [{"address": "a@x.de"}, {"address": "b@x.de"}],
+        "phones": [
+            {"number": "111", "type": "Office"},
+            {"number": "222", "type": "Mobile"},
+            {"number": "333", "type": "Direct Dial"},
+            {"number": "999", "type": "Fax"},                 # excluded
+            {"number": "000", "type": "Mobile", "blacklisted": True},  # excluded
+        ],
+        "social_media_profiles": {
+            "linkedin": [{"url": "https://linkedin.com/in/x"}],
+            "xing": [{"url": "https://xing.com/x"}],
+        },
+        "departments": ["Sales", "Management"],
+        "hierarchy_level": "c_level",
+    }
+    out = flatten_contact_details(attrs)
+    assert out["position"] == "CEO"
+    assert out["contact_emails"] == "a@x.de; b@x.de"
+    assert out["phone_direct"] == "333"
+    assert out["phone_mobile"] == "222"
+    assert out["phone_office"] == "111"
+    assert out["best_contact_phone"] == "333"          # direct wins
+    assert "999" not in out["phones_all"]               # fax dropped
+    assert "000" not in out["phones_all"]               # blacklisted dropped
+    assert out["contact_linkedin"] == "https://linkedin.com/in/x"
+    assert out["contact_xing"] == "https://xing.com/x"
+    assert out["departments"] == "Sales; Management"
+    assert out["hierarchy_level"] == "c_level"
+
+
+def test_flatten_contact_falls_back_to_first_phone_when_no_typed_match():
+    attrs = {"phones": [{"number": "555", "type": "switchboard"}]}
+    out = flatten_contact_details(attrs)
+    assert out["best_contact_phone"] == "555"
+
+
+# --- match_company -----------------------------------------------------------
+
+def _match_payload(matches):
+    return {"data": [[
+        {"id": m[0], "attributes": {"match_score": m[1]},
+         "relationships": {"company_summary": {"attributes": {"name": m[2]}}}}
+        for m in matches
+    ]]}
+
+
+def test_match_company_picks_highest_score_above_threshold():
+    routes = {("POST", "/companies/match"):
+              _match_payload([("c1", 0.62, "Low"), ("c2", 0.95, "Acme GmbH")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_company("Acme", email="x@acme.de", country="Germany", country_code="DE")
+    assert match == {"company_id": "c2", "match_score": 0.95, "matched_name": "Acme GmbH"}
+
+
+def test_match_company_returns_none_below_threshold():
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.50, "Low")])}
+    client = _client(routes, min_match_score=0.70)
+    assert client.match_company("Acme") is None
+
+
+def test_match_company_returns_none_when_no_matches():
+    routes = {("POST", "/companies/match"): {"data": [[]]}}
+    assert _client(routes).match_company("Acme") is None
+
+
+# --- search_contact cascade --------------------------------------------------
+
+def test_search_contact_returns_first_hit_on_full_name():
+    routes = {("POST", "/contacts/search"):
+              {"data": [{"id": "k1", "attributes": {"full_name": "Jane Doe"}}]}}
+    client = _client(routes)
+    assert client.search_contact("Jane Doe", "c1") == {"contact_id": "k1", "full_name": "Jane Doe"}
+    assert len(client.session.posts_to("/contacts/search")) == 1  # no further attempts
+
+
+def test_search_contact_cascades_to_split_name():
+    # attempt 1 (full name) empty -> attempt 2 (split) hits
+    routes = {("POST", "/contacts/search"):
+              [{"data": []}, {"data": [{"id": "k9", "attributes": {"full_name": "Jane Doe"}}]}]}
+    client = _client(routes)
+    result = client.search_contact("Jane Doe", "c1")
+    assert result["contact_id"] == "k9"
+    assert len(client.session.posts_to("/contacts/search")) == 2
+
+
+def test_search_contact_returns_none_when_all_attempts_empty():
+    routes = {("POST", "/contacts/search"):
+              [{"data": []}, {"data": []}, {"data": []}, {"data": []}]}
+    client = _client(routes)
+    assert client.search_contact("Jane Doe", "c1") is None
+
+
+# --- get_account_id ----------------------------------------------------------
+
+def test_get_account_id_caches():
+    routes = {("GET", "/accounts"):
+              {"data": [{"id": "acc1", "attributes": {"name": "kununu"}}]}}
+    client = _client(routes, seed_account=False)
+    assert client.get_account_id() == "acc1"
+    assert client.get_account_id() == "acc1"  # cached: no second /accounts call
+    assert len([c for c in client.session.calls if "/accounts" in c[1]]) == 1
+
+
+# --- retrieve_companies batching --------------------------------------------
+
+def test_retrieve_companies_batches_by_retrieve_batch():
+    def companies(params, body):
+        ids = params["ids"].split(",")
+        return {"data": [{"id": i, "attributes": {"url": f"{i}.de"}} for i in ids]}
+
+    routes = {("GET", "/companies"): companies}
+    client = _client(routes, retrieve_batch=2)
+    enriched = client.retrieve_companies(["c1", "c2", "c3"])
+    assert set(enriched) == {"c1", "c2", "c3"}
+    assert enriched["c1"]["url"] == "c1.de"
+    gets = [c for c in client.session.calls if c[0] == "GET" and "/companies" in c[1]]
+    assert len(gets) == 2  # ceil(3 / 2)

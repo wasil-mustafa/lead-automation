@@ -1,0 +1,7 @@
+requests>=2.31
+openpyxl>=3.1
+rapidfuzz>=3.6
+pyyaml>=6.0
+python-dotenv>=1.0
+typer>=0.12
+pytest>=8.0

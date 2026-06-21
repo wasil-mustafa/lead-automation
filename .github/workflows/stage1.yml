@@ -1,0 +1,95 @@
+name: Lead Automation — Stage 1 (enrich + stage)
+
+# Extract new Leads -> enrich (LeadFeeder) -> match vs existing Accounts/Contacts ->
+# write enrichment back to KN_* fields -> upload the QA artifact for human review.
+# No conversion happens here (that is Stage 2, gated). The watermark is advanced and
+# committed back to the repo so the next run resumes where this one stopped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no Salesforce writes)"
+        type: boolean
+        default: true
+      limit:
+        description: "LIMIT-scope the task scan (0 = unlimited)"
+        type: number
+        default: 0
+      leadfeeder:
+        description: "Use LeadFeeder enrichment (uncheck to skip credits)"
+        type: boolean
+        default: true
+  schedule:
+    # Weekday mornings, 06:00 UTC. GitHub cron is UTC and ignores DST.
+    - cron: "0 6 * * 1-5"
+
+# Never let two enrich runs overlap (they share the watermark file).
+concurrency:
+  group: lead-automation-stage1
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # commit the advanced watermark
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global @salesforce/cli
+          sf --version
+
+      - name: Authenticate to Salesforce
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}   # secret -> env, never inlined
+        run: |
+          printf '%s' "$SFDX_AUTH_URL" > auth.txt
+          sf org login sfdx-url --sfdx-url-file auth.txt --alias headless --set-default
+          rm -f auth.txt
+
+      - name: Run Stage 1
+        env:
+          PYTHONPATH: src
+          LEADFEEDER_API_KEY: ${{ secrets.LEADFEEDER_API_KEY }}
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi
+          if [ "${{ inputs.leadfeeder }}" = "false" ]; then FLAGS="$FLAGS --no-leadfeeder"; fi
+          LIMIT="${{ inputs.limit }}"
+          if [ -n "$LIMIT" ] && [ "$LIMIT" -gt 0 ] 2>/dev/null; then FLAGS="$FLAGS --limit $LIMIT"; fi
+          echo "Running: python -m leadauto stage1 $FLAGS"
+          python -m leadauto stage1 $FLAGS --qa-path qa_artifact.xlsx
+
+      - name: Upload QA artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-automation-qa-${{ github.run_id }}
+          path: qa_artifact.xlsx
+          if-no-files-found: warn
+
+      - name: Commit advanced watermark
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/watermark.json
+          if git diff --cached --quiet; then
+            echo "No watermark change to commit."
+          else
+            git commit -m "chore: advance lead-automation watermark [skip ci]"
+            git push
+          fi

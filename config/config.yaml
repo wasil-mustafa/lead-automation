@@ -1,0 +1,40 @@
+# Lead Automation — non-secret configuration.
+# Secrets (SF_AUTH_URL, LEADFEEDER_API_KEY) come from env / GitHub Secrets, never here.
+
+salesforce:
+  org_alias: headless
+  api_version: "66.0"
+  converted_status: Qualified
+  # Owner to assign converted leads to. Reconcile with the real integration user.
+  owner_id: "005Mz00000XvtQzIAJ"
+  # Optional campaign tagging (currently inactive in the org; leave null to skip).
+  campaign_id: null
+
+leadfeeder:
+  base_url: "https://api.leadfeeder.com/v1"
+  company_list_name: "Lead_Automation"
+  contact_list_name: "Lead_Automation"
+
+# Task Subjects the pipeline processes, mapped to their parser key.
+# Subjects not listed here are left for humans (e.g. Kontaktanfrage) or ignored (Ecom).
+task_types:
+  "Inbound Sales Task: New Claimed Profile": claimer
+  "Inbound Sales Task: EBP Trial": ebp_trial
+  "Inbound Sales Task: Eventteilnahme": event
+  "Inbound Sales Task: Whitepaper Download": content
+  "Inbound Sales Task: Video Download": content
+
+# Which parser keys are currently enabled (phased rollout). Start with claimer only.
+enabled_task_types:
+  - claimer
+
+matching:
+  lf_min_match_score: 0.70   # LeadFeeder company-match floor
+  auto_link_threshold: 0.90  # >= : link to existing Account/Contact
+  review_threshold: 0.60     # [review, auto_link): flag for review; < review: create new
+
+pipeline:
+  review_gate: true          # master toggle; false => auto-convert
+  dry_run: false             # true => no SF writes/conversions
+  batch_limit: 0             # 0 = unlimited; >0 = LIMIT-scoped
+  task_lookback_days: 35     # overlap window around the watermark
