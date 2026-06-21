@@ -16,7 +16,7 @@ import requests
 
 from ..extract.models import ExtractedLead
 from ..logging import get_logger
-from .client import flatten_company
+from .client import flatten_company, flatten_contact_details
 
 
 @dataclass
@@ -87,7 +87,8 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
         for r in matched:
             r.company = flatten_company(enriched.get(r.lf_company_id, {}))
 
-    # Phase 3 — contact cascade for matched leads that carry a name (1 credit each).
+    # Phase 3 — contact search cascade (free), then ONE batched detail retrieve (1 credit each).
+    search_hits: list[tuple[EnrichedLead, dict]] = []
     for r in matched:
         name = _contact_name(r.extracted)
         if not name:
@@ -97,20 +98,21 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
         except requests.exceptions.HTTPError as err:
             log.warning("Contact search failed for %r: %s", name, err)
             continue
-        if not cmatch:
-            continue
-        try:
-            details = client.get_contact_details(cmatch["contact_id"])
-        except requests.exceptions.HTTPError as err:
-            log.warning("Contact details failed for %s: %s", cmatch["contact_id"], err)
-            details = {}
+        if cmatch:
+            search_hits.append((r, cmatch))
+
+    details_by_id = (client.retrieve_contacts([c["contact_id"] for _, c in search_hits])
+                     if search_hits else {})
+
+    for r, cmatch in search_hits:
+        cid = cmatch["contact_id"]
+        details = flatten_contact_details(details_by_id.get(cid, {}))
         r.contact_found = True
-        r.contact = {**details, "contact_id": cmatch["contact_id"],
-                     "full_name": cmatch.get("full_name", "")}
+        r.contact = {**details, "contact_id": cid, "full_name": cmatch.get("full_name", "")}
         try:
-            client.add_contact_to_list(cmatch["contact_id"], contact_list_id)
-        except requests.exceptions.HTTPError:
-            pass
+            client.add_contact_to_list(cid, contact_list_id)
+        except requests.exceptions.HTTPError as err:
+            log.warning("add_contact_to_list failed for %s: %s", cid, err)
 
     log.info("LeadFeeder: %d/%d matched, %d contact(s) found",
              len(matched), len(results), sum(1 for r in results if r.contact_found))
