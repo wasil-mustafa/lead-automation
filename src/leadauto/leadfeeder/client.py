@@ -259,7 +259,7 @@ class LeadfeederClient:
                     "/companies/match", payload={"companies": chunk},
                     params={"account_id": account_id, "max_results_per_company": 3},
                 )
-            except requests.exceptions.HTTPError as e:
+            except requests.exceptions.RequestException as e:
                 self.log.warning("Company match chunk failed (%d companies): %s", len(chunk), e)
                 results.extend([None] * len(chunk))
                 continue
