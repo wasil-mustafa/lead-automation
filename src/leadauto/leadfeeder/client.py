@@ -16,6 +16,7 @@ import requests
 from ..logging import get_logger
 
 DEFAULT_BASE_URL = "https://api.leadfeeder.com/v1"
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _PHONE_EXCLUDE_TYPES = {"fax"}
 
 
@@ -122,9 +123,14 @@ class LeadfeederClient:
         api_key: str | None,
         base_url: str = DEFAULT_BASE_URL,
         session=None,
-        request_delay: float = 0.05,
         min_match_score: float = 0.70,
-        retrieve_batch: int = 20,
+        retrieve_batch: int = 100,
+        match_batch: int = 200,
+        max_requests_per_min: int = 95,
+        max_retries: int = 4,
+        backoff_base: float = 1.0,
+        sleep_fn=time.sleep,
+        clock=time.monotonic,
         logger=None,
     ):
         if not api_key:
@@ -132,9 +138,15 @@ class LeadfeederClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
-        self.request_delay = request_delay
         self.min_match_score = min_match_score
         self.retrieve_batch = retrieve_batch
+        self.match_batch = match_batch
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self._sleep_fn = sleep_fn
+        self._clock = clock
+        self._min_interval = 60.0 / max_requests_per_min if max_requests_per_min else 0.0
+        self._last_request_at = 0.0
         self.log = logger or get_logger("leadfeeder")
         self._account_id: str | None = None
 
@@ -142,21 +154,46 @@ class LeadfeederClient:
     def _headers(self) -> dict:
         return {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
 
+    def _throttle(self) -> None:
+        if self._min_interval <= 0:
+            return
+        wait = self._last_request_at + self._min_interval - self._clock()
+        if wait > 0:
+            self._sleep_fn(wait)
+        self._last_request_at = self._clock()
+
+    def _retry_delay(self, resp, attempt: int) -> float:
+        retry_after = (getattr(resp, "headers", None) or {}).get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except (TypeError, ValueError):
+                pass
+        return self.backoff_base * (2 ** attempt)
+
+    def _request(self, kind: str, path: str, *, params=None, json=None) -> dict:
+        url = f"{self.base_url}{path}"
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            if kind == "GET":
+                resp = self.session.get(url, headers=self._headers(), params=params)
+            else:
+                resp = self.session.post(url, headers=self._headers(), json=json, params=params)
+            status = getattr(resp, "status_code", 200)
+            if status in RETRYABLE_STATUS and attempt < self.max_retries:
+                delay = self._retry_delay(resp, attempt)
+                self.log.warning("LeadFeeder %s %s -> %s; retry %d/%d in %.1fs",
+                                 kind, path, status, attempt + 1, self.max_retries, delay)
+                self._sleep_fn(delay)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+
     def api_get(self, path: str, params=None) -> dict:
-        resp = self.session.get(f"{self.base_url}{path}", headers=self._headers(), params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", path, params=params)
 
     def api_post(self, path: str, payload, params=None) -> dict:
-        resp = self.session.post(
-            f"{self.base_url}{path}", headers=self._headers(), json=payload, params=params
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def _sleep(self) -> None:
-        if self.request_delay:
-            time.sleep(self.request_delay)
+        return self._request("POST", path, params=params, json=payload)
 
     # -- account / lists --
     def get_account_id(self) -> str:
@@ -236,12 +273,10 @@ class LeadfeederClient:
 
         # Attempt 2: split into separate terms
         if not contacts and len(parts) > 1:
-            self._sleep()
             contacts = _post(parts)
 
         # Attempt 3: last name only, then verify first name locally
         if not contacts and len(parts) > 1:
-            self._sleep()
             candidates = _post([parts[-1]])
             filtered = [c for c in candidates
                         if parts[0].lower() in (c.get("attributes", {}).get("full_name", "") or "").lower()]
@@ -249,7 +284,6 @@ class LeadfeederClient:
 
         # Attempt 4: browse the company's contacts, match all parts locally
         if not contacts:
-            self._sleep()
             try:
                 resp = self.api_post("/contacts/search", payload={"company_ids": [company_id]},
                                      params={"account_id": account_id, "page[size]": 50})
@@ -287,5 +321,4 @@ class LeadfeederClient:
                     enriched[company["id"]] = company.get("attributes", {})
             except requests.exceptions.HTTPError as e:
                 self.log.warning("Company retrieve batch failed: %s", e)
-            self._sleep()
         return enriched

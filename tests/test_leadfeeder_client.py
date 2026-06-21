@@ -16,9 +16,10 @@ from leadauto.leadfeeder.client import (
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self._payload = payload
         self.status_code = status
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -53,17 +54,18 @@ class FakeSession:
             return FakeResponse({"data": []})
         value = self._routes[candidates[0]]
         if callable(value):
-            return FakeResponse(value(params, body))
-        if isinstance(value, list):
-            return FakeResponse(value.pop(0) if value else {"data": []})
-        return FakeResponse(value)
+            value = value(params, body)
+        elif isinstance(value, list):
+            value = value.pop(0) if value else {"data": []}
+        return value if isinstance(value, FakeResponse) else FakeResponse(value)
 
     def posts_to(self, fragment):
         return [c for c in self.calls if c[0] == "POST" and fragment in c[1]]
 
 
 def _client(routes, seed_account=True, **kw):
-    kw.setdefault("request_delay", 0)
+    kw.setdefault("max_requests_per_min", 0)    # throttle off unless a test opts in
+    kw.setdefault("sleep_fn", lambda *_: None)   # never actually sleep in tests
     client = LeadfeederClient(api_key="k", session=FakeSession(routes), **kw)
     if seed_account:
         client._account_id = "acc1"  # skip the /accounts round-trip for focused tests
@@ -235,3 +237,43 @@ def test_retrieve_companies_batches_by_retrieve_batch():
     assert enriched["c1"]["url"] == "c1.de"
     gets = [c for c in client.session.calls if c[0] == "GET" and "/companies" in c[1]]
     assert len(gets) == 2  # ceil(3 / 2)
+
+
+# --- transport: throttle + retry ---------------------------------------------
+
+def test_throttle_spaces_consecutive_requests():
+    sleeps = []
+    client = LeadfeederClient(
+        api_key="k", session=FakeSession({}),
+        max_requests_per_min=120, sleep_fn=sleeps.append, clock=lambda: 1000.0,
+    )
+    client._account_id = "acc1"
+    client.api_get("/x")
+    client.api_get("/x")
+    assert sleeps == [0.5]  # 60/120s between back-to-back calls; first call un-delayed
+
+
+def test_retries_on_429_then_succeeds():
+    sleeps = []
+    routes = {("GET", "/companies"): [
+        FakeResponse({}, status=429, headers={"Retry-After": "2"}),
+        FakeResponse({"data": [{"id": "c1", "attributes": {"url": "x.de"}}]}),
+    ]}
+    client = _client(routes, sleep_fn=sleeps.append)
+    out = client.api_get("/companies", params={"ids": "c1"})
+    assert out["data"][0]["id"] == "c1"
+    assert sleeps == [2.0]  # honored Retry-After
+
+
+def test_429_exhausts_retries_and_raises():
+    import requests
+    routes = {("GET", "/companies"): [FakeResponse({}, status=429) for _ in range(10)]}
+    client = _client(routes, max_retries=2)
+    with pytest.raises(requests.exceptions.HTTPError):
+        client.api_get("/companies")
+
+
+def test_retries_on_500_without_retry_after_header():
+    routes = {("GET", "/x"): [FakeResponse({}, status=500), FakeResponse({"data": []})]}
+    client = _client(routes)
+    assert client.api_get("/x") == {"data": []}
