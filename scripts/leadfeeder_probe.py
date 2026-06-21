@@ -30,7 +30,8 @@ def main() -> int:
     )
 
     print(f"Account: {client.get_account_id()}")
-    [match] = client.match_companies([{"company_name": company, "country_code": country_code}])
+    results = client.match_companies([{"company_name": company, "country_code": country_code}])
+    match = results[0] if results else None
     print(f"Match: {match}")
     if not match:
         print("No company match; stopping (search/retrieve need a company id).")

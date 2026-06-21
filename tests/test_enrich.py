@@ -4,6 +4,7 @@ A FakeClient stubs the LeadfeederClient methods so the real orchestration logic 
 exercised: mapping ExtractedLead -> match args, matched/unmatched split, single batched
 company retrieve, and contact assembly with lead-field fallbacks.
 """
+import requests
 from leadauto.config import Settings
 from leadauto.extract.models import ExtractedLead
 from leadauto.leadfeeder.enrich import EnrichedLead, enrich_leads
@@ -162,7 +163,6 @@ def test_enrich_matches_all_companies_in_one_call():
 
 
 def test_enrich_add_company_to_list_error_is_non_fatal():
-    import requests
     fc = FakeClient()
     fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
     fc.company_attrs = {"c1": {}}
@@ -198,7 +198,6 @@ def test_enrich_retrieves_all_contacts_in_one_call():
 
 
 def test_enrich_add_contact_to_list_error_is_non_fatal():
-    import requests
     fc = FakeClient()
     fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
     fc.company_attrs = {"c1": {}}
