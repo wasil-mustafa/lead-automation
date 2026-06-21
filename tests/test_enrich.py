@@ -151,7 +151,25 @@ def test_enrich_matches_all_companies_in_one_call():
     fc.company_attrs = {"c1": {}, "c2": {}}
     e1 = _extracted(company="Acme GmbH", contact_name=None)
     e2 = _extracted(company="Beta AG", contact_name=None, lead_id="00Q2", task_id="T2")
-    enrich_leads(fc, [e1, e2], SETTINGS)
+    results = enrich_leads(fc, [e1, e2], SETTINGS)
     match_calls = [c for c in fc.calls if c[0] == "match_companies"]
     assert len(match_calls) == 1
     assert {t[0] for t in match_calls[0][1]} == {"Acme GmbH", "Beta AG"}
+    assert results[0].lf_company_id == "c1"
+    assert results[1].lf_company_id == "c2"
+
+
+def test_enrich_add_company_to_list_error_is_non_fatal():
+    import requests
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+
+    def boom(company_id, list_id):
+        fc.calls.append(("add_company", company_id, list_id))
+        raise requests.exceptions.HTTPError("boom")
+
+    fc.add_company_to_list = boom
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS)
+    assert r.matched is True          # add-to-list error suppressed; lead still enriched
+    assert r.lf_company_id == "c1"
