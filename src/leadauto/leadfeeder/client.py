@@ -16,6 +16,7 @@ import requests
 from ..logging import get_logger
 
 DEFAULT_BASE_URL = "https://api.leadfeeder.com/v1"
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _PHONE_EXCLUDE_TYPES = {"fax"}
 
 
@@ -122,9 +123,14 @@ class LeadfeederClient:
         api_key: str | None,
         base_url: str = DEFAULT_BASE_URL,
         session=None,
-        request_delay: float = 0.05,
         min_match_score: float = 0.70,
-        retrieve_batch: int = 20,
+        retrieve_batch: int = 100,
+        match_batch: int = 200,
+        max_requests_per_min: int = 95,
+        max_retries: int = 4,
+        backoff_base: float = 1.0,
+        sleep_fn=time.sleep,
+        clock=time.monotonic,
         logger=None,
     ):
         if not api_key:
@@ -132,9 +138,15 @@ class LeadfeederClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
-        self.request_delay = request_delay
         self.min_match_score = min_match_score
         self.retrieve_batch = retrieve_batch
+        self.match_batch = match_batch
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self._sleep_fn = sleep_fn
+        self._clock = clock
+        self._min_interval = 60.0 / max_requests_per_min if max_requests_per_min else 0.0
+        self._last_request_at = 0.0
         self.log = logger or get_logger("leadfeeder")
         self._account_id: str | None = None
 
@@ -142,21 +154,48 @@ class LeadfeederClient:
     def _headers(self) -> dict:
         return {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
 
+    def _throttle(self) -> None:
+        if self._min_interval <= 0:
+            return
+        wait = self._last_request_at + self._min_interval - self._clock()
+        if wait > 0:
+            self._sleep_fn(wait)
+        # record the post-sleep timestamp so pacing reflects when this request actually fires
+        self._last_request_at = self._clock()
+
+    def _retry_delay(self, resp, attempt: int) -> float:
+        retry_after = (getattr(resp, "headers", None) or {}).get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except (TypeError, ValueError):
+                pass
+        return self.backoff_base * (2 ** attempt)
+
+    def _request(self, kind: str, path: str, *, params=None, json=None) -> dict:
+        url = f"{self.base_url}{path}"
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            if kind == "GET":
+                resp = self.session.get(url, headers=self._headers(), params=params)
+            else:
+                resp = self.session.post(url, headers=self._headers(), json=json, params=params)
+            status = getattr(resp, "status_code", 200)
+            if status in RETRYABLE_STATUS and attempt < self.max_retries:
+                delay = self._retry_delay(resp, attempt)
+                self.log.warning("LeadFeeder %s %s -> %s; retry %d/%d in %.1fs",
+                                 kind, path, status, attempt + 1, self.max_retries, delay)
+                self._sleep_fn(delay)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        raise LeadfeederError(f"LeadFeeder {kind} {path} exhausted retries without a response")
+
     def api_get(self, path: str, params=None) -> dict:
-        resp = self.session.get(f"{self.base_url}{path}", headers=self._headers(), params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", path, params=params)
 
     def api_post(self, path: str, payload, params=None) -> dict:
-        resp = self.session.post(
-            f"{self.base_url}{path}", headers=self._headers(), json=payload, params=params
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def _sleep(self) -> None:
-        if self.request_delay:
-            time.sleep(self.request_delay)
+        return self._request("POST", path, params=params, json=payload)
 
     # -- account / lists --
     def get_account_id(self) -> str:
@@ -192,18 +231,8 @@ class LeadfeederClient:
         self.log.info("Created LeadFeeder list %r (%s)", name, list_id)
         return list_id
 
-    # -- company match --
-    def match_company(self, company_name: str, email: str | None = None,
-                      country: str | None = None, country_code: str | None = None) -> dict | None:
-        account_id = self.get_account_id()
-        payload = {"company_name": company_name, "email": email or ""}
-        if country:
-            payload["country"] = country
-        if country_code:
-            payload["country_code"] = country_code
-        data = self.api_post("/companies/match", payload={"companies": [payload]},
-                             params={"account_id": account_id, "max_results_per_company": 3})
-        matches = (data.get("data", []) or [[]])[0]
+    # -- company match (batched) --
+    def _best_match(self, matches: list) -> dict | None:
         if not matches:
             return None
         best = max(matches, key=lambda m: m.get("attributes", {}).get("match_score", 0))
@@ -213,6 +242,41 @@ class LeadfeederClient:
         summary = best.get("relationships", {}).get("company_summary", {}).get("attributes", {})
         return {"company_id": best["id"], "match_score": score,
                 "matched_name": summary.get("name", "")}
+
+    def match_companies(self, payloads: list[dict]) -> list[dict | None]:
+        """Batch company match (free). `payloads` is a list of per-company dicts
+        (company_name, email, country, country_code, ...). Returns a list aligned to
+        `payloads`: {company_id, match_score, matched_name} or None per company. A chunk
+        that errors after retries degrades its entries to None (logged), never raising."""
+        if not payloads:
+            return []
+        account_id = self.get_account_id()
+        results: list[dict | None] = []
+        for i in range(0, len(payloads), self.match_batch):
+            chunk = payloads[i:i + self.match_batch]
+            try:
+                data = self.api_post(
+                    "/companies/match", payload={"companies": chunk},
+                    params={"account_id": account_id, "max_results_per_company": 3},
+                )
+            except requests.exceptions.RequestException as e:
+                self.log.warning("Company match chunk failed (%d companies): %s", len(chunk), e)
+                results.extend([None] * len(chunk))
+                continue
+            per_company = data.get("data", []) or []
+            for j in range(len(chunk)):
+                matches = per_company[j] if j < len(per_company) else []
+                results.append(self._best_match(matches))
+        return results
+
+    def match_company(self, company_name: str, email: str | None = None,
+                      country: str | None = None, country_code: str | None = None) -> dict | None:
+        payload = {"company_name": company_name, "email": email or ""}
+        if country:
+            payload["country"] = country
+        if country_code:
+            payload["country_code"] = country_code
+        return self.match_companies([payload])[0]
 
     def add_company_to_list(self, company_id: str, list_id: str) -> None:
         self.api_post(f"/companies/{company_id}/lists",
@@ -236,12 +300,10 @@ class LeadfeederClient:
 
         # Attempt 2: split into separate terms
         if not contacts and len(parts) > 1:
-            self._sleep()
             contacts = _post(parts)
 
         # Attempt 3: last name only, then verify first name locally
         if not contacts and len(parts) > 1:
-            self._sleep()
             candidates = _post([parts[-1]])
             filtered = [c for c in candidates
                         if parts[0].lower() in (c.get("attributes", {}).get("full_name", "") or "").lower()]
@@ -249,7 +311,6 @@ class LeadfeederClient:
 
         # Attempt 4: browse the company's contacts, match all parts locally
         if not contacts:
-            self._sleep()
             try:
                 resp = self.api_post("/contacts/search", payload={"company_ids": [company_id]},
                                      params={"account_id": account_id, "page[size]": 50})
@@ -266,9 +327,26 @@ class LeadfeederClient:
         c = contacts[0]
         return {"contact_id": c["id"], "full_name": c.get("attributes", {}).get("full_name", "")}
 
+    def retrieve_contacts(self, contact_ids: list[str]) -> dict[str, dict]:
+        """Batch-retrieve contact `attributes` keyed by contact id (chunked, max 100/call).
+        1 credit per contact not accessed in the last 12 months. Per-chunk errors isolated."""
+        if not contact_ids:
+            return {}
+        account_id = self.get_account_id()
+        out: dict[str, dict] = {}
+        for i in range(0, len(contact_ids), self.retrieve_batch):
+            batch = contact_ids[i:i + self.retrieve_batch]
+            try:
+                data = self.api_get("/contacts", params={"ids": ",".join(batch), "account_id": account_id})
+                for contact in data.get("data", []) or []:
+                    out[contact["id"]] = contact.get("attributes", {})
+            except requests.exceptions.RequestException as e:
+                self.log.warning("Contact retrieve batch failed: %s", e)
+        return out
+
     def get_contact_details(self, contact_id: str) -> dict:
-        data = self.api_get(f"/contacts/{contact_id}", params={"account_id": self.get_account_id()})
-        return flatten_contact_details(data.get("data", {}).get("attributes", {}))
+        attrs = self.retrieve_contacts([contact_id]).get(contact_id, {})
+        return flatten_contact_details(attrs)
 
     def add_contact_to_list(self, contact_id: str, list_id: str) -> None:
         self.api_post(f"/contacts/{contact_id}/lists",
@@ -285,7 +363,6 @@ class LeadfeederClient:
                 data = self.api_get("/companies", params={"ids": ",".join(batch), "account_id": account_id})
                 for company in data.get("data", []):
                     enriched[company["id"]] = company.get("attributes", {})
-            except requests.exceptions.HTTPError as e:
+            except requests.exceptions.RequestException as e:
                 self.log.warning("Company retrieve batch failed: %s", e)
-            self._sleep()
         return enriched

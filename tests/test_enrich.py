@@ -4,6 +4,7 @@ A FakeClient stubs the LeadfeederClient methods so the real orchestration logic 
 exercised: mapping ExtractedLead -> match args, matched/unmatched split, single batched
 company retrieve, and contact assembly with lead-field fallbacks.
 """
+import requests
 from leadauto.config import Settings
 from leadauto.extract.models import ExtractedLead
 from leadauto.leadfeeder.enrich import EnrichedLead, enrich_leads
@@ -16,7 +17,7 @@ class FakeClient:
         self.match_by_name: dict = {}     # company_name -> match dict | None
         self.company_attrs: dict = {}     # lf_company_id -> raw attrs
         self.contact_by_name: dict = {}   # name -> {contact_id, full_name} | None
-        self.contact_details: dict = {}   # contact_id -> flattened details
+        self.contact_attrs: dict = {}     # contact_id -> raw LF attributes
         self.calls: list = []
 
     def get_account_id(self):
@@ -27,9 +28,11 @@ class FakeClient:
         self.calls.append(("list", name, scope))
         return f"{scope}-list"
 
-    def match_company(self, company_name, email=None, country=None, country_code=None):
-        self.calls.append(("match", company_name, email, country, country_code))
-        return self.match_by_name.get(company_name)
+    def match_companies(self, payloads):
+        self.calls.append(("match_companies", tuple(
+            (p["company_name"], p.get("email"), p.get("country"), p.get("country_code"))
+            for p in payloads)))
+        return [self.match_by_name.get(p["company_name"]) for p in payloads]
 
     def add_company_to_list(self, company_id, list_id):
         self.calls.append(("add_company", company_id, list_id))
@@ -42,9 +45,9 @@ class FakeClient:
         self.calls.append(("search", name, company_id))
         return self.contact_by_name.get(name)
 
-    def get_contact_details(self, contact_id):
-        self.calls.append(("details", contact_id))
-        return self.contact_details.get(contact_id, {})
+    def retrieve_contacts(self, ids):
+        self.calls.append(("retrieve_contacts", tuple(ids)))
+        return {i: self.contact_attrs.get(i, {}) for i in ids}
 
     def add_contact_to_list(self, contact_id, list_id):
         self.calls.append(("add_contact", contact_id, list_id))
@@ -66,7 +69,8 @@ def test_enrich_matched_with_contact():
     fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.95, "matched_name": "Acme GmbH"}}
     fc.company_attrs = {"c1": {"url": "https://acme.de", "vat_id": "DE123"}}
     fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
-    fc.contact_details = {"k1": {"position": "CEO", "contact_linkedin": "https://li/x"}}
+    fc.contact_attrs = {"k1": {"position": {"title": "CEO"},
+                              "social_media_profiles": {"linkedin": [{"url": "https://li/x"}]}}}
 
     [r] = enrich_leads(fc, [_extracted()], SETTINGS)
     assert isinstance(r, EnrichedLead)
@@ -77,7 +81,8 @@ def test_enrich_matched_with_contact():
     assert r.contact_found is True
     assert r.contact["position"] == "CEO"
     assert r.contact["contact_id"] == "k1"
-    assert ("match", "Acme GmbH", "jane@acme.de", "Germany", "DE") in fc.calls
+    assert r.contact["contact_linkedin"] == "https://li/x"
+    assert ("match_companies", (("Acme GmbH", "jane@acme.de", "Germany", "DE"),)) in fc.calls
     assert ("add_company", "c1", "company-list") in fc.calls
     assert ("add_contact", "k1", "contact-list") in fc.calls
 
@@ -106,7 +111,7 @@ def test_enrich_no_company_name_skips_match_entirely():
     fc = FakeClient()
     [r] = enrich_leads(fc, [_extracted(company=None, lead_company=None)], SETTINGS)
     assert r.matched is False
-    assert not any(c[0] == "match" for c in fc.calls)
+    assert not any(c[0] == "match_companies" for c in fc.calls)
 
 
 def test_enrich_retrieves_all_matched_companies_in_one_call():
@@ -131,10 +136,78 @@ def test_enrich_uses_lead_field_fallbacks():
     fc.match_by_name = {"Lead Co": {"company_id": "c1", "match_score": 0.9, "matched_name": "Lead Co"}}
     fc.company_attrs = {"c1": {}}
     fc.contact_by_name = {"John Smith": {"contact_id": "k1", "full_name": "John Smith"}}
-    fc.contact_details = {"k1": {"position": "Mgr"}}
+    fc.contact_attrs = {"k1": {"position": {"title": "Mgr"}}}
     e = _extracted(company=None, lead_company="Lead Co", contact_name=None,
                    first="John", last="Smith", contact_email=None, lead_email="john@lead.co")
     [r] = enrich_leads(fc, [e], SETTINGS)
-    assert ("match", "Lead Co", "john@lead.co", "Germany", "DE") in fc.calls  # lead_company + lead_email
+    assert ("match_companies", (("Lead Co", "john@lead.co", "Germany", "DE"),)) in fc.calls  # lead_company + lead_email
     assert ("search", "John Smith", "c1") in fc.calls                        # first+last fallback
     assert r.contact_found is True
+
+
+def test_enrich_matches_all_companies_in_one_call():
+    fc = FakeClient()
+    fc.match_by_name = {
+        "Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"},
+        "Beta AG": {"company_id": "c2", "match_score": 0.9, "matched_name": "Beta AG"},
+    }
+    fc.company_attrs = {"c1": {}, "c2": {}}
+    e1 = _extracted(company="Acme GmbH", contact_name=None)
+    e2 = _extracted(company="Beta AG", contact_name=None, lead_id="00Q2", task_id="T2")
+    results = enrich_leads(fc, [e1, e2], SETTINGS)
+    match_calls = [c for c in fc.calls if c[0] == "match_companies"]
+    assert len(match_calls) == 1
+    assert {t[0] for t in match_calls[0][1]} == {"Acme GmbH", "Beta AG"}
+    assert results[0].lf_company_id == "c1"
+    assert results[1].lf_company_id == "c2"
+
+
+def test_enrich_add_company_to_list_error_is_non_fatal():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+
+    def boom(company_id, list_id):
+        fc.calls.append(("add_company", company_id, list_id))
+        raise requests.exceptions.HTTPError("boom")
+
+    fc.add_company_to_list = boom
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS)
+    assert r.matched is True          # add-to-list error suppressed; lead still enriched
+    assert r.lf_company_id == "c1"
+
+
+def test_enrich_retrieves_all_contacts_in_one_call():
+    fc = FakeClient()
+    fc.match_by_name = {
+        "Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"},
+        "Beta AG": {"company_id": "c2", "match_score": 0.9, "matched_name": "Beta AG"},
+    }
+    fc.company_attrs = {"c1": {}, "c2": {}}
+    fc.contact_by_name = {
+        "Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"},
+        "John Roe": {"contact_id": "k2", "full_name": "John Roe"},
+    }
+    fc.contact_attrs = {"k1": {}, "k2": {}}
+    e1 = _extracted(company="Acme GmbH", contact_name="Jane Doe")
+    e2 = _extracted(company="Beta AG", contact_name="John Roe", lead_id="00Q2", task_id="T2")
+    enrich_leads(fc, [e1, e2], SETTINGS)
+    rc = [c for c in fc.calls if c[0] == "retrieve_contacts"]
+    assert len(rc) == 1
+    assert set(rc[0][1]) == {"k1", "k2"}
+
+
+def test_enrich_add_contact_to_list_error_is_non_fatal():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
+    fc.contact_attrs = {"k1": {}}
+
+    def boom(contact_id, list_id):
+        fc.calls.append(("add_contact", contact_id, list_id))
+        raise requests.exceptions.HTTPError("boom")
+
+    fc.add_contact_to_list = boom
+    [r] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert r.contact_found is True     # add-to-list error suppressed; contact still enriched

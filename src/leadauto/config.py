@@ -74,6 +74,22 @@ class Settings:
     def lf_contact_list(self) -> str:
         return self.raw["leadfeeder"].get("contact_list_name", "Lead_Automation")
 
+    @property
+    def lf_max_requests_per_min(self) -> int:
+        return int(self.raw["leadfeeder"].get("max_requests_per_min", 95))
+
+    @property
+    def lf_max_retries(self) -> int:
+        return int(self.raw["leadfeeder"].get("max_retries", 4))
+
+    @property
+    def lf_retrieve_batch(self) -> int:
+        return int(self.raw["leadfeeder"].get("retrieve_batch", 100))
+
+    @property
+    def lf_match_batch(self) -> int:
+        return int(self.raw["leadfeeder"].get("match_batch", 200))
+
     # --- Task routing ---
     @property
     def task_types(self) -> dict[str, str]:
