@@ -12,6 +12,9 @@ Scripts/
 .env
 *.pem
 *.key
+LEADFEEDER_API_KEY.txt
+*_API_KEY.txt
+auth.txt
 
 # Python
 __pycache__/

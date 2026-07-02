@@ -15,6 +15,14 @@ from pathlib import Path
 
 _ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true"}
 
+# A plain `sf data query` sends the SOQL in the GET request URL, so a long IN(...) list
+# overflows Salesforce's request-header limit -> HTTP 431 "Request Header Fields Too
+# Large". Queries whose raw SOQL exceeds this length are routed through Bulk API 2.0
+# (`sf data export bulk`), which carries the query in the POST body. The threshold is on
+# raw length (URL-encoding inflates it) and stays well under the ~8 KB header budget, so
+# small everyday queries keep using the faster synchronous REST path.
+_BULK_QUERY_THRESHOLD = 2000
+
 
 class SfError(RuntimeError):
     pass
@@ -71,17 +79,55 @@ class SfClient:
 
     # --- reads ---
     def query(self, soql: str, bulk: bool = False) -> list[dict]:
-        """Run SOQL and return records as a list of dicts (attributes stripped)."""
+        """Run SOQL and return records as a list of dicts (attributes stripped).
+
+        Large queries (or `bulk=True`) go through Bulk API 2.0 to dodge the GET-URL/
+        header limit that makes long IN(...) lists fail with HTTP 431; smaller queries
+        use the faster synchronous REST query.
+        """
         soql = " ".join(soql.split())  # collapse whitespace/newlines
         if '"' in soql:
             raise SfError("SOQL must not contain double quotes (use single quotes for literals)")
-        flags = "--bulk --wait 10" if bulk else ""
+        if bulk or len(soql) > _BULK_QUERY_THRESHOLD:
+            return self._query_bulk(soql)
         cmd = (
             f'sf data query --query "{soql}" --target-org {self.alias} '
-            f"{flags} --result-format json"
+            "--result-format json"
         )
         data = json.loads(self._run(cmd).stdout)
         records = data.get("result", {}).get("records", [])
+        for r in records:
+            r.pop("attributes", None)
+        return records
+
+    def _query_bulk(self, soql: str) -> list[dict]:
+        """Run SOQL via Bulk API 2.0 (`sf data export bulk`), reading records from a file.
+
+        The query is written to a temp file (`--query-file`) so it never rides in the OS
+        command line or an HTTP header. `--result-format json` writes a bare JSON array of
+        record objects (no `attributes`, no `{result:{records}}` wrapper).
+        """
+        fd, q_name = tempfile.mkstemp(prefix="leadauto_query_", suffix=".soql")
+        q_path = Path(q_name)
+        out_path = Path(q_name + ".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(soql)
+            cmd = (
+                f'sf data export bulk --query-file "{q_path}" --output-file "{out_path}" '
+                f"--result-format json --wait 10 --target-org {self.alias}"
+            )
+            self._run(cmd)
+            text = out_path.read_text(encoding="utf-8") if out_path.exists() else ""
+            records = json.loads(text) if text.strip() else []
+        finally:
+            for p in (q_path, out_path):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        if not isinstance(records, list):
+            raise SfError(f"Unexpected bulk export output shape: {type(records).__name__}")
         for r in records:
             r.pop("attributes", None)
         return records
