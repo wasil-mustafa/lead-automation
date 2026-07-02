@@ -35,6 +35,11 @@ permissions:
 jobs:
   enrich:
     runs-on: ubuntu-latest
+    env:
+      # Quiet the sf CLI's background async work — a source of intermittent
+      # "unsettled top-level await" / Node exit-13 hangs on CI runners.
+      SF_AUTOUPDATE_DISABLE: "true"
+      SF_DISABLE_TELEMETRY: "true"
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -49,16 +54,29 @@ jobs:
 
       - name: Install Salesforce CLI
         run: |
-          npm install --global @salesforce/cli
+          # Pinned for reproducibility; bump deliberately after a dry-run check.
+          npm install --global @salesforce/cli@2.140.6
           sf --version
 
       - name: Authenticate to Salesforce
         env:
           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}   # secret -> env, never inlined
         run: |
-          printf '%s' "$SFDX_AUTH_URL" > auth.txt
-          sf org login sfdx-url --sfdx-url-file auth.txt --alias headless --set-default
-          rm -f auth.txt
+          # The sf CLI intermittently hangs on login (Node exit 13 / "unsettled
+          # top-level await"), so retry a few times before failing the job.
+          for attempt in 1 2 3; do
+            printf '%s' "$SFDX_AUTH_URL" > auth.txt
+            if sf org login sfdx-url --sfdx-url-file auth.txt --alias headless --set-default; then
+              rm -f auth.txt
+              echo "Authenticated on attempt $attempt."
+              exit 0
+            fi
+            rm -f auth.txt
+            echo "Auth attempt $attempt failed; retrying in 10s..." >&2
+            sleep 10
+          done
+          echo "Salesforce authentication failed after 3 attempts." >&2
+          exit 1
 
       - name: Run Stage 1
         env:
