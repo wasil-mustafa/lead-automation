@@ -52,3 +52,10 @@ def test_kununu_credentials_come_from_env(monkeypatch):
     assert s.kununu_api_token == "tok123"
     assert s.kununu_api_user == "u"
     assert s.kununu_api_password == "p"
+
+
+def test_thresholds_removed_and_dedupe_floor_present():
+    s = Settings.load()
+    assert s.dedupe_name_agree_min == 85
+    assert not hasattr(s, "auto_link_threshold")
+    assert not hasattr(s, "review_threshold")

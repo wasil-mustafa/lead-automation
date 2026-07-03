@@ -40,6 +40,7 @@ artifacts/
 !review/*.csv
 !state/
 !state/*.json
+!state/*.jsonl
 # Exception: track ONLY the probe + control-harness scripts. Re-ignore everything else in
 # scripts/ — on case-insensitive Windows this dir IS the legacy Scripts/ (live API key).
 !scripts/

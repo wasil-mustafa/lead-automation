@@ -17,6 +17,7 @@ from .leadfeeder.client import LeadfeederClient
 from .logging import get_logger
 from .pipeline.stage1_enrich import run_stage1
 from .pipeline.stage2_convert import run_stage2
+from .shadow_compare import run_shadow_compare
 from .sf.auth import ensure_org
 from .sf.client import SfClient
 from .state import DEFAULT_STATE_PATH, REPO_ROOT
@@ -112,6 +113,22 @@ def stage2(
         f"Stage 2 {'(dry-run) ' if res.dry_run else ''}done: "
         f"{len(res.targets)} target(s) | converted={res.result.get('converted', 0)} "
         f"failed={res.result.get('failed', 0)}"
+    )
+
+
+@app.command("shadow-compare")
+def shadow_compare(
+    config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
+) -> None:
+    """Score pending dry-run predictions against human conversions in the org."""
+    log = get_logger("cli.shadow")
+    settings = Settings.load(config)
+    sf = _build_sf_client(settings, log)
+    res = run_shadow_compare(sf, logger=log)
+    typer.echo(
+        f"Shadow compare done: checked={res['checked']} resolved={res['resolved']} "
+        f"hits={res['hits']} misses={res['misses']} observed={res['observed']} "
+        f"expired={res['expired']} pending={res['pending']} | xlsx={res['xlsx']}"
     )
 
 

@@ -8,6 +8,7 @@ Invariants that matter downstream:
 import pytest
 
 from leadauto.sf import soql
+from leadauto.sf.soql import accounts_by_ids, contacts_by_ids, leads_shadow_status
 
 SUBJECTS = [
     "Inbound Sales Task: New Claimed Profile",
@@ -82,3 +83,31 @@ def test_leads_by_ids_restricts_to_queue_owned():
 def test_leads_by_ids_requires_ids():
     with pytest.raises(ValueError):
         soql.leads_by_ids([])
+
+
+def test_account_match_fields_include_billing():
+    q = soql.accounts_by_signals(names=["Acme GmbH"])
+    assert "BillingPostalCode" in q and "BillingCity" in q
+
+
+def test_leads_shadow_status():
+    q = leads_shadow_status(["00Q1", "00Q2"])
+    assert q.startswith("SELECT ")
+    for f in ("IsConverted", "ConvertedDate", "ConvertedAccountId",
+              "ConvertedContactId", "KN_Employee__c", "KN_DBRevenueinMillions__c",
+              "KN_DBISO2CountryCode__c", "KN_DBPostalCode__c", "KN_DBCity__c"):
+        assert f in q
+    assert "WHERE Id IN ('00Q1', '00Q2')" in q
+    with pytest.raises(ValueError):
+        leads_shadow_status([])
+
+
+def test_accounts_and_contacts_by_ids():
+    aq = accounts_by_ids(["001A"])
+    assert "CreatedDate" in aq and "BillingPostalCode" in aq and "FROM Account" in aq
+    cq = contacts_by_ids(["003C"])
+    assert "Email" in cq and "FROM Contact" in cq
+    with pytest.raises(ValueError):
+        accounts_by_ids([])
+    with pytest.raises(ValueError):
+        contacts_by_ids([])

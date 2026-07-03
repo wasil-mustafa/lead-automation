@@ -28,3 +28,20 @@ def test_domain_root_rejects_freemail_and_short_roots():
 def test_email_domain_basic():
     assert email_domain("A@Acme.DE") == "acme.de"
     assert email_domain("not-an-email") is None
+
+
+def test_normalize_postal_strips_whitespace():
+    from leadauto.textnorm import normalize_postal
+    assert normalize_postal(" 10 115 ") == "10115"
+    assert normalize_postal("1010") == "1010"
+    assert normalize_postal("") is None
+    assert normalize_postal(None) is None
+
+
+def test_normalize_city_casefolds_and_collapses():
+    from leadauto.textnorm import normalize_city
+    assert normalize_city("  Wien ") == "wien"
+    assert normalize_city("Frankfurt  am   Main") == "frankfurt am main"
+    assert normalize_city("MÜNCHEN") == "münchen"
+    assert normalize_city("") is None
+    assert normalize_city(None) is None

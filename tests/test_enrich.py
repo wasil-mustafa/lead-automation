@@ -332,3 +332,26 @@ def test_enrich_use_kununu_feed_false_skips_lookup(monkeypatch):
     fc.company_attrs = {"c1": {}}
     [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS, use_kununu_feed=False)
     assert r.matched is True
+
+
+def test_alt_names_kept_on_enriched_lead():
+    """EnrichedLead.alt_names preserves the assigned-company names from the kununu feed."""
+    fc = FakeClient()
+    fc.match_by_name = {"Siemens": {"company_id": "c1", "match_score": 0.30,
+                                    "matched_name": "Siemens Mobility GmbH",
+                                    "name_agreement": 96,
+                                    "agreed_via": "alt_name:Siemens Mobility GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    e = _extracted(company="Siemens", contact_name=None)
+    e.kununu_profile_uuid = "u1"
+    profiles = {"u1": ProfileInfo(name="Siemens",
+                                  companies=["Siemens Mobility GmbH", "Siemens", "Siemens AG"])}
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles=profiles)
+    # own name (normalized-equal) excluded; order preserved
+    assert r.alt_names == ["Siemens Mobility GmbH"]
+
+
+def test_alt_names_default_empty():
+    """EnrichedLead.alt_names defaults to empty list."""
+    r = EnrichedLead(extracted=_extracted())
+    assert r.alt_names == []

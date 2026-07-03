@@ -93,11 +93,17 @@ def test_stage1_matches_links_and_advances_watermark(tmp_path):
     qa = tmp_path / "qa.xlsx"
     state_path = tmp_path / "watermark.json"
     res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
-                     dry_run=True, qa_path=qa, state_path=state_path)
+                     dry_run=True, qa_path=qa, state_path=state_path, predictions_path=None)
     assert len(res.results) == 1
     r = res.results[0]
-    assert r.decision == "link"
-    assert r.account.account_id == "001A"
+    # LeadFeeder is disabled here (lf_client=None) so the lead never gets an accepted LF
+    # company match; rule 1 (no_lf_match) always reviews, even though the account carries
+    # the same kununu profile UUID the task's Description parses out (see brief invariant).
+    assert r.rule == "no_lf_match"
+    assert r.decision == "review"
+    assert r.account is None
+    # Contact matching is independent of the account rule: the kununu user UUID identifier
+    # signal still resolves the existing Contact.
     assert r.contact.contact_id == "003C"
     # watermark advanced to the task's CreatedDate
     assert res.new_state.last_task_created == "2026-06-19T10:00:00.000+0000"
@@ -112,7 +118,8 @@ def test_stage1_dry_run_writes_nothing_and_does_not_persist_state(tmp_path):
                       accounts=[_account()], contacts=[_contact()])
     state_path = tmp_path / "watermark.json"
     res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
-                     dry_run=True, qa_path=tmp_path / "qa.xlsx", state_path=state_path)
+                     dry_run=True, qa_path=tmp_path / "qa.xlsx", state_path=state_path,
+                     predictions_path=None)
     assert sf.updates == []                 # no write-back
     assert res.writeback["processed"] == 0
     assert not state_path.exists()           # watermark not persisted in dry-run
@@ -135,18 +142,16 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path):
 
 # --- Stage 2: approved -> targets --------------------------------------------
 
-def test_targets_from_approved_links_account_and_strong_contact():
-    rows = [{"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
-             "contact_match_id": "003C", "contact_score": "1.0", "decision": "link"}]
+def test_contact_linked_only_on_identifier_reasons():
+    rows = [
+        {"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
+         "contact_match_id": "003C", "contact_reason": "kununu_user_uuid"},
+        {"Approve?": "yes", "lead_id": "00Q2", "account_match_id": "001A",
+         "contact_match_id": "003D", "contact_reason": "contact_email_global"},
+    ]
     targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget("00Q1", account_id="001A", contact_id="003C")]
-
-
-def test_targets_from_approved_drops_weak_contact_match():
-    rows = [{"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
-             "contact_match_id": "003C", "contact_score": "0.85", "decision": "review"}]
-    targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget("00Q1", account_id="001A", contact_id=None)]
+    assert targets[0].contact_id == "003C"
+    assert targets[1].contact_id is None  # weak reason -> create fresh contact
 
 
 def test_targets_from_approved_skips_unapproved():

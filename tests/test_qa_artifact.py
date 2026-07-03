@@ -49,7 +49,7 @@ def test_review_header_includes_match_and_gate_columns():
     wb = build_workbook([_result()], [], meta={})
     headers = _headers(wb["Review"])
     assert headers == REVIEW_COLUMNS
-    for col in ("decision", "account_match_id", "account_score", "account_reason",
+    for col in ("decision", "account_match_id", "account_reason",
                 "contact_match_id", "contact_score", "Approve?"):
         assert col in headers
 
@@ -68,7 +68,6 @@ def test_review_row_maps_match_result():
     assert row[idx["lead_id"]] == "00Q1"
     assert row[idx["decision"]] == "link"
     assert row[idx["account_match_id"]] == "001A"
-    assert row[idx["account_score"]] == 1.0
     assert row[idx["account_reason"]] == "kununu_profile_uuid"
     assert row[idx["contact_match_id"]] == "003C"
     assert row[idx["Approve?"]] in (None, "")  # reviewer fills this in
@@ -157,3 +156,38 @@ def test_write_workbook_roundtrips(tmp_path):
     assert out == path and path.exists()
     reopened = load_workbook(path)
     assert "Review" in reopened.sheetnames
+
+
+def test_review_sheet_has_rule_and_evidence_columns():
+    assert "match_rule" in REVIEW_COLUMNS and "match_evidence" in REVIEW_COLUMNS
+    assert "account_score" not in REVIEW_COLUMNS
+    # build one result with rule="name_only", evidence=["vat→001A"]
+    res = _result(
+        decision="review",
+        account=AccountMatch("001A", 1.0, "kununu_profile_uuid"),
+        contact=None,
+    )
+    res.rule = "name_only"
+    res.evidence = ["vat→001A"]
+    wb = build_workbook([res], [], meta={})
+    ws = wb["Review"]
+    headers = _headers(ws)
+    idx = {h: i for i, h in enumerate(headers)}
+    row = _rows(ws)[0]
+    assert row[idx["match_rule"]] == "name_only"
+    assert row[idx["match_evidence"]] == "vat→001A"
+
+
+def test_summary_counts_rules():
+    from leadauto.match import RULE_DECISIONS
+    res1 = _result("00Q1", decision="review")
+    res1.rule = "name_only"
+    res1.evidence = ["vat→001A"]
+    res2 = _result("00Q2", decision="create_new")
+    res2.rule = "no_match"
+    res2.evidence = []
+    wb = build_workbook([res1, res2], [], meta={})
+    metrics = {row[0]: row[1] for row in _rows(wb["Summary"])}
+    assert metrics.get("rule_name_only") == 1
+    assert metrics.get("rule_no_match") == 1
+    assert metrics.get("rule_kununu_conflict") == 0
