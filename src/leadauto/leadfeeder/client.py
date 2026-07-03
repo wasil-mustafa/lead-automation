@@ -12,8 +12,10 @@ from __future__ import annotations
 import time
 
 import requests
+from rapidfuzz import fuzz
 
 from ..logging import get_logger
+from ..textnorm import alnum, domain_root, normalize_name
 
 DEFAULT_BASE_URL = "https://api.leadfeeder.com/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -124,6 +126,8 @@ class LeadfeederClient:
         base_url: str = DEFAULT_BASE_URL,
         session=None,
         min_match_score: float = 0.70,
+        name_agree_min: int = 85,
+        name_agree_rescue: int = 90,
         retrieve_batch: int = 100,
         match_batch: int = 200,
         max_requests_per_min: int = 95,
@@ -139,6 +143,8 @@ class LeadfeederClient:
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
         self.min_match_score = min_match_score
+        self.name_agree_min = name_agree_min
+        self.name_agree_rescue = name_agree_rescue
         self.retrieve_batch = retrieve_batch
         self.match_batch = match_batch
         self.max_retries = max_retries
@@ -232,16 +238,47 @@ class LeadfeederClient:
         return list_id
 
     # -- company match (batched) --
-    def _best_match(self, matches: list) -> dict | None:
-        if not matches:
-            return None
-        best = max(matches, key=lambda m: m.get("attributes", {}).get("match_score", 0))
-        score = best.get("attributes", {}).get("match_score", 0)
-        if score < self.min_match_score:
-            return None
-        summary = best.get("relationships", {}).get("company_summary", {}).get("attributes", {})
-        return {"company_id": best["id"], "match_score": score,
-                "matched_name": summary.get("name", "")}
+    def _name_agreement(self, matched_name: str, payload: dict) -> int:
+        """0-100 agreement between LF's returned name and the request's identity signals:
+        the sent company_name (legal-suffix-normalized token_set) and, for corporate
+        addresses, the email-domain root. 0 when LF returned no name (fail closed)."""
+        cand = normalize_name(matched_name)
+        if not cand:
+            return 0
+        scores = [0]
+        ours = normalize_name(payload.get("company_name"))
+        if ours:
+            scores.append(int(fuzz.token_set_ratio(cand, ours)))
+        root = domain_root(payload.get("email"))
+        if root:
+            scores.append(int(fuzz.partial_ratio(alnum(matched_name), root)))
+        return max(scores)
+
+    def _best_match(self, matches: list, payload: dict) -> dict | None:
+        """Best candidate passing the acceptance gate, or None.
+
+        Gate (calibrated on the 6-month converted-leads control set, 2026-07-02 —
+        see Export/lf_match_check_6m.xlsx):
+          - match_score >= min_match_score AND name agreement >= name_agree_min, OR
+          - name agreement >= name_agree_rescue regardless of score (LF's score is
+            unreliably low for small companies even on exact name hits).
+        A high LF score alone is NOT trusted: 0.9+ scores were observed on entirely
+        wrong companies, so score-only acceptance would write a stranger's firmographics.
+        """
+        best_key, best = None, None
+        for m in matches or []:
+            score = m.get("attributes", {}).get("match_score", 0)
+            summary = m.get("relationships", {}).get("company_summary", {}).get("attributes", {})
+            agree = self._name_agreement(summary.get("name", ""), payload)
+            if not ((score >= self.min_match_score and agree >= self.name_agree_min)
+                    or agree >= self.name_agree_rescue):
+                continue
+            key = (score, agree)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = {"company_id": m["id"], "match_score": score,
+                        "matched_name": summary.get("name", ""), "name_agreement": agree}
+        return best
 
     def match_companies(self, payloads: list[dict]) -> list[dict | None]:
         """Batch company match (free). `payloads` is a list of per-company dicts
@@ -266,7 +303,7 @@ class LeadfeederClient:
             per_company = data.get("data", []) or []
             for j in range(len(chunk)):
                 matches = per_company[j] if j < len(per_company) else []
-                results.append(self._best_match(matches))
+                results.append(self._best_match(matches, chunk[j]))
         return results
 
     def match_company(self, company_name: str, email: str | None = None,

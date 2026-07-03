@@ -43,6 +43,8 @@ def _build_lf_client(settings: Settings, logger) -> LeadfeederClient:
         api_key=settings.leadfeeder_api_key,
         base_url=settings.lf_base_url,
         min_match_score=settings.lf_min_match_score,
+        name_agree_min=settings.lf_name_agree_min,
+        name_agree_rescue=settings.lf_name_agree_rescue,
         retrieve_batch=settings.lf_retrieve_batch,
         match_batch=settings.lf_match_batch,
         max_requests_per_min=settings.lf_max_requests_per_min,

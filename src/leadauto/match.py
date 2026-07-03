@@ -16,7 +16,6 @@ Only strong identifier signals reach the auto_link band, so host/domain/fuzzy ne
 """
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -25,69 +24,22 @@ from rapidfuzz import fuzz
 from .leadfeeder.enrich import EnrichedLead
 from .logging import get_logger
 from .sf import soql
+# Normalizers live in textnorm so the LeadFeeder client can share them (no import cycle).
+# Re-exported under their historical names for existing callers/tests.
+from .textnorm import (  # noqa: F401
+    FREEMAIL_DOMAINS as _FREEMAIL_DOMAINS,
+    LEGAL_SUFFIXES as _LEGAL_SUFFIXES,
+    email_domain,
+    normalize_host,
+    normalize_name,
+    normalize_url as _normalize_url,
+)
 
 _FUZZY_FLOOR = 0.90  # rapidfuzz ratio below this never counts as a name match
-# Freemail/ISP domains never identify a company, so they are excluded from the
-# email-domain account signal (they would otherwise create noisy review-band matches).
-_FREEMAIL_DOMAINS = {
-    "gmail.com", "googlemail.com", "web.de", "gmx.de", "gmx.net", "gmx.com",
-    "yahoo.com", "yahoo.de", "hotmail.com", "hotmail.de", "outlook.com", "outlook.de",
-    "live.com", "live.de", "t-online.de", "aol.com", "icloud.com", "me.com",
-    "mail.com", "freenet.de", "posteo.de", "protonmail.com", "proton.me",
-}
-_LEGAL_SUFFIXES = {
-    "gmbh", "mbh", "ag", "kg", "kgaa", "ohg", "ug", "se", "co", "gbr", "ev", "ek",
-    "ltd", "inc", "llc", "plc", "sa", "srl", "bv", "nv", "oy", "ab", "as",
-    "haftungsbeschraenkt", "haftungsbeschränkt",
-}
-
-
-# --- normalization helpers ---------------------------------------------------
-
-def _strip_scheme_www(value: str) -> str:
-    if "://" in value:
-        value = value.split("://", 1)[1]
-    if value.startswith("www."):
-        value = value[4:]
-    return value
-
-
-def normalize_host(value: str | None) -> str | None:
-    """Registrable host of a URL/host string: lowercase, no scheme/www/path. None if empty."""
-    if not value:
-        return None
-    v = _strip_scheme_www(value.strip().lower())
-    v = v.split("/", 1)[0].split("?", 1)[0].strip()
-    return v or None
-
-
-def email_domain(value: str | None) -> str | None:
-    """Lowercase domain of an email address. None if absent or not an address."""
-    if not value or "@" not in value:
-        return None
-    domain = value.strip().lower().rsplit("@", 1)[1].strip()
-    return domain or None
-
-
-def _normalize_url(value: str | None) -> str | None:
-    """Lowercase URL without scheme/www and trailing slash (used for kununu & LinkedIn)."""
-    if not value:
-        return None
-    v = _strip_scheme_www(value.strip().lower()).rstrip("/")
-    return v or None
 
 
 def normalize_kununu_url(value: str | None) -> str | None:
     return _normalize_url(value)
-
-
-def normalize_name(value: str | None) -> str | None:
-    """Casefold a company name and drop punctuation + legal-form tokens for fuzzy compare."""
-    if not value:
-        return None
-    v = re.sub(r"[^\w\s&]", " ", value.lower(), flags=re.UNICODE)
-    tokens = [t for t in v.split() if t and t not in _LEGAL_SUFFIXES]
-    return " ".join(tokens) or None
 
 
 # --- result records ----------------------------------------------------------

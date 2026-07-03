@@ -20,25 +20,28 @@ leadfeeder:
   match_batch: 200           # POST /companies/match (API max 200)
 
 # Task Subjects the pipeline processes, mapped to their parser key.
-# Subjects not listed here are left for humans (e.g. Kontaktanfrage) or ignored (Ecom).
+# Simplified scope (2026-07-02): ONLY Claimed Profile + EBP Trial. Subjects not listed
+# here are left for humans (e.g. Kontaktanfrage) or ignored (Ecom, event/content types).
 task_types:
   "Inbound Sales Task: New Claimed Profile": claimer
   "Inbound Sales Task: EBP Trial": ebp_trial
-  "Inbound Sales Task: Eventteilnahme": event
-  "Inbound Sales Task: Whitepaper Download": content
-  "Inbound Sales Task: Video Download": content
 
-# Which parser keys are currently enabled (phased rollout). Start with claimer only.
+# Which parser keys are currently enabled.
 enabled_task_types:
   - claimer
+  - ebp_trial
 
 matching:
   lf_min_match_score: 0.70   # LeadFeeder company-match floor
+  # Name-agreement gate (calibrated on the 6-month control set, 2026-07-02): LF's score
+  # alone is untrustworthy — 0.9+ on wrong companies, <0.2 on exact-name hits.
+  lf_name_agree_min: 85      # required agreement (0-100) when score >= lf_min_match_score
+  lf_name_agree_rescue: 90   # agreement that accepts a candidate regardless of score
   auto_link_threshold: 0.90  # >= : link to existing Account/Contact
   review_threshold: 0.60     # [review, auto_link): flag for review; < review: create new
 
 pipeline:
   review_gate: true          # master toggle; false => auto-convert
-  dry_run: false             # true => no SF writes/conversions
+  dry_run: true              # true => no SF writes/conversions (kept ON while validating vs control file)
   batch_limit: 0             # 0 = unlimited; >0 = LIMIT-scoped
   task_lookback_days: 35     # overlap window around the watermark

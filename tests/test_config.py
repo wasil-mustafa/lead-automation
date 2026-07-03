@@ -3,8 +3,11 @@ from leadauto.config import Settings
 
 
 def test_in_scope_subjects_reflects_enabled_only():
-    s = Settings.load()  # config.yaml enables 'claimer' only
-    assert s.in_scope_subjects == ["Inbound Sales Task: New Claimed Profile"]
+    s = Settings.load()  # config.yaml enables 'claimer' + 'ebp_trial' (simplified scope)
+    assert s.in_scope_subjects == [
+        "Inbound Sales Task: New Claimed Profile",
+        "Inbound Sales Task: EBP Trial",
+    ]
 
 
 def test_sf_auth_url_falls_back_to_sfdx_auth_url(monkeypatch):
