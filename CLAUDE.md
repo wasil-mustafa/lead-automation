@@ -58,6 +58,11 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
 - **Task `Subject` is the task-type router.** In scope (see `config/config.yaml` `task_types`):
   `Inbound Sales Task: {New Claimed Profile | EBP Trial | Eventteilnahme | Whitepaper Download | Video Download}`.
   Out: `Kontaktanfrage` (stays human), `Marketing Touchpoint: Ecom`. `enabled_task_types` gates the phased rollout.
+- **Task `Status` is the freshness gate.** `tasks_since` filters `Status IN (config `fresh_task_statuses`)`
+  = `In Progress | in Arbeit | Not Started` — a handled touchpoint is skipped. Do NOT use `IsClosed = false`:
+  the org's bilingual/legacy picklist flags `Abgeschlossen` (Completed) as `IsClosed=false`, so it would leak
+  handled tasks; there is also no status literally named `Open`. Empty list disables the filter. Live 180d mix:
+  `Closed` 5,287 (IsClosed=true) · `Abgeschlossen` 479 (IsClosed=false, EXCLUDED) · `In Progress` 428 · `in Arbeit` 39 · `Not Started` 1.
 - **Real Lead fields:** `Email`, `KN_CompanyEmail__c` (there is NO `KN_Email__c`), `KN_KununuProfileName__c`,
   `KN_KununuUserUUID__c`, `KN_KununuLinkProfile__c`, `KN_Region__c`, `KN_VATNumber__c`, plus `KN_DB*` firmographics.
   Account match: `KN_KununuProfileUuid__c`, `KN_KununuLinkProfile__c`, `KN_VATNumber__c`, `KN_DBID__c`, `Website`.
@@ -239,8 +244,9 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
 fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
-assigned-companies gate merged via PR #5, country-fields drop via PR #6 (both 2026-07-03). Active branch:
-`dublettencheck-rules` (rule engine + shadow comparison, dry-run — PR pending).
+assigned-companies gate merged via PR #5, country-fields drop via PR #6 (both 2026-07-03); Dublettencheck
+rule engine + shadow comparison merged via PR #10 (2026-07-04). Active branch: `task-status-fresh-filter`
+(process only open/fresh Tasks by Status — PR pending).
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
