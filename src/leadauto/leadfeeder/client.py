@@ -297,8 +297,12 @@ class LeadfeederClient:
     def match_companies(self, payloads: list[dict]) -> list[dict | None]:
         """Batch company match (free). `payloads` is a list of per-company dicts
         (company_name, email, country, country_code, ...). Returns a list aligned to
-        `payloads`: {company_id, match_score, matched_name} or None per company. A chunk
-        that errors after retries degrades its entries to None (logged), never raising."""
+        `payloads`: {company_id, match_score, matched_name, name_agreement, agreed_via}
+        or None per company. `name_agreement` is a 0-100 int scoring how well the matched
+        name agrees with the payload's company_name / alt_names / email-domain root;
+        `agreed_via` names which signal vouched for the match (`company_name`,
+        `alt_name:<name>`, or `email_domain`), or None if nothing agreed. A chunk that
+        errors after retries degrades its entries to None (logged), never raising."""
         if not payloads:
             return []
         account_id = self.get_account_id()

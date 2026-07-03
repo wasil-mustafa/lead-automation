@@ -92,9 +92,16 @@ def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
                 slug = base_slug(d.get("profile_url"))
                 if uuid not in uuids and slug not in slugs:
                     continue
+                companies = _company_names(d)
+                if not companies:
+                    log.debug(
+                        "kununu feed: profile %s matched but no assigned-company names "
+                        "found (unconfirmed feed field name? see _company_names)",
+                        uuid or slug,
+                    )
                 info = ProfileInfo(
                     name=(d.get("profile_name") or "").strip(),
-                    companies=_company_names(d),
+                    companies=companies,
                     city=d.get("profile_city"),
                     country_code=d.get("profile_country_code"),
                 )

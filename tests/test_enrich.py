@@ -7,6 +7,7 @@ company retrieve, and contact assembly with lead-field fallbacks.
 import requests
 from leadauto.config import Settings
 from leadauto.extract.models import ExtractedLead
+from leadauto.kununu_feed import ProfileInfo
 from leadauto.leadfeeder.enrich import EnrichedLead, enrich_leads
 
 SETTINGS = Settings.load()
@@ -264,9 +265,6 @@ def test_enrich_add_contact_to_list_connection_error_is_non_fatal():
     fc.add_contact_to_list = boom
     [r] = enrich_leads(fc, [_extracted()], SETTINGS)
     assert r.contact_found is True
-
-
-from leadauto.kununu_feed import ProfileInfo
 
 
 def test_enrich_puts_assigned_companies_into_alt_names():
