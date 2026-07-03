@@ -75,7 +75,8 @@ def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
 
 _ACCOUNT_MATCH_FIELDS = (
     "Id, Name, Website, KN_KununuProfileUuid__c, KN_KununuLinkProfile__c, "
-    "KN_VATNumber__c, KN_DBID__c, KN_DBLegalCompanyName__c"
+    "KN_VATNumber__c, KN_DBID__c, KN_DBLegalCompanyName__c, "
+    "BillingPostalCode, BillingCity"
 )
 _CONTACT_MATCH_FIELDS = (
     "Id, AccountId, Email, KN_KununuUserUUID__c, KN_LinkedInProfile__c, "
@@ -151,3 +152,33 @@ def contacts_by_signals(
     if not clauses:
         return None
     return f"SELECT {_CONTACT_MATCH_FIELDS} FROM Contact WHERE " + " OR ".join(clauses)
+
+
+# --- shadow comparison (score dry-run predictions vs human conversions) ------
+
+_LEAD_SHADOW_FIELDS = (
+    "Id, IsConverted, ConvertedDate, ConvertedAccountId, ConvertedContactId, "
+    "KN_Employee__c, KN_DBRevenueinMillions__c, KN_DBISO2CountryCode__c, "
+    "KN_DBPostalCode__c, KN_DBCity__c"
+)
+_ACCOUNT_SHADOW_FIELDS = "Id, Name, CreatedDate, Website, BillingPostalCode, BillingCity"
+_CONTACT_SHADOW_FIELDS = "Id, AccountId, Email, Phone"
+
+
+def leads_shadow_status(ids: Sequence[str]) -> str:
+    """Conversion status + current KN_* fields for predicted leads."""
+    if not ids:
+        raise ValueError("leads_shadow_status requires at least one Id")
+    return f"SELECT {_LEAD_SHADOW_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
+
+
+def accounts_by_ids(ids: Sequence[str]) -> str:
+    if not ids:
+        raise ValueError("accounts_by_ids requires at least one Id")
+    return f"SELECT {_ACCOUNT_SHADOW_FIELDS} FROM Account WHERE Id IN ({_in_list(ids)})"
+
+
+def contacts_by_ids(ids: Sequence[str]) -> str:
+    if not ids:
+        raise ValueError("contacts_by_ids requires at least one Id")
+    return f"SELECT {_CONTACT_SHADOW_FIELDS} FROM Contact WHERE Id IN ({_in_list(ids)})"
