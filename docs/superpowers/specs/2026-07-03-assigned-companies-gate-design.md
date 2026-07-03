@@ -35,9 +35,9 @@ are additional truthful identities for the same lead and should count as agreeme
 
 kununu DWH bulk feed `profiles.jsonl` (~530 MB JSONL), default URL
 `https://api.data.kununu.com/v1/feeds/data-management/profiles.jsonl`.
-Auth via env: `KUNUNU_API_TOKEN` (Bearer) or `KUNUNU_API_USER`/`KUNUNU_API_PASSWORD` (Basic).
-**Fresh credentials are required** — the `.env` committed to the public Profile-Matching repo
-must be treated as leaked: rotate, purge from history, and never reuse those values here.
+Auth via env: `KUNUNU_API_TOKEN` (Bearer) or `KUNUNU_API_USER`/`KUNUNU_API_PASSWORD` (Basic)
+— set locally and as a GitHub secret; never in yaml or code. (Credential rotation was
+considered and ruled unnecessary — user decision 2026-07-03.)
 Bulk feed is the only access path (confirmed); freshness requirement: **daily** (confirmed).
 
 Join keys, in order: `profile_uuid` (leads carry `kununu_profile_uuid` parsed from the Task
@@ -144,6 +144,6 @@ see when an assigned company (rather than the profile name) carried the match.
 ## Rollout
 
 1. Implement + unit tests (config default `enabled: true`, harmless without credentials).
-2. Rotate kununu API credentials (leaked `.env`); set local env + GitHub secret.
+2. Set the kununu API credential locally (env) and as a GitHub secret.
 3. Control-set validation; record numbers in CLAUDE.md.
 4. Enable in CI (cache step + secret) once validation looks good.
