@@ -4,6 +4,7 @@ Import/
 Export/
 PQ/
 Scripts/
+Profile Scripts/
 *.csv
 *.xlsx
 *.xlsm
