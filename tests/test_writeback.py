@@ -24,10 +24,23 @@ def _enriched(extracted=None, company=None, **kw) -> EnrichedLead:
 # --- transforms --------------------------------------------------------------
 
 def test_employee_bin_bands():
+    # Bands = the org's restricted KN_Employee__c picklist (describe on `headless`,
+    # 2026-07-03), incl. the German dot thousands separators. Wrong labels -> row rejected.
     assert employee_bin(5) == "1-10"
-    assert employee_bin(75) == "51-200"
-    assert employee_bin(250) == "201-500"
-    assert employee_bin(20000) == ">10000"
+    assert employee_bin(10) == "1-10"
+    assert employee_bin(11) == "11-50"
+    assert employee_bin(75) == "51-100"
+    assert employee_bin(150) == "101-200"
+    assert employee_bin(250) == "201-350"
+    assert employee_bin(400) == "351-500"
+    assert employee_bin(600) == "501-750"
+    assert employee_bin(751) == "751-1.000"
+    assert employee_bin(1500) == "1.001-2.500"
+    assert employee_bin(3000) == "2.501-5.000"
+    assert employee_bin(7500) == "5.001-10.000"
+    assert employee_bin(20000) == "10.001-30.000"
+    assert employee_bin(50000) == "30.001-100.000"
+    assert employee_bin(100001) == "> 100.000"
 
 
 def test_employee_bin_empty_is_none():
@@ -84,7 +97,7 @@ def test_payload_maps_firmographics_from_leadfeeder():
     assert payload["KN_DBCity__c"] == "Berlin"
     assert payload["KN_DBISO2CountryCode__c"] == "DE"
     assert payload["KN_DBNumberofEmployees__c"] == 250
-    assert payload["KN_Employee__c"] == "201-500"
+    assert payload["KN_Employee__c"] == "201-350"
     assert payload["KN_DBRevenueinMillions__c"] == 5.0
     assert payload["KN_VATNumber__c"] == "DE811569869"
     assert payload["KN_DBMainIndustryTextperWZ08__c"] == "Hospitals"

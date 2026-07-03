@@ -166,8 +166,12 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 - Machine note: `gh auth setup-git` was run on the private laptop 2026-07-03 (git push works again).
 
 ## Next steps (resume here)
-1. **Verify write-back field values against org `headless`** (read-only describe is fine): confirm the
-   `KN_Employee__c` picklist labels, revenue unit, and country-code format flagged in `writeback.py`.
+1. ✅ **Write-back fields org-verified (2026-07-03**, read-only describe + data sampling; findings in
+   the `writeback.py` header): revenue unit (millions ✓), country code (uppercase alpha-2 ✓), and
+   `KN_Region__c` (restricted picklist, parsers only emit valid labels ✓) all confirmed;
+   `KN_Employee__c` is a RESTRICTED picklist whose real 14 bands (German dot separators, e.g.
+   `751-1.000`, `> 100.000`) did NOT match the best-guess bins — fixed in `_EMPLOYEE_BINS` (PR #7;
+   wrong labels would have been rejected rows).
 2. **Validate end-to-end** per the plan: `stage1 --dry-run --no-leadfeeder` read-only sanity → small live
    `--limit 5` write-back (inspect KN_* on those Leads) → one gated `stage2` conversion (verify
    link-vs-create, owner/status, no Opportunity, re-run = no-op).
