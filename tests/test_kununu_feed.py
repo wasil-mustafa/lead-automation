@@ -1,7 +1,13 @@
 """kununu_feed tests: slug normalization + the one-pass streaming profile lookup."""
 import json
+import time
+from types import SimpleNamespace
 
-from leadauto.kununu_feed import ProfileInfo, base_slug, lookup_profiles
+import requests
+
+from leadauto import kununu_feed
+from leadauto.kununu_feed import ProfileInfo, base_slug, lookup_profiles, ensure_feed, load_profiles_for_leads
+from leadauto.extract.models import ExtractedLead
 
 
 def _write_feed(tmp_path, records, extra_lines=()):
@@ -86,3 +92,77 @@ def test_company_names_field_shapes(tmp_path):
     assert found["a"].companies == ["Plain GmbH"]
     assert found["b"].companies == ["Dict AG", "Alt Key SE"]
     assert found["c"].companies == ["Other Field GmbH"]
+
+
+# --- ensure_feed + load_profiles_for_leads -----------------------------------
+
+def _settings(tmp_path, token="tok", enabled=True, max_age=24):
+    return SimpleNamespace(
+        kununu_feed_enabled=enabled,
+        kununu_feed_cache_path=tmp_path / "profiles.jsonl",
+        kununu_feed_max_age_hours=max_age,
+        kununu_feed_url="https://feed.example/profiles.jsonl",
+        kununu_api_token=token, kununu_api_user=None, kununu_api_password=None,
+    )
+
+
+def test_ensure_feed_fresh_cache_skips_download(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    s.kununu_feed_cache_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(kununu_feed, "_download",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("downloaded")))
+    assert ensure_feed(s) == s.kununu_feed_cache_path
+
+
+def test_ensure_feed_stale_cache_triggers_download(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    s.kununu_feed_cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 25 * 3600
+    import os
+    os.utime(s.kununu_feed_cache_path, (old, old))
+    called = {}
+    monkeypatch.setattr(kununu_feed, "_download", lambda url, dest, hdr, log: called.update(url=url))
+    assert ensure_feed(s) == s.kununu_feed_cache_path
+    assert called["url"] == s.kununu_feed_url
+
+
+def test_ensure_feed_download_failure_falls_back_to_stale(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    s.kununu_feed_cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 25 * 3600
+    import os
+    os.utime(s.kununu_feed_cache_path, (old, old))
+    def boom(*a, **k):
+        raise requests.exceptions.ConnectionError("down")
+    monkeypatch.setattr(kununu_feed, "_download", boom)
+    assert ensure_feed(s) == s.kununu_feed_cache_path  # stale beats nothing
+
+
+def test_ensure_feed_no_credentials_no_cache_returns_none(tmp_path):
+    assert ensure_feed(_settings(tmp_path, token=None)) is None
+
+
+def test_load_profiles_for_leads_short_circuits_without_keys(tmp_path, monkeypatch):
+    # No lead carries a uuid/slug -> never touches the feed (keeps unit tests hermetic).
+    monkeypatch.setattr(kununu_feed, "ensure_feed",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("touched feed")))
+    lead = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="claimer")
+    assert load_profiles_for_leads([lead], _settings(tmp_path)) == {}
+
+
+def test_load_profiles_for_leads_resolves_uuid_and_slug(tmp_path):
+    s = _settings(tmp_path)
+    records = [
+        _record(uuid="u1", name="Siemens", companies=["Siemens Mobility GmbH"]),
+        _record(uuid="u2", name="Acme", url="https://www.kununu.com/de/acme2"),
+    ]
+    s.kununu_feed_cache_path.write_text(
+        "\n".join(json.dumps(r) for r in records), encoding="utf-8")
+    leads = [
+        ExtractedLead(lead_id="1", task_id="T1", task_type="claimer", kununu_profile_uuid="u1"),
+        ExtractedLead(lead_id="2", task_id="T2", task_type="claimer",
+                      kununu_url="https://www.kununu.com/de/acme7"),
+    ]
+    found = load_profiles_for_leads(leads, s)
+    assert found["u1"].companies == ["Siemens Mobility GmbH"]
+    assert found["acme"].name == "Acme"

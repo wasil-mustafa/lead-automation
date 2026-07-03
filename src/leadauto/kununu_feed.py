@@ -9,10 +9,15 @@ degrades to pre-feed behavior, never blocks.
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import requests
 
 from .logging import get_logger
 
@@ -102,4 +107,68 @@ def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
         return {}
     if bad:
         log.warning("kununu feed: skipped %d malformed line(s)", bad)
+    return found
+
+
+def _auth_headers(settings) -> dict | None:
+    if settings.kununu_api_token:
+        return {"Authorization": f"Bearer {settings.kununu_api_token}"}
+    if settings.kununu_api_password is not None:
+        cred = base64.b64encode(
+            f"{settings.kununu_api_user or ''}:{settings.kununu_api_password}".encode()
+        ).decode()
+        return {"Authorization": f"Basic {cred}"}
+    return None
+
+
+def _download(url: str, dest: Path, headers: dict, log) -> None:
+    log.info("Downloading kununu profile feed -> %s", dest)
+    tmp = Path(f"{dest}.part")
+    with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
+        resp.raise_for_status()
+        with open(tmp, "wb") as out:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                out.write(chunk)
+    os.replace(tmp, dest)
+
+
+def ensure_feed(settings, logger=None) -> Path | None:
+    """Cached feed path, refreshed when older than max_age_hours. None => no feed
+    available this run (missing credentials / failed download with no cache)."""
+    log = logger or get_logger("kununu_feed")
+    path = settings.kununu_feed_cache_path
+    max_age = settings.kununu_feed_max_age_hours * 3600
+    if path.exists() and (time.time() - path.stat().st_mtime) < max_age:
+        return path
+    headers = _auth_headers(settings)
+    if headers is None:
+        if path.exists():
+            log.warning("kununu feed credentials missing; using stale cache %s", path)
+            return path
+        log.warning("kununu feed credentials missing and no cache; profile lookup skipped")
+        return None
+    try:
+        _download(settings.kununu_feed_url, path, headers, log)
+    except requests.exceptions.RequestException as err:
+        if path.exists():
+            log.warning("kununu feed download failed (%s); using stale cache", err)
+            return path
+        log.warning("kununu feed download failed (%s) and no cache; lookup skipped", err)
+        return None
+    return path
+
+
+def load_profiles_for_leads(extracteds, settings, logger=None) -> dict[str, ProfileInfo]:
+    """ProfileInfo for the batch, keyed by uuid and slug. {} on any unavailability."""
+    log = logger or get_logger("kununu_feed")
+    uuids = {e.kununu_profile_uuid for e in extracteds if e.kununu_profile_uuid}
+    slugs = {base_slug(e.kununu_url) for e in extracteds if e.kununu_url}
+    slugs.discard(None)
+    if not uuids and not slugs:
+        return {}
+    feed = ensure_feed(settings, logger=log)
+    if feed is None:
+        return {}
+    found = lookup_profiles(feed, uuids, slugs, logger=log)
+    log.info("kununu feed: resolved %d of %d profile key(s)", len(found), len(uuids | slugs))
     return found
