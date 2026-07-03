@@ -227,17 +227,32 @@ def test_match_company_prefers_passing_candidate_over_higher_scoring_failing_one
 
 
 def test_match_company_rescued_by_alt_name():
-    # Profile "Siemens", LF returns the assigned legal entity: alt name vouches.
+    # Profile "Haniel" (holding), LF returns the assigned legal entity "TAKKT AG":
+    # only the alt name vouches — the profile name itself does not.
+    routes = {("POST", "/companies/match"):
+              _match_payload([("c1", 0.30, "TAKKT AG")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_companies([{
+        "company_name": "Haniel", "email": "",
+        "alt_names": ["TAKKT AG", "CWS-boco International"],
+    }])[0]
+    assert match["company_id"] == "c1"
+    assert match["agreed_via"] == "alt_name:TAKKT AG"
+    assert match["name_agreement"] >= 90
+
+
+def test_agreed_via_prefers_company_name_on_ties():
+    # Subset scoring gives company_name 100 too ("Siemens" is a token-subset of
+    # "Siemens Mobility GmbH"); attribution stays with the primary signal when it
+    # already fully vouches — the alt name added no evidence.
     routes = {("POST", "/companies/match"):
               _match_payload([("c1", 0.30, "Siemens Mobility GmbH")])}
     client = _client(routes, min_match_score=0.70)
     match = client.match_companies([{
         "company_name": "Siemens", "email": "",
-        "alt_names": ["Siemens Mobility GmbH", "Siemens AG"],
+        "alt_names": ["Siemens Mobility GmbH"],
     }])[0]
-    assert match["company_id"] == "c1"
-    assert match["agreed_via"] == "alt_name:Siemens Mobility GmbH"
-    assert match["name_agreement"] >= 90
+    assert match["agreed_via"] == "company_name"
 
 
 def test_match_company_alt_names_do_not_loosen_gate():

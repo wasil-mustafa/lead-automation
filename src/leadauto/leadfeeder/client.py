@@ -252,16 +252,13 @@ class LeadfeederClient:
             s = int(fuzz.token_set_ratio(cand, ours))
             if s > best:
                 best, via = s, "company_name"
-        # alt_names can override company_name on a tie (more specific signal); among
-        # alt_names themselves the first one that reaches the best score wins.
-        alt_threshold = best - 1
+        # alt_names must score strictly higher than best to override.
         for alt in payload.get("alt_names") or []:
             alt_norm = normalize_name(alt)
             if not alt_norm:
                 continue
             s = int(fuzz.token_set_ratio(cand, alt_norm))
-            if s > alt_threshold:
-                alt_threshold = s
+            if s > best:
                 best, via = s, f"alt_name:{alt}"
         root = domain_root(payload.get("email"))
         if root:
