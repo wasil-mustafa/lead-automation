@@ -115,6 +115,13 @@ def test_flatten_company_tolerates_empty_attrs():
     assert out["Website"] == "" and out["VAT_Id"] == "" and out["Industry"] == ""
 
 
+def test_flatten_company_tolerates_null_industry_names():
+    # Real LF retrieve payloads carry industry entries with an explicit "name": null
+    # (crashed the 2026-07-03 CI run: join over a None). Nulls must be dropped.
+    attrs = {"industries": {"industry": [{"name": None}, {"name": "Retail"}, {}]}}
+    assert flatten_company(attrs)["Industry"] == "Retail"
+
+
 # --- pure: flatten_contact_details -------------------------------------------
 
 def test_flatten_contact_prioritizes_direct_over_mobile_and_office():
@@ -154,6 +161,12 @@ def test_flatten_contact_falls_back_to_first_phone_when_no_typed_match():
     attrs = {"phones": [{"number": "555", "type": "switchboard"}]}
     out = flatten_contact_details(attrs)
     assert out["best_contact_phone"] == "555"
+
+
+def test_flatten_contact_tolerates_null_departments():
+    # Same null-item trap as industry names: a [null] entry must not crash the join.
+    out = flatten_contact_details({"departments": [None, "Sales"]})
+    assert out["departments"] == "Sales"
 
 
 # --- match_company -----------------------------------------------------------
