@@ -7,12 +7,16 @@ in one declarative, partial-success call — short-circuited entirely under `dry
 
 `KN_KununuProfileName__c` doubles as the "already processed" marker (see reader).
 
-NOTE — verify against the org before the first live write (org-specific values we can't
-confirm without a describe / live write):
-  * `KN_Employee__c` picklist labels (the bins below are the common DACH banding).
-  * `KN_DBRevenueinMillions__c` unit (we assume LeadFeeder revenue is absolute currency).
-  * `KN_DBISO2CountryCode__c` expects ISO-3166 alpha-2; LeadFeeder `address.country` is
-    passed through (already alpha-2 in samples) and falls back to the parsed country code.
+Org-verified 2026-07-03 (read-only describe + data sampling on `headless`):
+  * `KN_Employee__c` is a RESTRICTED picklist; `_EMPLOYEE_BINS` mirrors its 14 labels
+    verbatim (German dot separators). `KN_Region__c` is also restricted — the parsers
+    only emit Germany/Austria/Switzerland (or None), all valid.
+  * `KN_DBRevenueinMillions__c` is double(18,2) storing MILLIONS (org samples carry
+    6-decimal absolute/1e6 values), so LeadFeeder's absolute `revenue.value` / 1e6 fits.
+  * `KN_DBISO2CountryCode__c` holds uppercase alpha-2 (DE/CH/AT — 100% of org rows);
+    LeadFeeder `address.country` is alpha-2 and `_iso2` uppercases it.
+  * `KN_KununuProfileClaimed__c` is a real checkbox — the Bulk API CSV accepts the
+    "true"/"false" strings written here.
 """
 from __future__ import annotations
 
@@ -21,10 +25,14 @@ from datetime import date
 from .leadfeeder.enrich import EnrichedLead
 from .logging import get_logger
 
-# (upper_bound, label); counts above the last bound map to ">10000".
+# (upper_bound, label); counts above the last bound map to "> 100.000".
+# Labels = the org's restricted KN_Employee__c picklist verbatim (describe on `headless`,
+# 2026-07-03), incl. the German dot thousands separators — any other value is rejected.
 _EMPLOYEE_BINS: list[tuple[int, str]] = [
-    (10, "1-10"), (50, "11-50"), (200, "51-200"), (500, "201-500"),
-    (1000, "501-1000"), (5000, "1001-5000"), (10000, "5001-10000"),
+    (10, "1-10"), (50, "11-50"), (100, "51-100"), (200, "101-200"),
+    (350, "201-350"), (500, "351-500"), (750, "501-750"), (1000, "751-1.000"),
+    (2500, "1.001-2.500"), (5000, "2.501-5.000"), (10000, "5.001-10.000"),
+    (30000, "10.001-30.000"), (100000, "30.001-100.000"),
 ]
 
 
@@ -39,7 +47,7 @@ def employee_bin(count) -> str | None:
     for upper, label in _EMPLOYEE_BINS:
         if n <= upper:
             return label
-    return ">10000"
+    return "> 100.000"
 
 
 def revenue_millions(value) -> float | None:
