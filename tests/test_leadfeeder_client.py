@@ -172,7 +172,7 @@ def test_match_company_picks_highest_score_above_threshold():
     client = _client(routes, min_match_score=0.70)
     match = client.match_company("Acme", email="x@acme.de", country="Germany", country_code="DE")
     assert match == {"company_id": "c2", "match_score": 0.95, "matched_name": "Acme GmbH",
-                     "name_agreement": 100}
+                     "name_agreement": 100, "agreed_via": "company_name"}
 
 
 def test_match_company_returns_none_below_threshold():
@@ -224,6 +224,41 @@ def test_match_company_prefers_passing_candidate_over_higher_scoring_failing_one
     client = _client(routes, min_match_score=0.70)
     match = client.match_company("Acme")
     assert match["company_id"] == "c2"
+
+
+def test_match_company_rescued_by_alt_name():
+    # Profile "Siemens", LF returns the assigned legal entity: alt name vouches.
+    routes = {("POST", "/companies/match"):
+              _match_payload([("c1", 0.30, "Siemens Mobility GmbH")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_companies([{
+        "company_name": "Siemens", "email": "",
+        "alt_names": ["Siemens Mobility GmbH", "Siemens AG"],
+    }])[0]
+    assert match["company_id"] == "c1"
+    assert match["agreed_via"] == "alt_name:Siemens Mobility GmbH"
+    assert match["name_agreement"] >= 90
+
+
+def test_match_company_alt_names_do_not_loosen_gate():
+    # Unrelated alt names must not admit a wrong candidate.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.91, "GogoMil UG")])}
+    client = _client(routes, min_match_score=0.70)
+    assert client.match_companies([{
+        "company_name": "myITplanet GmbH", "email": "",
+        "alt_names": ["myITplanet Services GmbH"],
+    }]) == [None]
+
+
+def test_alt_names_are_stripped_from_post_body():
+    seen = {}
+    def handler(params, body):
+        seen.update(body)
+        return _match_payload([("c1", 0.95, "Acme GmbH")])
+    routes = {("POST", "/companies/match"): handler}
+    client = _client(routes, min_match_score=0.70)
+    client.match_companies([{"company_name": "Acme", "alt_names": ["Acme Sub GmbH"]}])
+    assert all("alt_names" not in c for c in seen["companies"])
 
 
 # --- search_contact cascade --------------------------------------------------
@@ -332,7 +367,7 @@ def test_match_companies_aligns_results_by_input_index():
     client = _client({("POST", "/companies/match"): handler})
     out = client.match_companies([{"company_name": "Acme"}, {"company_name": "Nope"}])
     assert out == [{"company_id": "c1", "match_score": 0.95, "matched_name": "Acme",
-                    "name_agreement": 100}, None]
+                    "name_agreement": 100, "agreed_via": "company_name"}, None]
 
 
 def test_match_companies_chunks_over_match_batch():
