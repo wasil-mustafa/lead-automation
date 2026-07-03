@@ -14,13 +14,16 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
+from .match import RULE_DECISIONS
+
 REVIEW_COLUMNS = [
     "lead_id", "task_id", "task_type", "subject",
     "company", "kununu_url", "region",
     "contact_name", "contact_email",
     "lf_matched", "lf_matched_name", "lf_match_score", "lf_name_agreement", "lf_agreed_via",
     "lf_city", "lf_employees", "lf_industry", "lf_website",
-    "account_match_id", "account_score", "account_reason",
+    "match_rule", "match_evidence",
+    "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
     "decision", "Approve?",
 ]
@@ -55,8 +58,9 @@ def _review_row(result) -> dict:
         "lf_agreed_via": enr.agreed_via,
         "lf_city": company.get("City"), "lf_employees": company.get("Employee_Count"),
         "lf_industry": company.get("Industry"), "lf_website": company.get("Website"),
+        "match_rule": result.rule,
+        "match_evidence": "; ".join(result.evidence),
         "account_match_id": acct.account_id if acct else None,
-        "account_score": acct.score if acct else None,
         "account_reason": acct.reason if acct else None,
         "contact_match_id": con.contact_id if con else None,
         "contact_score": con.score if con else None,
@@ -117,6 +121,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
 
     # Summary
     decisions = [r.decision for r in results]
+    rules = [r.rule for r in results]
     summary = [
         ["generated_at", meta.get("generated_at")],
         ["since", meta.get("since")],
@@ -130,6 +135,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         ["decision_create_new", decisions.count("create_new")],
         ["skipped", len(skipped)],
     ]
+    summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
     _add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     return wb
