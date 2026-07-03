@@ -127,19 +127,39 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   `_name_agreement` takes the max across profile name / alt names / email-domain root and reports
   `agreed_via` (QA column `lf_agreed_via`). Thresholds unchanged (85/90). Degrades to pre-feed behavior
   without credentials (`KUNUNU_API_TOKEN` env + GitHub secret; `--no-kununu-feed` to disable).
-  ⚠️ NOT yet control-set-validated; the assigned-companies feed field name needs confirming on the
-  first live pull (`kununu_feed._company_names`). 190 tests pass.
+  190 tests pass.
+- ✅ **Alt-names gate control-set-validated (2026-07-03)** — `KUNUNU_API_TOKEN` set (local `.env` +
+  repo secret); first live feed pull OK (551 MB). **Feed field name confirmed:** `assigned_companies`
+  = list of `{company_uuid, company_name}` — `_company_names` already handles it, NO code change.
+  Harness: `scripts/control_check_alt_names.py` (local-only, gitignored; raw LF responses cached in
+  `Export/lf_raw_match_altnames.json`), results in `Export/lf_match_check_6m_altnames.xlsx`.
+  Feed coverage: 91.6% of control profiles resolved, but only 17.2% of leads get ≥1 alt name (most
+  assigned companies share the profile's name). Impact vs the same-day no-alt gate: +2 accepted
+  (86.2%→86.4%), 7 accepts vouched `via alt_name` — 3 exact account matches, 4 sibling legal entities
+  from the profile's own assigned-companies list (the intended semantic; a name-only truth metric
+  flags them as "wrong"). No stranger-company accepts added; **thresholds 85/90 kept**. Absolute rates
+  sit ~3pp under the 2026-07-02 baseline because this harness passes country fields — see next bullet.
+- ✅ **Country fields dropped from the LF match payload (2026-07-03, branch `drop-country-from-lf-match`):**
+  LF's `country`/`country_code` filters SUPPRESS good matches — of 105 control leads with 0 candidates
+  when country fields were sent, 60 regained candidates without them; 59 passed the gate and ALL
+  agreed with the true converted account (0 wrong). `enrich.py` now sends only
+  `company_name`/`email` (+ stripped `alt_names`); the name-agreement gate is the wrong-company
+  guard. **Full-set confirmation without country** (`Export/lf_match_check_6m_nocountry.xlsx`):
+  candidates 95.2%, production gate accepted 92.7% (vs 89.4% baseline / 86.4% with country),
+  wrong-company 1.1% old-gate / 1.3% with alts (the +2 are kununu-verified sibling entities).
+  Harness `scripts/control_check_alt_names.py` is now git-tracked (gitignore exception).
+  Also learned: LF rejects lowercase `country_code` (400 — must be uppercase ISO 3166-1 alpha-2);
+  moot now that we don't send it. 191 tests pass.
 
-## Branch `assigned-companies-gate` — COMPLETE (2026-07-03), **PR #5 OPEN** (→ master)
+## Branch `assigned-companies-gate` — COMPLETE, **PR #5 MERGED** (2026-07-03)
 All 8 plan tasks of `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md` are committed and
 reviewed (per-task + whole-branch final review); 190 tests pass. See the "Assigned-company alt names"
 status bullet above and Next-steps item 5 for what remains (live-only validation).
 - PR #4 was **squash-merged** to master 2026-07-03; this branch then merged `origin/master` back in
   with `-s ours` (valid because master's tree was byte-identical to the branch's old base `b71b85f`
   — verified empty `git diff`), so PR #5's diff shows only this branch's work.
-- Post-plan (live, needs `KUNUNU_API_TOKEN`): set env + GitHub secret; first feed pull → confirm the
-  assigned-companies field name in a real record (fix `kununu_feed._company_names` if needed); re-run
-  the 1,101-lead control set with alt names vs the 89.4% accepted / 1.1% wrong-company baseline.
+- ✅ Post-plan live validation done 2026-07-03 (secret set, feed field name confirmed, control set
+  re-run) — see the "Alt-names gate control-set-validated" status bullet.
 - Machine note: `gh auth setup-git` was run on the private laptop 2026-07-03 (git push works again).
 
 ## Next steps (resume here)
@@ -153,13 +173,15 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 4. **CI**: ✅ repo secrets set (`SFDX_AUTH_URL`, `LEADFEEDER_API_KEY`); ✅ login hardened (3× retry +
    pinned CLI); ✅ `stage1` dry-run smoke-tested green. **Still TODO:** configure the `lead-conversion`
    Environment's required reviewers (the Stage 2 gate); fix the `dry_run` guard footgun (see below).
-5. Validate alt-names gate on the 1,101-lead control set (needs `KUNUNU_API_TOKEN` + feed download) vs the 89.4%/1.1% baseline, confirm the feed's assigned-companies field name, set the GitHub secret.
+5. ✅ Alt-names gate validated on the control set (2026-07-03); feed field name confirmed; secret set.
+   ✅ Country fields dropped from the LF match payload + full-set re-validation (92.7% accepted,
+   wrong-company at baseline) — PR #6.
 6. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
 
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
 fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
-**assigned-companies gate is PR #5 (OPEN)**. Active branch: `assigned-companies-gate` (complete, PR #5 open).
+assigned-companies gate merged via PR #5 (2026-07-03). Active branch: `drop-country-from-lf-match` (PR #6).
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)

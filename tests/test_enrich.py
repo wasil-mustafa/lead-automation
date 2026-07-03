@@ -83,9 +83,25 @@ def test_enrich_matched_with_contact():
     assert r.contact["position"] == "CEO"
     assert r.contact["contact_id"] == "k1"
     assert r.contact["contact_linkedin"] == "https://li/x"
-    assert ("match_companies", (("Acme GmbH", "jane@acme.de", "Germany", "DE"),)) in fc.calls
+    assert ("match_companies", (("Acme GmbH", "jane@acme.de", None, None),)) in fc.calls
     assert ("add_company", "c1", "company-list") in fc.calls
     assert ("add_contact", "k1", "contact-list") in fc.calls
+
+
+def test_match_payload_omits_country_fields():
+    # LF's country/country_code filters suppress good matches: on the 6-month control
+    # set (2026-07-03 probe) 59 leads regained a candidate without them and ALL agreed
+    # with the true converted account. The name-agreement gate guards wrong-company.
+    class RawCapture(FakeClient):
+        def match_companies(self, payloads):
+            self.raw_payloads = payloads
+            return super().match_companies(payloads)
+
+    fc = RawCapture()
+    enrich_leads(fc, [_extracted()], SETTINGS)
+    [payload] = fc.raw_payloads
+    assert "country" not in payload
+    assert "country_code" not in payload
 
 
 def test_enrich_carries_name_agreement():
@@ -151,7 +167,7 @@ def test_enrich_uses_lead_field_fallbacks():
     e = _extracted(company=None, lead_company="Lead Co", contact_name=None,
                    first="John", last="Smith", contact_email=None, lead_email="john@lead.co")
     [r] = enrich_leads(fc, [e], SETTINGS)
-    assert ("match_companies", (("Lead Co", "john@lead.co", "Germany", "DE"),)) in fc.calls  # lead_company + lead_email
+    assert ("match_companies", (("Lead Co", "john@lead.co", None, None),)) in fc.calls  # lead_company + lead_email
     assert ("search", "John Smith", "c1") in fc.calls                        # first+last fallback
     assert r.contact_found is True
 
