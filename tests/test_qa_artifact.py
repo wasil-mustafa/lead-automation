@@ -14,7 +14,7 @@ from leadauto.qa_artifact import REVIEW_COLUMNS, build_workbook, write_workbook
 
 
 def _result(lead_id="00Q1", *, decision="link", account=None, contact=None,
-            matched=False, matched_name=None, score=None, name_agreement=None,
+            matched=False, matched_name=None, score=None, name_agreement=None, agreed_via=None,
             company=None, contact_found=False, contact_details=None):
     e = ExtractedLead(
         lead_id=lead_id, task_id="T_" + lead_id, task_type="claimer",
@@ -24,7 +24,7 @@ def _result(lead_id="00Q1", *, decision="link", account=None, contact=None,
     )
     enr = EnrichedLead(
         extracted=e, matched=matched, matched_name=matched_name, match_score=score,
-        name_agreement=name_agreement,
+        name_agreement=name_agreement, agreed_via=agreed_via,
         company=company or {}, contact_found=contact_found, contact=contact_details or {},
     )
     return MatchResult(enriched=enr, account=account, contact=contact, decision=decision)
@@ -82,6 +82,15 @@ def test_review_row_shows_name_agreement_next_to_score():
     idx = {h: i for i, h in enumerate(_headers(ws))}
     assert idx["lf_name_agreement"] == idx["lf_match_score"] + 1
     assert _rows(ws)[0][idx["lf_name_agreement"]] == 95
+
+
+def test_review_row_shows_agreed_via_next_to_agreement():
+    res = _result(matched=True, matched_name="Siemens Mobility GmbH", score=0.30,
+                  name_agreement=96, agreed_via="alt_name:Siemens Mobility GmbH")
+    ws = build_workbook([res], [], meta={})["Review"]
+    idx = {h: i for i, h in enumerate(_headers(ws))}
+    assert idx["lf_agreed_via"] == idx["lf_name_agreement"] + 1
+    assert _rows(ws)[0][idx["lf_agreed_via"]] == "alt_name:Siemens Mobility GmbH"
 
 
 def test_create_new_row_has_blank_account_columns():
