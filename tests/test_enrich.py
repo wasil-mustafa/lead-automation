@@ -264,3 +264,57 @@ def test_enrich_add_contact_to_list_connection_error_is_non_fatal():
     fc.add_contact_to_list = boom
     [r] = enrich_leads(fc, [_extracted()], SETTINGS)
     assert r.contact_found is True
+
+
+from leadauto.kununu_feed import ProfileInfo
+
+
+def test_enrich_puts_assigned_companies_into_alt_names():
+    fc = FakeClient()
+    fc.match_by_name = {"Siemens": {"company_id": "c1", "match_score": 0.30,
+                                    "matched_name": "Siemens Mobility GmbH",
+                                    "name_agreement": 96,
+                                    "agreed_via": "alt_name:Siemens Mobility GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    captured = {}
+    orig = fc.match_companies
+    def spy(payloads):
+        captured["payloads"] = payloads
+        return orig(payloads)
+    fc.match_companies = spy
+    e = _extracted(company="Siemens", contact_name=None)
+    e.kununu_profile_uuid = "u1"
+    profiles = {"u1": ProfileInfo(name="Siemens",
+                                  companies=["Siemens Mobility GmbH", "Siemens", "Siemens AG"])}
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles=profiles)
+    # own name (normalized-equal) excluded; order preserved; agreed_via lands on the lead
+    assert captured["payloads"][0]["alt_names"] == ["Siemens Mobility GmbH"]
+    assert r.agreed_via == "alt_name:Siemens Mobility GmbH"
+
+
+def test_enrich_no_profile_found_leaves_payload_unchanged():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    captured = {}
+    orig = fc.match_companies
+    def spy(payloads):
+        captured["payloads"] = payloads
+        return orig(payloads)
+    fc.match_companies = spy
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS, profiles={})
+    assert "alt_names" not in captured["payloads"][0]
+    assert r.agreed_via is None
+
+
+def test_enrich_use_kununu_feed_false_skips_lookup(monkeypatch):
+    from leadauto.leadfeeder import enrich as enrich_mod
+    monkeypatch.setattr(enrich_mod, "load_profiles_for_leads",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("looked up")))
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS, use_kununu_feed=False)
+    assert r.matched is True

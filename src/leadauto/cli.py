@@ -60,6 +60,8 @@ def stage1(
     limit: int = typer.Option(0, "--limit", help="LIMIT-scope the task scan (0 = config)."),
     leadfeeder: bool = typer.Option(True, "--leadfeeder/--no-leadfeeder",
                                     help="Disable to skip LeadFeeder enrichment (no credits)."),
+    kununu_feed: bool = typer.Option(True, "--kununu-feed/--no-kununu-feed",
+                                     help="Disable the kununu profile feed (assigned-company alt names)."),
     qa_path: Path = typer.Option(DEFAULT_QA_PATH, "--qa-path", help="QA artifact output path."),
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
 ) -> None:
@@ -74,7 +76,8 @@ def stage1(
         log.warning("LEADFEEDER_API_KEY not set; running without enrichment")
 
     res = run_stage1(sf, lf, settings, limit=limit, dry_run=dry_run,
-                     qa_path=qa_path, state_path=DEFAULT_STATE_PATH, logger=log)
+                     qa_path=qa_path, state_path=DEFAULT_STATE_PATH, kununu_feed=kununu_feed,
+                     logger=log)
     decisions = [r.decision for r in res.results]
     typer.echo(
         f"Stage 1 {'(dry-run) ' if res.dry_run else ''}done: "

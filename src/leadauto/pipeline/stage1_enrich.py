@@ -40,6 +40,7 @@ def run_stage1(
     now: datetime | None = None,
     qa_path: str | Path | None = None,
     state_path: str | Path | None = None,
+    kununu_feed: bool = True,
     logger=None,
 ) -> Stage1Result:
     log = logger or get_logger("pipeline.stage1")
@@ -56,7 +57,8 @@ def run_stage1(
     )
 
     if lf_client is not None:
-        enriched = enrich_leads(lf_client, extraction.leads, settings, logger=log)
+        enriched = enrich_leads(lf_client, extraction.leads, settings, logger=log,
+                                use_kununu_feed=kununu_feed)
     else:
         log.info("LeadFeeder disabled; skipping enrichment")
         enriched = [EnrichedLead(extracted=e) for e in extraction.leads]
