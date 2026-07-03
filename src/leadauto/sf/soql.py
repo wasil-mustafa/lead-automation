@@ -49,12 +49,19 @@ def tasks_since(watermark: str, subjects: Sequence[str], limit: int = 0) -> str:
 
 
 def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
-    """Unconverted Leads for the given Ids."""
+    """Unconverted, queue-owned Leads for the given Ids.
+
+    Queue-owned only (scope decision 2026-07-03): pool-user-owned leads
+    (Rohdaten/Clean Pool) carry contact-attached tasks — out of scope for now.
+    A Lead's owning Group can only be a Queue, so Owner.Type = 'Queue' is exact
+    (verified through the Bulk-API route against org data).
+    """
     if not ids:
         raise ValueError("leads_by_ids requires at least one Id")
     soql = (
         f"SELECT {_LEAD_FIELDS} FROM Lead "
-        f"WHERE Id IN ({_in_list(ids)}) AND IsConverted = false"
+        f"WHERE Id IN ({_in_list(ids)}) AND IsConverted = false "
+        "AND Owner.Type = 'Queue'"
     )
     if limit and limit > 0:
         soql += f" LIMIT {limit}"

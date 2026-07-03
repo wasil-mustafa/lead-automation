@@ -153,6 +153,17 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   Harness `scripts/control_check_alt_names.py` is now git-tracked (gitignore exception).
   Also learned: LF rejects lowercase `country_code` (400 — must be uppercase ISO 3166-1 alpha-2);
   moot now that we don't send it. 191 tests pass.
+- ✅ **Queue-owned-leads scope + Vienna schedule (2026-07-03, PR #9):** `leads_by_ids` now filters
+  `Owner.Type = 'Queue'` (works through the Bulk route — verified live: 299/301 of the current
+  window). The 2 pool-user-owned leads (Rohdaten/Clean Pool) carry contact-attached tasks — **out of
+  scope for now, revisit later** (Wasil). Stage 1 runs on cron `0 7,8,16,17 * * *` with a `gate` job
+  keeping only firings at 09:00/18:00 Europe/Vienna (DST-proof) — **scheduled runs are FORCED
+  dry-run** (flip in the gate job at go-live). This replaced the 06:00-UTC weekday cron that would
+  have fired with `--no-dry-run` (empty `inputs` on schedule events fell into the else branch —
+  live-write time bomb defused); the watermark-commit guard footgun is fixed the same way
+  (string output from the gate job). Owner facts: current window is 198× Lead 'Pre-Sales' Queue,
+  101× Lead Entry Queue; 260/301 leads are status "No Demand" (open scope question); config
+  `owner_id` = Wasil (placeholder — swap to the integration user before live conversions).
 - ✅ **First live-credit CI crash fixed (2026-07-03, PR #8):** the first stage1 run WITH LeadFeeder
   credits crashed in `flatten_company` — LF retrieve payloads carry explicit `"name": null` industry
   entries and `"; ".join(...)` raised `TypeError` on the None (dry-run/no-LF paths never see real
@@ -184,8 +195,9 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 3. **Roll out task types**: enable `ebp_trial` in `config.yaml` `enabled_task_types`, then `event`, then
    `content`, calibrating thresholds from the review sheet's false-match rate.
 4. **CI**: ✅ repo secrets set (`SFDX_AUTH_URL`, `LEADFEEDER_API_KEY`); ✅ login hardened (3× retry +
-   pinned CLI); ✅ `stage1` dry-run smoke-tested green. **Still TODO:** configure the `lead-conversion`
-   Environment's required reviewers (the Stage 2 gate); fix the `dry_run` guard footgun (see below).
+   pinned CLI); ✅ `stage1` dry-run smoke-tested green; ✅ `dry_run` guard footgun fixed + Vienna
+   twice-daily schedule (PR #9). **Still TODO:** configure the `lead-conversion` Environment's
+   required reviewers (the Stage 2 gate).
 5. ✅ Alt-names gate validated on the control set (2026-07-03); feed field name confirmed; secret set.
    ✅ Country fields dropped from the LF match payload + full-set re-validation (92.7% accepted,
    wrong-company at baseline) — PR #6.
@@ -209,10 +221,9 @@ Open:
 - **Write-back idempotency (live-validation task):** confirm the real `sf data update bulk
   --json` shape (the parser's assumed keys), then decide whether to exclude failed leads'
   tasks from the watermark advance vs. rely on the Failures sheet + overlap-window retry.
-- **`dry_run` guard footgun (both workflows):** the watermark-commit step's
-  `if: ${{ inputs.dry_run != 'true' }}` still RUNS during a dry run (GitHub coerces the boolean input
-  vs. the string `'true'`); it's harmless today only because a dry run doesn't modify
-  `state/watermark.json`. Change to `if: ${{ !inputs.dry_run }}`.
+- ✅ **`dry_run` guard footgun — FIXED (PR #9):** stage1's effective dry-run is now the `gate`
+  job's string output (schedule ⇒ forced `true`; dispatch ⇒ the checkbox), used by both the Run
+  step and the watermark-commit guard. stage2 has no watermark step (dispatch-only), nothing to fix.
 - **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path (CI uses its own
   ephemeral path); `stage2_convert` re-derives the auto-link predicate (could centralize);
   `stage1.yml` push has no rebase/retry (mitigated by the concurrency group).
