@@ -130,12 +130,13 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   ⚠️ NOT yet control-set-validated; the assigned-companies feed field name needs confirming on the
   first live pull (`kununu_feed._company_names`). 190 tests pass.
 
-## Branch `assigned-companies-gate` — COMPLETE (2026-07-03), awaiting PR
+## Branch `assigned-companies-gate` — COMPLETE (2026-07-03), **PR #5 OPEN** (→ master)
 All 8 plan tasks of `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md` are committed and
 reviewed (per-task + whole-branch final review); 190 tests pass. See the "Assigned-company alt names"
 status bullet above and Next-steps item 5 for what remains (live-only validation).
-- **Merge order:** PR #4 (name-agreement gate, `leadfeeder-throttle-batching` → master) merges FIRST;
-  this branch is based on it and PRs after.
+- PR #4 was **squash-merged** to master 2026-07-03; this branch then merged `origin/master` back in
+  with `-s ours` (valid because master's tree was byte-identical to the branch's old base `b71b85f`
+  — verified empty `git diff`), so PR #5's diff shows only this branch's work.
 - Post-plan (live, needs `KUNUNU_API_TOKEN`): set env + GitHub secret; first feed pull → confirm the
   assigned-companies field name in a real record (fix `kununu_feed._company_names` if needed); re-run
   the 1,101-lead control set with alt names vs the 89.4% accepted / 1.1% wrong-company baseline.
@@ -157,8 +158,8 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
-fix via PR #2; CI login hardening via PR #3; **name-agreement gate is PR #4 (OPEN, mergeable, awaiting merge)**.
-Active branch: `assigned-companies-gate` (off `leadfeeder-throttle-batching`; complete, awaiting PR after #4 merges).
+fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
+**assigned-companies gate is PR #5 (OPEN)**. Active branch: `assigned-companies-gate` (complete, PR #5 open).
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
