@@ -124,12 +124,15 @@ def _auth_headers(settings) -> dict | None:
 def _download(url: str, dest: Path, headers: dict, log) -> None:
     log.info("Downloading kununu profile feed -> %s", dest)
     tmp = Path(f"{dest}.part")
-    with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
-        resp.raise_for_status()
-        with open(tmp, "wb") as out:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                out.write(chunk)
-    os.replace(tmp, dest)
+    try:
+        with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            with open(tmp, "wb") as out:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    out.write(chunk)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)  # no-op after successful os.replace
 
 
 def ensure_feed(settings, logger=None) -> Path | None:
@@ -169,6 +172,10 @@ def load_profiles_for_leads(extracteds, settings, logger=None) -> dict[str, Prof
     feed = ensure_feed(settings, logger=log)
     if feed is None:
         return {}
-    found = lookup_profiles(feed, uuids, slugs, logger=log)
+    try:
+        found = lookup_profiles(feed, uuids, slugs, logger=log)
+    except Exception as err:  # never let feed parsing sink the pipeline
+        log.warning("kununu feed: profile lookup failed (%s); skipped", err)
+        return {}
     log.info("kununu feed: resolved %d of %d profile key(s)", len(found), len(uuids | slugs))
     return found

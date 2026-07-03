@@ -166,3 +166,33 @@ def test_load_profiles_for_leads_resolves_uuid_and_slug(tmp_path):
     found = load_profiles_for_leads(leads, s)
     assert found["u1"].companies == ["Siemens Mobility GmbH"]
     assert found["acme"].name == "Acme"
+
+
+def test_download_failure_cleans_up_part_file(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+        def iter_content(self, chunk_size):
+            yield b"data"
+            raise requests.exceptions.ChunkedEncodingError("dropped")
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(kununu_feed.requests, "get", lambda *a, **k: FakeResp())
+    assert ensure_feed(s) is None  # no pre-existing cache to fall back to
+    assert not (tmp_path / "profiles.jsonl.part").exists()
+
+
+def test_load_profiles_for_leads_swallows_lookup_errors(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    s.kununu_feed_cache_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(kununu_feed, "lookup_profiles",
+                        lambda *a, **k: (_ for _ in ()).throw(UnicodeDecodeError(
+                            "utf-8", b"\xff", 0, 1, "invalid start byte")))
+    lead = ExtractedLead(lead_id="1", task_id="T1", task_type="claimer",
+                         kununu_profile_uuid="u1")
+    assert load_profiles_for_leads([lead], s) == {}
