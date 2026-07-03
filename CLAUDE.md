@@ -121,6 +121,14 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   4.7%→1.1% of accepted, 115 rescues. `name_agreement` flows through `EnrichedLead` into the QA
   Review sheet (`lf_name_agreement`, next to the untrustworthy `lf_match_score`) so reviewers can
   calibrate the thresholds. 162 tests pass.
+- ✅ **Assigned-company alt names in the LF gate** (spec `docs/superpowers/specs/2026-07-03-assigned-companies-gate-design.md`):
+  `kununu_feed.py` streams the daily-cached DWH feed (join `profile_uuid`, URL-slug fallback) and
+  `enrich.py` passes the profile's assigned-company names as `alt_names` (stripped before the LF POST);
+  `_name_agreement` takes the max across profile name / alt names / email-domain root and reports
+  `agreed_via` (QA column `lf_agreed_via`). Thresholds unchanged (85/90). Degrades to pre-feed behavior
+  without credentials (`KUNUNU_API_TOKEN` env + GitHub secret; `--no-kununu-feed` to disable).
+  ⚠️ NOT yet control-set-validated; the assigned-companies feed field name needs confirming on the
+  first live pull (`kununu_feed._company_names`). 190 tests pass.
 
 ## IN-FLIGHT: assigned-companies gate (branch `assigned-companies-gate`) — RESUME HERE
 Feature: widen the LF name-agreement gate with the kununu profile's **assigned-company names**
@@ -183,7 +191,8 @@ identities). Names come from the kununu DWH bulk feed `profiles.jsonl` (~530 MB,
 4. **CI**: ✅ repo secrets set (`SFDX_AUTH_URL`, `LEADFEEDER_API_KEY`); ✅ login hardened (3× retry +
    pinned CLI); ✅ `stage1` dry-run smoke-tested green. **Still TODO:** configure the `lead-conversion`
    Environment's required reviewers (the Stage 2 gate); fix the `dry_run` guard footgun (see below).
-5. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
+5. Validate alt-names gate on the 1,101-lead control set (needs `KUNUNU_API_TOKEN` + feed download) vs the 89.4%/1.1% baseline, confirm the feed's assigned-companies field name, set the GitHub secret.
+6. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
 
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
