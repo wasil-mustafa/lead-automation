@@ -65,11 +65,10 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
         company_name = e.best_company
         if company_name:
             email = e.contact_email or e.lead_email
+            # No country/country_code: LF's country filter suppresses good matches
+            # (2026-07-03 control probe: 59 candidates regained without it, all
+            # correct). The name-agreement gate is what guards wrong-company.
             payload = {"company_name": company_name, "email": email or ""}
-            if e.region:
-                payload["country"] = e.region
-            if e.country_code:
-                payload["country_code"] = e.country_code
             info = (profiles.get(e.kununu_profile_uuid or "")
                     or profiles.get(base_slug(e.kununu_url) or ""))
             if info:
