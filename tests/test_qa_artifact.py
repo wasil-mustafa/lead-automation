@@ -14,7 +14,7 @@ from leadauto.qa_artifact import REVIEW_COLUMNS, build_workbook, write_workbook
 
 
 def _result(lead_id="00Q1", *, decision="link", account=None, contact=None,
-            matched=False, matched_name=None, score=None,
+            matched=False, matched_name=None, score=None, name_agreement=None,
             company=None, contact_found=False, contact_details=None):
     e = ExtractedLead(
         lead_id=lead_id, task_id="T_" + lead_id, task_type="claimer",
@@ -24,6 +24,7 @@ def _result(lead_id="00Q1", *, decision="link", account=None, contact=None,
     )
     enr = EnrichedLead(
         extracted=e, matched=matched, matched_name=matched_name, match_score=score,
+        name_agreement=name_agreement,
         company=company or {}, contact_found=contact_found, contact=contact_details or {},
     )
     return MatchResult(enriched=enr, account=account, contact=contact, decision=decision)
@@ -71,6 +72,16 @@ def test_review_row_maps_match_result():
     assert row[idx["account_reason"]] == "kununu_profile_uuid"
     assert row[idx["contact_match_id"]] == "003C"
     assert row[idx["Approve?"]] in (None, "")  # reviewer fills this in
+
+
+def test_review_row_shows_name_agreement_next_to_score():
+    # Reviewers calibrate the gate from this sheet; the score alone is untrustworthy,
+    # so the agreement value must sit right beside it.
+    res = _result(matched=True, matched_name="Acme AG", score=0.91, name_agreement=95)
+    ws = build_workbook([res], [], meta={})["Review"]
+    idx = {h: i for i, h in enumerate(_headers(ws))}
+    assert idx["lf_name_agreement"] == idx["lf_match_score"] + 1
+    assert _rows(ws)[0][idx["lf_name_agreement"]] == 95
 
 
 def test_create_new_row_has_blank_account_columns():

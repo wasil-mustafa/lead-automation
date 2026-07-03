@@ -115,6 +115,14 @@ class Settings:
         return float(self.raw["matching"].get("lf_min_match_score", 0.70))
 
     @property
+    def lf_name_agree_min(self) -> int:
+        return int(self.raw["matching"].get("lf_name_agree_min", 85))
+
+    @property
+    def lf_name_agree_rescue(self) -> int:
+        return int(self.raw["matching"].get("lf_name_agree_rescue", 90))
+
+    @property
     def auto_link_threshold(self) -> float:
         return float(self.raw["matching"].get("auto_link_threshold", 0.90))
 

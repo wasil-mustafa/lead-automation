@@ -87,6 +87,16 @@ def test_enrich_matched_with_contact():
     assert ("add_contact", "k1", "contact-list") in fc.calls
 
 
+def test_enrich_carries_name_agreement():
+    # The gate's agreement value must survive into EnrichedLead so the QA sheet can show it.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.95,
+                                      "matched_name": "Acme GmbH", "name_agreement": 100}}
+    fc.company_attrs = {"c1": {}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS)
+    assert r.name_agreement == 100
+
+
 def test_enrich_matched_without_contact_name_skips_search():
     fc = FakeClient()
     fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
@@ -177,6 +187,34 @@ def test_enrich_add_company_to_list_error_is_non_fatal():
     assert r.lf_company_id == "c1"
 
 
+def test_enrich_add_company_to_list_connection_error_is_non_fatal():
+    # Not just HTTP errors: a dropped connection on a list-add must not sink the batch.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+
+    def boom(company_id, list_id):
+        raise requests.exceptions.ConnectionError("reset")
+
+    fc.add_company_to_list = boom
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS)
+    assert r.matched is True
+
+
+def test_enrich_search_contact_connection_error_is_non_fatal():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+
+    def boom(name, company_id):
+        raise requests.exceptions.ConnectionError("reset")
+
+    fc.search_contact = boom
+    [r] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert r.matched is True           # company enrichment kept
+    assert r.contact_found is False    # contact search failed soft
+
+
 def test_enrich_retrieves_all_contacts_in_one_call():
     fc = FakeClient()
     fc.match_by_name = {
@@ -211,3 +249,18 @@ def test_enrich_add_contact_to_list_error_is_non_fatal():
     fc.add_contact_to_list = boom
     [r] = enrich_leads(fc, [_extracted()], SETTINGS)
     assert r.contact_found is True     # add-to-list error suppressed; contact still enriched
+
+
+def test_enrich_add_contact_to_list_connection_error_is_non_fatal():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
+    fc.contact_attrs = {"k1": {}}
+
+    def boom(contact_id, list_id):
+        raise requests.exceptions.ConnectionError("reset")
+
+    fc.add_contact_to_list = boom
+    [r] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert r.contact_found is True

@@ -87,7 +87,7 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
 
 ## Current status
 - ✅ **Phase 0** — repo scaffold, config, `sf/auth.py`, `sf/client.py`.
-- ✅ **All modules built & unit-tested (147 tests pass):**
+- ✅ **All modules built & unit-tested (162 tests pass):**
   - Module 1 — `sf/soql.py` (incl. `accounts_by_signals`/`contacts_by_signals`), `extract/reader.py`
     (`processed_tasks` feeds the watermark), `parsers.py`/`models.py`.
   - Module 2 — `leadfeeder/client.py` + `enrich.py` (`EnrichedLead`); throttle/retry + batched match/retrieve.
@@ -105,6 +105,22 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   (3× retry + pinned CLI, PR #3), and a `stage1 --dry-run --no-leadfeeder` `workflow_dispatch` completed
   green (auth → extract → QA artifact upload; no writes, no LeadFeeder credits).
 - ⚠️ **Salesforce write-back + conversion NOT yet live-validated** — no live write-back or LeadConvert has run.
+- ✅ **Scope simplified (2026-07-02):** only `claimer` + `ebp_trial` task types (config.yaml), `dry_run: true`.
+  Signal coverage verified over ALL 6,217 in-scope tasks (180d): profile name / email / region ≈ 100%
+  (EBP email 97.4% — misses are kununu-internal test profiles).
+- ✅ **LeadFeeder match validated against a 1,101-lead control set** (`Export/control_leads_6m.xlsx`:
+  leads converted → NEW accounts in the last 6 months, joined Task→ConvertedContactId — conversion
+  re-parents Tasks onto the Contact, so `Who.Type='Lead'` only finds unconverted ones). Results in
+  `Export/lf_match_check_6m.xlsx`. Key finding: **LF match_score alone is untrustworthy** (0.9+ on wrong
+  companies, <0.2 on exact-name hits).
+- ✅ **Name-agreement gate shipped** (`client._name_agreement`/`_best_match`, normalizers shared via
+  `textnorm.py` — do NOT import `match.py` from the LF client, it cycles via `enrich`): accept when
+  score ≥ floor AND name-agree ≥ 85, or rescue when name-agree ≥ 90 (token_set on suffix-normalized
+  names + partial vs corporate email-domain root ≥5 chars, freemail excluded). Tunables
+  `matching.lf_name_agree_{min,rescue}`. Control-set impact: 82.0%→89.4% accepted, wrong-company
+  4.7%→1.1% of accepted, 115 rescues. `name_agreement` flows through `EnrichedLead` into the QA
+  Review sheet (`lf_name_agreement`, next to the untrustworthy `lf_match_score`) so reviewers can
+  calibrate the thresholds. 162 tests pass.
 
 ## Next steps (resume here)
 1. **Verify write-back field values against org `headless`** (read-only describe is fine): confirm the
@@ -142,6 +158,7 @@ Open:
 - **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path (CI uses its own
   ephemeral path); `stage2_convert` re-derives the auto-link predicate (could centralize);
   `stage1.yml` push has no rebase/retry (mitigated by the concurrency group).
-- **LeadFeeder follow-ups (non-blocking, noted in PR #1):** widen `enrich.py` `search_contact`/list-add
-  `except` to `requests.exceptions.RequestException` (the client layer already does); add `caplog` assertions
-  to the chunk-failure tests if the project logger propagates. (Enrich list-add errors are now logged, not swallowed.)
+- **LeadFeeder follow-ups (non-blocking, noted in PR #1):** ✅ `enrich.py` `search_contact`/list-add
+  `except` widened to `requests.exceptions.RequestException` (2026-07-03, with per-site ConnectionError tests).
+  Still open: add `caplog` assertions to the chunk-failure tests if the project logger propagates.
+  (Enrich list-add errors are now logged, not swallowed.)

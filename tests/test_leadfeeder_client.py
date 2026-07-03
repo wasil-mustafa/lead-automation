@@ -171,7 +171,8 @@ def test_match_company_picks_highest_score_above_threshold():
               _match_payload([("c1", 0.62, "Low"), ("c2", 0.95, "Acme GmbH")])}
     client = _client(routes, min_match_score=0.70)
     match = client.match_company("Acme", email="x@acme.de", country="Germany", country_code="DE")
-    assert match == {"company_id": "c2", "match_score": 0.95, "matched_name": "Acme GmbH"}
+    assert match == {"company_id": "c2", "match_score": 0.95, "matched_name": "Acme GmbH",
+                     "name_agreement": 100}
 
 
 def test_match_company_returns_none_below_threshold():
@@ -183,6 +184,46 @@ def test_match_company_returns_none_below_threshold():
 def test_match_company_returns_none_when_no_matches():
     routes = {("POST", "/companies/match"): {"data": [[]]}}
     assert _client(routes).match_company("Acme") is None
+
+
+# --- the name-agreement gate (calibrated on the 6-month control set) ----------
+
+def test_match_company_rejects_high_score_with_wrong_name():
+    # Observed live: LF returned "GogoMil UG" at 0.91 for myITplanet — score alone lies.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.91, "GogoMil UG")])}
+    client = _client(routes, min_match_score=0.70)
+    assert client.match_company("myITplanet GmbH", email="info@myitplanet.de") is None
+
+
+def test_match_company_rescues_low_score_with_exact_name():
+    # Observed live: exact-name hits scored as low as 0.13 for small companies.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.13, "Lingenfelder IT UG")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_company("Lingenfelder IT")
+    assert match["company_id"] == "c1" and match["name_agreement"] >= 90
+
+
+def test_match_company_accepts_via_email_domain_root():
+    # LF name differs from the kununu profile name but equals the corporate domain root.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.90, "digitaleformate")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_company("Digifom GmbH", email="kontakt@digitaleformate.de")
+    assert match["company_id"] == "c1"
+
+
+def test_match_company_freemail_domain_never_vouches():
+    # googlemail.com would "agree" with a Googlemail-named candidate — freemail is excluded.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.90, "Googlemail Ltd")])}
+    client = _client(routes, min_match_score=0.70)
+    assert client.match_company("Acme", email="jane@googlemail.com") is None
+
+
+def test_match_company_prefers_passing_candidate_over_higher_scoring_failing_one():
+    routes = {("POST", "/companies/match"):
+              _match_payload([("c1", 0.95, "Wrong Company AG"), ("c2", 0.80, "Acme GmbH")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_company("Acme")
+    assert match["company_id"] == "c2"
 
 
 # --- search_contact cascade --------------------------------------------------
@@ -290,7 +331,8 @@ def test_match_companies_aligns_results_by_input_index():
         ]}
     client = _client({("POST", "/companies/match"): handler})
     out = client.match_companies([{"company_name": "Acme"}, {"company_name": "Nope"}])
-    assert out == [{"company_id": "c1", "match_score": 0.95, "matched_name": "Acme"}, None]
+    assert out == [{"company_id": "c1", "match_score": 0.95, "matched_name": "Acme",
+                    "name_agreement": 100}, None]
 
 
 def test_match_companies_chunks_over_match_batch():
@@ -305,11 +347,12 @@ def test_match_companies_chunks_over_match_batch():
 
 
 def test_match_companies_applies_score_floor():
+    # Name disagrees, so the rescue band cannot apply — the floor must reject.
     handler = lambda p, b: {"data": [[
         {"id": "c1", "attributes": {"match_score": 0.50},
-         "relationships": {"company_summary": {"attributes": {"name": "x"}}}}]]}
+         "relationships": {"company_summary": {"attributes": {"name": "Other Co"}}}}]]}
     client = _client({("POST", "/companies/match"): handler}, min_match_score=0.70)
-    assert client.match_companies([{"company_name": "x"}]) == [None]
+    assert client.match_companies([{"company_name": "Acme"}]) == [None]
 
 
 def test_match_companies_chunk_failure_yields_none():

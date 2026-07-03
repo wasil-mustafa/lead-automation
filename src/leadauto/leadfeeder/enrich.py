@@ -27,6 +27,7 @@ class EnrichedLead:
     lf_company_id: str | None = None
     matched_name: str | None = None
     match_score: float | None = None
+    name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
     company: dict = field(default_factory=dict)   # flatten_company output (or {})
     contact_found: bool = False
     contact: dict = field(default_factory=dict)   # flattened details + contact_id/full_name
@@ -74,9 +75,10 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
         r.lf_company_id = match["company_id"]
         r.matched_name = match.get("matched_name")
         r.match_score = match.get("match_score")
+        r.name_agreement = match.get("name_agreement")
         try:
             client.add_company_to_list(r.lf_company_id, company_list_id)
-        except requests.exceptions.HTTPError as err:
+        except requests.exceptions.RequestException as err:
             log.warning("add_company_to_list failed for %s: %s", r.lf_company_id, err)
 
     matched = [r for r in results if r.matched]
@@ -95,7 +97,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
             continue
         try:
             cmatch = client.search_contact(name, r.lf_company_id)
-        except requests.exceptions.HTTPError as err:
+        except requests.exceptions.RequestException as err:
             log.warning("Contact search failed for %r: %s", name, err)
             continue
         if cmatch:
@@ -111,7 +113,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
         r.contact = {**details, "contact_id": cid, "full_name": cmatch.get("full_name", "")}
         try:
             client.add_contact_to_list(cid, contact_list_id)
-        except requests.exceptions.HTTPError as err:
+        except requests.exceptions.RequestException as err:
             log.warning("add_contact_to_list failed for %s: %s", cid, err)
 
     log.info("LeadFeeder: %d/%d matched, %d contact(s) found",
