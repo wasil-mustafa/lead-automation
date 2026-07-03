@@ -131,6 +131,13 @@ class Settings:
         enabled = set(self.enabled_task_types)
         return [subj for subj, key in self.task_types.items() if key in enabled]
 
+    @property
+    def fresh_task_statuses(self) -> list[str]:
+        """Task statuses that count as fresh/unhandled and get processed. Explicit
+        allowlist (the org picklist flags 'Abgeschlossen'=Completed as not-closed, so
+        IsClosed is unusable). Empty => no status filter."""
+        return self.raw.get("fresh_task_statuses", [])
+
     def parser_key_for(self, subject: str) -> str | None:
         return self.task_types.get(subject)
 

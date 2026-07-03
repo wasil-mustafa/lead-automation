@@ -40,6 +40,15 @@ enabled_task_types:
   - claimer
   - ebp_trial
 
+# Only Tasks in these statuses are 'fresh' (unhandled) and get processed — a closed/handled
+# touchpoint was already worked by a human. Explicit allowlist, NOT `IsClosed = false`: the
+# org picklist is bilingual/legacy and flags 'Abgeschlossen' (Completed) as not-closed, so
+# it is deliberately EXCLUDED here. Empty list => no status filter (process any status).
+fresh_task_statuses:
+  - "In Progress"
+  - "in Arbeit"
+  - "Not Started"
+
 matching:
   lf_min_match_score: 0.70   # LeadFeeder company-match floor
   # Name-agreement gate (calibrated on the 6-month control set, 2026-07-02): LF's score

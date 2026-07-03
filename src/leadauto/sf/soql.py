@@ -30,10 +30,15 @@ def _in_list(values: Sequence[str]) -> str:
     return ", ".join(_quote(v) for v in values)
 
 
-def tasks_since(watermark: str, subjects: Sequence[str], limit: int = 0) -> str:
+def tasks_since(watermark: str, subjects: Sequence[str],
+                statuses: Sequence[str] = (), limit: int = 0) -> str:
     """In-scope Tasks created at/after `watermark`, oldest first.
 
     `watermark` is an unquoted SOQL datetime literal (e.g. 2026-05-17T00:00:00Z).
+    When `statuses` is given, only Tasks in those statuses are returned — the freshness
+    gate (open/unhandled). It is an explicit allowlist, NOT `IsClosed = false`, because
+    the org's picklist flags 'Abgeschlossen' (Completed) as not-closed; an empty list
+    disables the filter.
     """
     if not subjects:
         raise ValueError("tasks_since requires at least one subject")
@@ -41,8 +46,10 @@ def tasks_since(watermark: str, subjects: Sequence[str], limit: int = 0) -> str:
         f"SELECT {_TASK_FIELDS} FROM Task "
         f"WHERE CreatedDate >= {watermark} "
         f"AND Subject IN ({_in_list(subjects)}) "
-        "ORDER BY CreatedDate ASC"
     )
+    if statuses:
+        soql += f"AND Status IN ({_in_list(statuses)}) "
+    soql += "ORDER BY CreatedDate ASC"
     if limit and limit > 0:
         soql += f" LIMIT {limit}"
     return soql

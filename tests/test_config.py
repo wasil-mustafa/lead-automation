@@ -59,3 +59,13 @@ def test_thresholds_removed_and_dedupe_floor_present():
     assert s.dedupe_name_agree_min == 85
     assert not hasattr(s, "auto_link_threshold")
     assert not hasattr(s, "review_threshold")
+
+
+def test_fresh_task_statuses_from_config_yaml():
+    s = Settings.load()  # config.yaml lists the open/fresh statuses (excl. Abgeschlossen)
+    assert s.fresh_task_statuses == ["In Progress", "in Arbeit", "Not Started"]
+
+
+def test_fresh_task_statuses_defaults_empty_when_missing():
+    s = Settings(raw={}, leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.fresh_task_statuses == []
