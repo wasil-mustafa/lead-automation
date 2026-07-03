@@ -93,7 +93,7 @@ def test_stage1_matches_links_and_advances_watermark(tmp_path):
     qa = tmp_path / "qa.xlsx"
     state_path = tmp_path / "watermark.json"
     res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
-                     dry_run=True, qa_path=qa, state_path=state_path)
+                     dry_run=True, qa_path=qa, state_path=state_path, predictions_path=None)
     assert len(res.results) == 1
     r = res.results[0]
     # LeadFeeder is disabled here (lf_client=None) so the lead never gets an accepted LF
@@ -118,7 +118,8 @@ def test_stage1_dry_run_writes_nothing_and_does_not_persist_state(tmp_path):
                       accounts=[_account()], contacts=[_contact()])
     state_path = tmp_path / "watermark.json"
     res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
-                     dry_run=True, qa_path=tmp_path / "qa.xlsx", state_path=state_path)
+                     dry_run=True, qa_path=tmp_path / "qa.xlsx", state_path=state_path,
+                     predictions_path=None)
     assert sf.updates == []                 # no write-back
     assert res.writeback["processed"] == 0
     assert not state_path.exists()           # watermark not persisted in dry-run

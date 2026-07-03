@@ -15,6 +15,7 @@ from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import EnrichedLead, enrich_leads
 from ..logging import get_logger
 from ..match import MatchResult, load_existing_records, match_lead
+from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
 from ..qa_artifact import write_workbook
 from ..state import State, advance, compute_since, load_state, save_state
 from ..writeback import write_back
@@ -41,6 +42,7 @@ def run_stage1(
     qa_path: str | Path | None = None,
     state_path: str | Path | None = None,
     kununu_feed: bool = True,
+    predictions_path: str | Path | None = DEFAULT_PREDICTIONS_PATH,
     logger=None,
 ) -> Stage1Result:
     log = logger or get_logger("pipeline.stage1")
@@ -72,6 +74,11 @@ def run_stage1(
     failures = wb.get("failures", [])
     if failures:
         log.warning("%d write-back failure(s) recorded in the QA Failures sheet", len(failures))
+
+    if dry_run and predictions_path is not None:
+        stamp = (now or datetime.now(timezone.utc)).isoformat()
+        n = record_predictions(results, wb.get("payloads", []), stamp, predictions_path)
+        log.info("Recorded %d pending prediction(s) -> %s", n, predictions_path)
 
     qa_out: Path | None = None
     if qa_path is not None:
