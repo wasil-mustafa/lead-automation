@@ -80,3 +80,19 @@ def domain_root(value: str | None) -> str | None:
         return None
     root = re.sub(r"[^a-z0-9]", "", domain.split(".", 1)[0])
     return root if len(root) >= 5 else None
+
+
+def normalize_postal(value: str | None) -> str | None:
+    """Postal code with ALL whitespace removed (LF and org store it inconsistently)."""
+    if not value:
+        return None
+    v = re.sub(r"\s+", "", str(value))
+    return v or None
+
+
+def normalize_city(value: str | None) -> str | None:
+    """Casefolded city name with collapsed whitespace, for address-identity compare."""
+    if not value:
+        return None
+    v = re.sub(r"\s+", " ", str(value)).strip().casefold()
+    return v or None
