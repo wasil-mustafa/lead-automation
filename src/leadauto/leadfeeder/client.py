@@ -36,7 +36,9 @@ def flatten_company(attrs: dict) -> dict:
     industries_raw = attrs.get("industries", {}) or {}
     register = attrs.get("register", {}) or {}
 
-    industry_names = [ind.get("name", "") for ind in industries_raw.get("industry", []) or []]
+    # LF sends explicit "name": null entries — drop them, a join over None raises.
+    industry_names = [n for ind in industries_raw.get("industry", []) or []
+                      if (n := ind.get("name"))]
     phones = attrs.get("phones", []) or []
     phone = phones[0].get("number", "") if phones else ""
     emails = attrs.get("emails", []) or []
@@ -112,7 +114,7 @@ def flatten_contact_details(attrs: dict) -> dict:
         "phones_all": "; ".join(phones_all),
         "contact_linkedin": linkedin,
         "contact_xing": xing,
-        "departments": "; ".join(attrs.get("departments", []) or []),
+        "departments": "; ".join(d for d in attrs.get("departments") or [] if d),
         "hierarchy_level": attrs.get("hierarchy_level", ""),
     }
 

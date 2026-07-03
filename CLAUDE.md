@@ -153,6 +153,12 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   Harness `scripts/control_check_alt_names.py` is now git-tracked (gitignore exception).
   Also learned: LF rejects lowercase `country_code` (400 — must be uppercase ISO 3166-1 alpha-2);
   moot now that we don't send it. 191 tests pass.
+- ✅ **First live-credit CI crash fixed (2026-07-03, PR #8):** the first stage1 run WITH LeadFeeder
+  credits crashed in `flatten_company` — LF retrieve payloads carry explicit `"name": null` industry
+  entries and `"; ".join(...)` raised `TypeError` on the None (dry-run/no-LF paths never see real
+  retrieve data, which is why they were green). Both raw-list joins (`Industry`, contact
+  `departments`) now drop falsy items. Note: retrieved records are free to re-access for 12 months,
+  so the crashed run's spent credits are NOT re-charged on the retry. 193 tests pass.
 
 ## Branch `assigned-companies-gate` — COMPLETE, **PR #5 MERGED** (2026-07-03)
 All 8 plan tasks of `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md` are committed and
