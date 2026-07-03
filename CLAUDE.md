@@ -170,6 +170,30 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   retrieve data, which is why they were green). Both raw-list joins (`Industry`, contact
   `departments`) now drop falsy items. Note: retrieved records are free to re-access for 12 months,
   so the crashed run's spent credits are NOT re-charged on the retry. 193 tests pass.
+- ✅ **Dublettencheck rule engine + shadow comparison (2026-07-03, branch `dublettencheck-rules`):**
+  Rewrote the account matcher as an ordered 8-rule engine mirroring the `Touchpoint automatismus logik`
+  decision tree (spec `docs/superpowers/specs/2026-07-03-dublettencheck-rules-and-shadow-compare-design.md`,
+  plan `docs/superpowers/plans/2026-07-03-dublettencheck-rules-and-shadow-compare.md`). Rules (first
+  hit wins): `no_lf_match`→review, `name_address`→link, `name_vat`→link, `kununu_agree`→link,
+  `kununu_conflict`→review, `name_only`→review, `weak_signal`→review, `no_match`→create_new. **Key
+  invariant:** a lead with no accepted LeadFeeder match (`enriched.matched=False`) ALWAYS goes to
+  review — never auto-links, never auto-creates, even on a perfect kununu UUID/URL hit. Score
+  thresholds are GONE: `matching.auto_link_threshold`/`review_threshold` removed from config;
+  `MatchResult` now carries `rule` + `evidence` (demoted VAT/DBID/host/email-domain/fuzzy hits shown
+  as review evidence, never auto-linking). Name-only auto-link was deliberately downgraded to review
+  (name collisions). `name_address` = normalized name + `BillingPostalCode` + `BillingCity` (street
+  ignored); `name_vat` = normalized name + VAT; `kununu_agree` splits on `matching.dedupe_name_agree_min`
+  (85) against LF name / `best_company` / feed `alt_names`. Stage-2 contact gate switched from
+  `contact_score >= 0.90` to reason-based (`{kununu_user_uuid, contact_email_in_account}` — behavior-identical).
+  QA Review sheet gains `match_rule`/`match_evidence` (dropped `account_score`); Summary counts all 8 rules.
+  **Shadow backtest:** every DRY stage-1 run appends predictions to committed `state/predictions.jsonl`;
+  `python -m leadauto shadow-compare` (wired into the scheduled workflow, read-only) scores pending
+  predictions against the org's real human conversions — decision hit/miss/observed + per-field
+  enrichment agreement — into committed `state/shadow_results.jsonl` + a `shadow_comparison.xlsx`
+  artifact (Decisions/Fields/Summary). `Lead.ConvertedDate` is Date-only, so "human created a new
+  account" = `Account.CreatedDate` same UTC day. stage1.yml now commits shadow files on every run,
+  watermark still only on non-dry. 214 tests pass; read-only `--dry-run --no-leadfeeder` smoke test
+  green (3 leads → all `no_lf_match`/review as expected without LF, predictions + QA columns verified).
 
 ## Branch `assigned-companies-gate` — COMPLETE, **PR #5 MERGED** (2026-07-03)
 All 8 plan tasks of `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md` are committed and
@@ -202,11 +226,21 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
    ✅ Country fields dropped from the LF match payload + full-set re-validation (92.7% accepted,
    wrong-company at baseline) — PR #6.
 6. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
+7. **Dublettencheck rule engine — validate on live data (branch `dublettencheck-rules`):** the rule
+   distribution has only been smoke-tested WITHOUT LeadFeeder (all leads → `no_lf_match`). Read the
+   `match_rule`/Summary breakdown of the next scheduled dry-run QA artifact (WITH LeadFeeder) to see
+   how leads split across `name_address`/`name_vat`/`kununu_agree`/`kununu_conflict`/`name_only`/
+   `weak_signal`, and calibrate `dedupe_name_agree_min` if needed.
+8. **Shadow comparison — review accuracy after a few days:** once humans have converted some of the
+   leads the dry runs predicted, read `shadow_comparison.xlsx` (Decisions = per-lead hit/miss vs the
+   human-chosen account; Fields = LF-vs-human enrichment agreement). This is the go-live evidence for
+   the rule engine + the enrichment write-back.
 
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
 fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
-assigned-companies gate merged via PR #5, country-fields drop via PR #6 (both 2026-07-03). No active branch.
+assigned-companies gate merged via PR #5, country-fields drop via PR #6 (both 2026-07-03). Active branch:
+`dublettencheck-rules` (rule engine + shadow comparison, dry-run — PR pending).
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
