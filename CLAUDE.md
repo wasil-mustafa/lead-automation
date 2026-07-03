@@ -130,54 +130,15 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   ⚠️ NOT yet control-set-validated; the assigned-companies feed field name needs confirming on the
   first live pull (`kununu_feed._company_names`). 190 tests pass.
 
-## IN-FLIGHT: assigned-companies gate (branch `assigned-companies-gate`) — RESUME HERE
-Feature: widen the LF name-agreement gate with the kununu profile's **assigned-company names**
-(a kununu main profile covers several legal entities; their names are additional truthful
-identities). Names come from the kununu DWH bulk feed `profiles.jsonl` (~530 MB,
-`api.data.kununu.com/v1/feeds/data-management/profiles.jsonl`, `KUNUNU_API_TOKEN` or
-`KUNUNU_API_USER`/`KUNUNU_API_PASSWORD` env), daily-cached, streamed once per run, joined by
-`profile_uuid` (URL-slug fallback via `kununu_feed.base_slug`). Thresholds unchanged (85/90).
-- **Spec:** `docs/superpowers/specs/2026-07-03-assigned-companies-gate-design.md` (user-approved;
-  credential rotation explicitly ruled unnecessary by user despite `.env` committed in the public
-  Profile-Matching repo). **Plan:** `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md`
-  (8 TDD tasks). Executed via subagent-driven development; ledger + task briefs/reports in
-  `.superpowers/sdd/` (git-ignored, machine-local — see `progress.md` there).
-- ✅ **Tasks 1–4 complete, committed, subagent-reviewed** (72a11aa..78634ab):
-  1. Config (8393078): `Settings.kununu_api_*` env fields + `kununu_feed_*` properties; config.yaml
-     `kununu_feed:` block (enabled: true, cache_path kununu_profiles.jsonl, max_age_hours 24); .gitignore.
-  2. `kununu_feed.py` lookup (92fe8b3 + fix a5187d4): `ProfileInfo`, `base_slug` (strips kununu dedup
-     digit-suffix after a letter; keeps `-24`), one-pass streaming `lookup_profiles` keyed by uuid AND
-     slug (first record wins per slug), `_company_names` handles unconfirmed field shapes
-     (assigned_companies / assigned_company_names, strings or dicts) — single place to fix after first
-     live pull; OSError → {}.
-  3. `kununu_feed.py` cache (c590e99 + fix 7e0435e): `ensure_feed` (24h staleness, Bearer/Basic auth,
-     stale-cache fallback on missing creds/failed download, .part cleanup via finally),
-     `load_profiles_for_leads` (short-circuits to {} when no lead carries uuid/slug — keeps other
-     tests hermetic; never raises).
-  4. Gate (e8b0a30 + adjudication 78634ab): `_name_agreement` → `(score, via)` scoring company_name +
-     `alt_names` + email-domain root; `_best_match` adds `agreed_via`; `match_companies` strips
-     `alt_names` from the POST body but gates on the full payload. **Adjudicated:** ties attribute to
-     `company_name` (strict `>`; plan's original rescue test was a token-subset case — replaced with
-     Haniel/TAKKT AG; tie behavior pinned by test).
-- ⚠️ **Task 5 (wiring) — code COMPLETE but UNCOMMITTED and UNREVIEWED** (implementer stopped mid-task):
-  `enrich.py` (EnrichedLead.agreed_via, profiles/use_kununu_feed params, alt_names into payloads),
-  `stage1_enrich.py` (`kununu_feed: bool = True` pass-through), `cli.py` (`--kununu-feed/--no-kununu-feed`),
-  `tests/test_enrich.py` (+3 tests). Full suite 189 passed with these changes. **Known deviation to fix
-  or accept before committing:** own-name exclusion uses `casefold()` instead of the brief's
-  `normalize_name` equality (suffix variants of the profile name are kept in alt_names — harmless for
-  gating since ties go to company_name), leaving `normalize_name` imported-but-unused in `enrich.py`.
-  Review against `.superpowers/sdd/task-5-brief.md`, fix, commit as
-  `feat(enrich): assigned-company alt names into LF payloads; agreed_via on EnrichedLead`.
-- ⬜ **Task 6:** QA Review column `lf_agreed_via` after `lf_name_agreement` (qa_artifact.py + test).
-- ⬜ **Task 7:** stage1.yml — `actions/cache` on kununu_profiles.jsonl (daily key `kununu-feed-<date>`,
-  restore-keys prefix) + `KUNUNU_API_TOKEN` in the Run Stage 1 env.
-- ⬜ **Task 8:** CLAUDE.md status bullet + full suite; then whole-branch final review (most capable
-  model), then PR to master.
-- ⬜ **Post-plan (live, needs `KUNUNU_API_TOKEN`):** set env + GitHub secret; first feed pull → confirm
-  the assigned-companies field name in a real record (fix `kununu_feed._company_names` if needed);
-  re-run the 1,101-lead control set with alt names vs the 89.4% accepted / 1.1% wrong-company baseline.
-- **PR #4 (name-agreement gate, branch `leadfeeder-throttle-batching` → master) is OPEN and mergeable**
-  (conflict resolved 2026-07-03) — merge it first; `assigned-companies-gate` branches off it.
+## Branch `assigned-companies-gate` — COMPLETE (2026-07-03), awaiting PR
+All 8 plan tasks of `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md` are committed and
+reviewed (per-task + whole-branch final review); 190 tests pass. See the "Assigned-company alt names"
+status bullet above and Next-steps item 5 for what remains (live-only validation).
+- **Merge order:** PR #4 (name-agreement gate, `leadfeeder-throttle-batching` → master) merges FIRST;
+  this branch is based on it and PRs after.
+- Post-plan (live, needs `KUNUNU_API_TOKEN`): set env + GitHub secret; first feed pull → confirm the
+  assigned-companies field name in a real record (fix `kununu_feed._company_names` if needed); re-run
+  the 1,101-lead control set with alt names vs the 89.4% accepted / 1.1% wrong-company baseline.
 - Machine note: `gh auth setup-git` was run on the private laptop 2026-07-03 (git push works again).
 
 ## Next steps (resume here)
@@ -197,7 +158,7 @@ identities). Names come from the kununu DWH bulk feed `profiles.jsonl` (~530 MB,
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
 fix via PR #2; CI login hardening via PR #3; **name-agreement gate is PR #4 (OPEN, mergeable, awaiting merge)**.
-Active branch: `assigned-companies-gate` (off `leadfeeder-throttle-batching`, see IN-FLIGHT above).
+Active branch: `assigned-companies-gate` (off `leadfeeder-throttle-batching`; complete, awaiting PR after #4 merges).
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
