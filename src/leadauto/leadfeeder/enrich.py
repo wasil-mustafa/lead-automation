@@ -31,6 +31,7 @@ class EnrichedLead:
     match_score: float | None = None
     name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
     agreed_via: str | None = None  # which signal vouched: company_name / alt_name:<n> / email_domain
+    alt_names: list[str] = field(default_factory=list)  # assigned-company names from the kununu feed
     company: dict = field(default_factory=dict)   # flatten_company output (or {})
     contact_found: bool = False
     contact: dict = field(default_factory=dict)   # flattened details + contact_id/full_name
@@ -80,6 +81,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
                         alts.append(n)
                 if alts:
                     payload["alt_names"] = alts
+                    result.alt_names = alts
             match_payloads.append(payload)
             match_index.append(len(results))
         results.append(result)
