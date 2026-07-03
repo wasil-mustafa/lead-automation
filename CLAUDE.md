@@ -139,6 +139,9 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   from the profile's own assigned-companies list (the intended semantic; a name-only truth metric
   flags them as "wrong"). No stranger-company accepts added; **thresholds 85/90 kept**. Absolute rates
   sit ~3pp under the 2026-07-02 baseline because this harness passes country fields — see next bullet.
+  The LF-gate ROI of alt names is small, but the feed/alt-names infra STAYS: it's planned input for a
+  future **Salesforce duplicate-detection feature on live leads** (per Wasil, 2026-07-03). The
+  `kununu-data` MCP server is the same bulk feed file — no per-lead query API to replace `ensure_feed`.
 - ✅ **Country fields dropped from the LF match payload (2026-07-03, branch `drop-country-from-lf-match`):**
   LF's `country`/`country_code` filters SUPPRESS good matches — of 105 control leads with 0 candidates
   when country fields were sent, 60 regained candidates without them; 59 passed the gate and ALL
@@ -181,7 +184,7 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
 fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
-assigned-companies gate merged via PR #5 (2026-07-03). Active branch: `drop-country-from-lf-match` (PR #6).
+assigned-companies gate merged via PR #5, country-fields drop via PR #6 (both 2026-07-03). No active branch.
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
