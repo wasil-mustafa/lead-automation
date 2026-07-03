@@ -68,6 +68,11 @@ def test_lookup_skips_malformed_lines(tmp_path):
     assert "u1" in found
 
 
+def test_lookup_missing_feed_file_returns_empty(tmp_path):
+    # The module promises degradation, never an exception, on any failure path.
+    assert lookup_profiles(tmp_path / "nope.jsonl", uuids={"u1"}, slugs=set()) == {}
+
+
 def test_company_names_field_shapes(tmp_path):
     # The exact feed field is unconfirmed; both list-of-strings and list-of-dicts work.
     feed = _write_feed(tmp_path, [

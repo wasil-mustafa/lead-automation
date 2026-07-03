@@ -72,30 +72,34 @@ def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
         return {}
     found: dict[str, ProfileInfo] = {}
     bad = 0
-    with open(feed_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                bad += 1
-                continue
-            uuid = d.get("profile_uuid")
-            slug = base_slug(d.get("profile_url"))
-            if uuid not in uuids and slug not in slugs:
-                continue
-            info = ProfileInfo(
-                name=(d.get("profile_name") or "").strip(),
-                companies=_company_names(d),
-                city=d.get("profile_city"),
-                country_code=d.get("profile_country_code"),
-            )
-            if uuid:
-                found.setdefault(uuid, info)
-            if slug:
-                found.setdefault(slug, info)
+    try:
+        with open(feed_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    bad += 1
+                    continue
+                uuid = d.get("profile_uuid")
+                slug = base_slug(d.get("profile_url"))
+                if uuid not in uuids and slug not in slugs:
+                    continue
+                info = ProfileInfo(
+                    name=(d.get("profile_name") or "").strip(),
+                    companies=_company_names(d),
+                    city=d.get("profile_city"),
+                    country_code=d.get("profile_country_code"),
+                )
+                if uuid:
+                    found.setdefault(uuid, info)
+                if slug:
+                    found.setdefault(slug, info)
+    except OSError as err:
+        log.warning("kununu feed unreadable (%s); profile lookup skipped", err)
+        return {}
     if bad:
         log.warning("kununu feed: skipped %d malformed line(s)", bad)
     return found
