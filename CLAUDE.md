@@ -121,6 +121,26 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   4.7%→1.1% of accepted, 115 rescues. `name_agreement` flows through `EnrichedLead` into the QA
   Review sheet (`lf_name_agreement`, next to the untrustworthy `lf_match_score`) so reviewers can
   calibrate the thresholds. 162 tests pass.
+- ✅ **Assigned-company alt names in the LF gate** (spec `docs/superpowers/specs/2026-07-03-assigned-companies-gate-design.md`):
+  `kununu_feed.py` streams the daily-cached DWH feed (join `profile_uuid`, URL-slug fallback) and
+  `enrich.py` passes the profile's assigned-company names as `alt_names` (stripped before the LF POST);
+  `_name_agreement` takes the max across profile name / alt names / email-domain root and reports
+  `agreed_via` (QA column `lf_agreed_via`). Thresholds unchanged (85/90). Degrades to pre-feed behavior
+  without credentials (`KUNUNU_API_TOKEN` env + GitHub secret; `--no-kununu-feed` to disable).
+  ⚠️ NOT yet control-set-validated; the assigned-companies feed field name needs confirming on the
+  first live pull (`kununu_feed._company_names`). 190 tests pass.
+
+## Branch `assigned-companies-gate` — COMPLETE (2026-07-03), **PR #5 OPEN** (→ master)
+All 8 plan tasks of `docs/superpowers/plans/2026-07-03-assigned-companies-gate.md` are committed and
+reviewed (per-task + whole-branch final review); 190 tests pass. See the "Assigned-company alt names"
+status bullet above and Next-steps item 5 for what remains (live-only validation).
+- PR #4 was **squash-merged** to master 2026-07-03; this branch then merged `origin/master` back in
+  with `-s ours` (valid because master's tree was byte-identical to the branch's old base `b71b85f`
+  — verified empty `git diff`), so PR #5's diff shows only this branch's work.
+- Post-plan (live, needs `KUNUNU_API_TOKEN`): set env + GitHub secret; first feed pull → confirm the
+  assigned-companies field name in a real record (fix `kununu_feed._company_names` if needed); re-run
+  the 1,101-lead control set with alt names vs the 89.4% accepted / 1.1% wrong-company baseline.
+- Machine note: `gh auth setup-git` was run on the private laptop 2026-07-03 (git push works again).
 
 ## Next steps (resume here)
 1. **Verify write-back field values against org `headless`** (read-only describe is fine): confirm the
@@ -133,11 +153,14 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
 4. **CI**: ✅ repo secrets set (`SFDX_AUTH_URL`, `LEADFEEDER_API_KEY`); ✅ login hardened (3× retry +
    pinned CLI); ✅ `stage1` dry-run smoke-tested green. **Still TODO:** configure the `lead-conversion`
    Environment's required reviewers (the Stage 2 gate); fix the `dry_run` guard footgun (see below).
-5. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
+5. Validate alt-names gate on the 1,101-lead control set (needs `KUNUNU_API_TOKEN` + feed download) vs the 89.4%/1.1% baseline, confirm the feed's assigned-companies field name, set the GitHub secret.
+6. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
 
 Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
-fix via PR #2; CI login hardening via PR #3. Design + plans live in `docs/superpowers/{specs,plans}/`.
+fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
+**assigned-companies gate is PR #5 (OPEN)**. Active branch: `assigned-companies-gate` (complete, PR #5 open).
+Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
 Fixed this session: unique bulk temp file; freemail domains excluded from the email-domain

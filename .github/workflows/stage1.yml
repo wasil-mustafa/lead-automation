@@ -58,6 +58,20 @@ jobs:
           npm install --global @salesforce/cli@2.140.6
           sf --version
 
+      - name: Compute feed cache key
+        id: feedkey
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache kununu profile feed
+        # Daily key: first run of the day restores yesterday's feed (stale), then
+        # ensure_feed refreshes it and the post-job save stores it under today's key.
+        # If the download fails, the stale restore keeps the gate working.
+        uses: actions/cache@v4
+        with:
+          path: kununu_profiles.jsonl
+          key: kununu-feed-${{ steps.feedkey.outputs.date }}
+          restore-keys: kununu-feed-
+
       - name: Authenticate to Salesforce
         env:
           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}   # secret -> env, never inlined
@@ -82,6 +96,7 @@ jobs:
         env:
           PYTHONPATH: src
           LEADFEEDER_API_KEY: ${{ secrets.LEADFEEDER_API_KEY }}
+          KUNUNU_API_TOKEN: ${{ secrets.KUNUNU_API_TOKEN }}
         run: |
           FLAGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi

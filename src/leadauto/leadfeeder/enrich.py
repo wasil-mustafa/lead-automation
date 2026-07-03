@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 import requests
 
 from ..extract.models import ExtractedLead
+from ..kununu_feed import base_slug, load_profiles_for_leads
 from ..logging import get_logger
+from ..textnorm import normalize_name
 from .client import flatten_company, flatten_contact_details
 
 
@@ -28,6 +30,7 @@ class EnrichedLead:
     matched_name: str | None = None
     match_score: float | None = None
     name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
+    agreed_via: str | None = None  # which signal vouched: company_name / alt_name:<n> / email_domain
     company: dict = field(default_factory=dict)   # flatten_company output (or {})
     contact_found: bool = False
     contact: dict = field(default_factory=dict)   # flattened details + contact_id/full_name
@@ -40,10 +43,15 @@ def _contact_name(e: ExtractedLead) -> str | None:
     return full or None
 
 
-def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None) -> list[EnrichedLead]:
+def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
+                 profiles=None, use_kununu_feed: bool = True) -> list[EnrichedLead]:
     log = logger or get_logger("leadfeeder.enrich")
     if not extracteds:
         return []
+
+    if profiles is None and use_kununu_feed and settings.kununu_feed_enabled:
+        profiles = load_profiles_for_leads(extracteds, settings, logger=log)
+    profiles = profiles or {}
 
     company_list_id = client.find_or_create_list(settings.lf_company_list, "company")
     contact_list_id = client.find_or_create_list(settings.lf_contact_list, "contact")
@@ -62,6 +70,17 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
                 payload["country"] = e.region
             if e.country_code:
                 payload["country_code"] = e.country_code
+            info = (profiles.get(e.kununu_profile_uuid or "")
+                    or profiles.get(base_slug(e.kununu_url) or ""))
+            if info:
+                own = normalize_name(company_name)
+                alts = []
+                for n in info.companies:
+                    nn = normalize_name(n)
+                    if nn and nn != own and n not in alts:
+                        alts.append(n)
+                if alts:
+                    payload["alt_names"] = alts
             match_payloads.append(payload)
             match_index.append(len(results))
         results.append(result)
@@ -76,6 +95,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None)
         r.matched_name = match.get("matched_name")
         r.match_score = match.get("match_score")
         r.name_agreement = match.get("name_agreement")
+        r.agreed_via = match.get("agreed_via")
         try:
             client.add_company_to_list(r.lf_company_id, company_list_id)
         except requests.exceptions.RequestException as err:

@@ -4,9 +4,14 @@ Import/
 Export/
 PQ/
 Scripts/
+Profile Scripts/
 *.csv
 *.xlsx
 *.xlsm
+
+# kununu profile feed cache (updated daily, not committed)
+kununu_profiles.jsonl
+kununu_profiles.jsonl.part
 
 # Secrets & local env
 .env

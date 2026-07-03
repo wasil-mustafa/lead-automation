@@ -172,7 +172,7 @@ def test_match_company_picks_highest_score_above_threshold():
     client = _client(routes, min_match_score=0.70)
     match = client.match_company("Acme", email="x@acme.de", country="Germany", country_code="DE")
     assert match == {"company_id": "c2", "match_score": 0.95, "matched_name": "Acme GmbH",
-                     "name_agreement": 100}
+                     "name_agreement": 100, "agreed_via": "company_name"}
 
 
 def test_match_company_returns_none_below_threshold():
@@ -224,6 +224,56 @@ def test_match_company_prefers_passing_candidate_over_higher_scoring_failing_one
     client = _client(routes, min_match_score=0.70)
     match = client.match_company("Acme")
     assert match["company_id"] == "c2"
+
+
+def test_match_company_rescued_by_alt_name():
+    # Profile "Haniel" (holding), LF returns the assigned legal entity "TAKKT AG":
+    # only the alt name vouches — the profile name itself does not.
+    routes = {("POST", "/companies/match"):
+              _match_payload([("c1", 0.30, "TAKKT AG")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_companies([{
+        "company_name": "Haniel", "email": "",
+        "alt_names": ["TAKKT AG", "CWS-boco International"],
+    }])[0]
+    assert match["company_id"] == "c1"
+    assert match["agreed_via"] == "alt_name:TAKKT AG"
+    assert match["name_agreement"] >= 90
+
+
+def test_agreed_via_prefers_company_name_on_ties():
+    # Subset scoring gives company_name 100 too ("Siemens" is a token-subset of
+    # "Siemens Mobility GmbH"); attribution stays with the primary signal when it
+    # already fully vouches — the alt name added no evidence.
+    routes = {("POST", "/companies/match"):
+              _match_payload([("c1", 0.30, "Siemens Mobility GmbH")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_companies([{
+        "company_name": "Siemens", "email": "",
+        "alt_names": ["Siemens Mobility GmbH"],
+    }])[0]
+    assert match["agreed_via"] == "company_name"
+
+
+def test_match_company_alt_names_do_not_loosen_gate():
+    # Unrelated alt names must not admit a wrong candidate.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.91, "GogoMil UG")])}
+    client = _client(routes, min_match_score=0.70)
+    assert client.match_companies([{
+        "company_name": "myITplanet GmbH", "email": "",
+        "alt_names": ["myITplanet Services GmbH"],
+    }]) == [None]
+
+
+def test_alt_names_are_stripped_from_post_body():
+    seen = {}
+    def handler(params, body):
+        seen.update(body)
+        return _match_payload([("c1", 0.95, "Acme GmbH")])
+    routes = {("POST", "/companies/match"): handler}
+    client = _client(routes, min_match_score=0.70)
+    client.match_companies([{"company_name": "Acme", "alt_names": ["Acme Sub GmbH"]}])
+    assert all("alt_names" not in c for c in seen["companies"])
 
 
 # --- search_contact cascade --------------------------------------------------
@@ -332,7 +382,7 @@ def test_match_companies_aligns_results_by_input_index():
     client = _client({("POST", "/companies/match"): handler})
     out = client.match_companies([{"company_name": "Acme"}, {"company_name": "Nope"}])
     assert out == [{"company_id": "c1", "match_score": 0.95, "matched_name": "Acme",
-                    "name_agreement": 100}, None]
+                    "name_agreement": 100, "agreed_via": "company_name"}, None]
 
 
 def test_match_companies_chunks_over_match_batch():

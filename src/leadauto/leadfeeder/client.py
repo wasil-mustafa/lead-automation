@@ -238,21 +238,34 @@ class LeadfeederClient:
         return list_id
 
     # -- company match (batched) --
-    def _name_agreement(self, matched_name: str, payload: dict) -> int:
-        """0-100 agreement between LF's returned name and the request's identity signals:
-        the sent company_name (legal-suffix-normalized token_set) and, for corporate
-        addresses, the email-domain root. 0 when LF returned no name (fail closed)."""
+    def _name_agreement(self, matched_name: str, payload: dict) -> tuple[int, str | None]:
+        """(0-100 agreement, winning signal) between LF's returned name and the
+        request's identity signals: the sent company_name, any alt_names (assigned
+        companies of the lead's kununu profile), and — for corporate addresses — the
+        email-domain root. (0, None) when LF returned no name (fail closed)."""
         cand = normalize_name(matched_name)
         if not cand:
-            return 0
-        scores = [0]
+            return 0, None
+        best, via = 0, None
         ours = normalize_name(payload.get("company_name"))
         if ours:
-            scores.append(int(fuzz.token_set_ratio(cand, ours)))
+            s = int(fuzz.token_set_ratio(cand, ours))
+            if s > best:
+                best, via = s, "company_name"
+        # alt_names must score strictly higher than best to override.
+        for alt in payload.get("alt_names") or []:
+            alt_norm = normalize_name(alt)
+            if not alt_norm:
+                continue
+            s = int(fuzz.token_set_ratio(cand, alt_norm))
+            if s > best:
+                best, via = s, f"alt_name:{alt}"
         root = domain_root(payload.get("email"))
         if root:
-            scores.append(int(fuzz.partial_ratio(alnum(matched_name), root)))
-        return max(scores)
+            s = int(fuzz.partial_ratio(alnum(matched_name), root))
+            if s > best:
+                best, via = s, "email_domain"
+        return best, via
 
     def _best_match(self, matches: list, payload: dict) -> dict | None:
         """Best candidate passing the acceptance gate, or None.
@@ -269,7 +282,7 @@ class LeadfeederClient:
         for m in matches or []:
             score = m.get("attributes", {}).get("match_score", 0)
             summary = m.get("relationships", {}).get("company_summary", {}).get("attributes", {})
-            agree = self._name_agreement(summary.get("name", ""), payload)
+            agree, via = self._name_agreement(summary.get("name", ""), payload)
             if not ((score >= self.min_match_score and agree >= self.name_agree_min)
                     or agree >= self.name_agree_rescue):
                 continue
@@ -277,23 +290,29 @@ class LeadfeederClient:
             if best_key is None or key > best_key:
                 best_key = key
                 best = {"company_id": m["id"], "match_score": score,
-                        "matched_name": summary.get("name", ""), "name_agreement": agree}
+                        "matched_name": summary.get("name", ""), "name_agreement": agree,
+                        "agreed_via": via}
         return best
 
     def match_companies(self, payloads: list[dict]) -> list[dict | None]:
         """Batch company match (free). `payloads` is a list of per-company dicts
         (company_name, email, country, country_code, ...). Returns a list aligned to
-        `payloads`: {company_id, match_score, matched_name} or None per company. A chunk
-        that errors after retries degrades its entries to None (logged), never raising."""
+        `payloads`: {company_id, match_score, matched_name, name_agreement, agreed_via}
+        or None per company. `name_agreement` is a 0-100 int scoring how well the matched
+        name agrees with the payload's company_name / alt_names / email-domain root;
+        `agreed_via` names which signal vouched for the match (`company_name`,
+        `alt_name:<name>`, or `email_domain`), or None if nothing agreed. A chunk that
+        errors after retries degrades its entries to None (logged), never raising."""
         if not payloads:
             return []
         account_id = self.get_account_id()
         results: list[dict | None] = []
         for i in range(0, len(payloads), self.match_batch):
             chunk = payloads[i:i + self.match_batch]
+            api_chunk = [{k: v for k, v in p.items() if k != "alt_names"} for p in chunk]
             try:
                 data = self.api_post(
-                    "/companies/match", payload={"companies": chunk},
+                    "/companies/match", payload={"companies": api_chunk},
                     params={"account_id": account_id, "max_results_per_company": 3},
                 )
             except requests.exceptions.RequestException as e:

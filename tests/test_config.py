@@ -28,3 +28,27 @@ def test_leadfeeder_throttle_and_batch_defaults():
     assert s.lf_max_retries == 4
     assert s.lf_retrieve_batch == 100
     assert s.lf_match_batch == 200
+
+
+def test_kununu_feed_settings_from_config_yaml():
+    s = Settings.load()  # config.yaml enables the feed with defaults
+    assert s.kununu_feed_enabled is True
+    assert s.kununu_feed_cache_path.name == "kununu_profiles.jsonl"
+    assert s.kununu_feed_max_age_hours == 24
+    assert s.kununu_feed_url.startswith("https://api.data.kununu.com/")
+
+
+def test_kununu_feed_defaults_when_section_missing():
+    s = Settings(raw={}, leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.kununu_feed_enabled is False
+    assert s.kununu_feed_max_age_hours == 24
+
+
+def test_kununu_credentials_come_from_env(monkeypatch):
+    monkeypatch.setenv("KUNUNU_API_TOKEN", "tok123")
+    monkeypatch.setenv("KUNUNU_API_USER", "u")
+    monkeypatch.setenv("KUNUNU_API_PASSWORD", "p")
+    s = Settings.load()
+    assert s.kununu_api_token == "tok123"
+    assert s.kununu_api_user == "u"
+    assert s.kununu_api_password == "p"
