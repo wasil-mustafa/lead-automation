@@ -21,8 +21,10 @@ on:
         type: boolean
         default: true
   schedule:
-    # Weekday mornings, 06:00 UTC. GitHub cron is UTC and ignores DST.
-    - cron: "0 6 * * 1-5"
+    # Target: 09:00 and 18:00 Europe/Vienna, daily. GitHub cron is UTC and
+    # DST-blind, so fire at both candidate UTC hours (CEST=UTC+2, CET=UTC+1)
+    # and let the `gate` job keep only the firings that are 9/18 Vienna time.
+    - cron: "0 7,8,16,17 * * *"
 
 # Never let two enrich runs overlap (they share the watermark file).
 concurrency:
@@ -33,7 +35,36 @@ permissions:
   contents: write   # commit the advanced watermark
 
 jobs:
+  gate:
+    # Decides (a) whether this firing runs (Vienna-hour check for schedule
+    # events) and (b) the effective dry-run mode. Scheduled runs are FORCED
+    # dry-run for now — flip here at go-live. This also fixes the old footgun
+    # where a schedule event's empty `inputs.dry_run` fell into --no-dry-run.
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      dry_run: ${{ steps.decide.outputs.dry_run }}
+    steps:
+      - name: Decide run + dry-run mode
+        id: decide
+        run: |
+          RUN="true"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            HOUR=$(TZ=Europe/Vienna date +%-H)
+            if [ "$HOUR" != "9" ] && [ "$HOUR" != "18" ]; then
+              RUN="false"
+              echo "Vienna hour $HOUR is not a target slot (9/18); skipping."
+            fi
+            DRY="true"   # scheduled runs stay dry until go-live
+          else
+            DRY="${{ inputs.dry_run }}"
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY" >> "$GITHUB_OUTPUT"
+
   enrich:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
       # Quiet the sf CLI's background async work — a source of intermittent
@@ -99,7 +130,7 @@ jobs:
           KUNUNU_API_TOKEN: ${{ secrets.KUNUNU_API_TOKEN }}
         run: |
           FLAGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi
+          if [ "${{ needs.gate.outputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi
           if [ "${{ inputs.leadfeeder }}" = "false" ]; then FLAGS="$FLAGS --no-leadfeeder"; fi
           LIMIT="${{ inputs.limit }}"
           if [ -n "$LIMIT" ] && [ "$LIMIT" -gt 0 ] 2>/dev/null; then FLAGS="$FLAGS --limit $LIMIT"; fi
@@ -115,7 +146,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Commit advanced watermark
-        if: ${{ inputs.dry_run != 'true' }}
+        if: ${{ needs.gate.outputs.dry_run != 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

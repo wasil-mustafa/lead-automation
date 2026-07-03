@@ -72,6 +72,13 @@ def test_leads_by_ids_filters_ids_and_unconverted():
     assert '"' not in q
 
 
+def test_leads_by_ids_restricts_to_queue_owned():
+    # Scope decision 2026-07-03: only queue-held leads for now. Pool-user-owned
+    # leads (Rohdaten/Clean Pool) carry contact-attached tasks — handled later.
+    q = soql.leads_by_ids(["00Q000000000001AAA"])
+    assert "Owner.Type = 'Queue'" in q
+
+
 def test_leads_by_ids_requires_ids():
     with pytest.raises(ValueError):
         soql.leads_by_ids([])

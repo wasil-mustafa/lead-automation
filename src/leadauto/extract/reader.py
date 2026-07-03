@@ -90,7 +90,7 @@ def read_extracted_leads(
     who_ids = sorted({t["WhoId"] for t in tasks})
     leads_raw = client.query(soql.leads_by_ids(who_ids))
     lead_map = {l["Id"]: l for l in leads_raw}
-    log.info("Resolved %d/%d WhoId(s) to unconverted lead(s)", len(lead_map), len(who_ids))
+    log.info("Resolved %d/%d WhoId(s) to unconverted queue-owned lead(s)", len(lead_map), len(who_ids))
 
     result = ExtractionResult(
         processed_tasks=[{"Id": t.get("Id"), "CreatedDate": t.get("CreatedDate")} for t in tasks]
