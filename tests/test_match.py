@@ -1,11 +1,12 @@
 """Matcher tests (Module 3a).
 
-The pure scoring/normalization logic is tested directly against in-memory `ExistingRecords`
-built from plain account/contact dicts (the same shape `SfClient.query` returns). The org
-boundary (`load_existing_records`) is tested through a FakeClient that routes by SObject.
+The pure rule engine is tested directly against in-memory `ExistingRecords` built from
+plain account/contact dicts (the same shape `SfClient.query` returns). The org boundary
+(`load_existing_records`) is tested through a FakeClient that routes by SObject.
 
-Signal priority and scores follow the approved plan's tables; thresholds come from the real
-config.yaml (auto_link 0.90, review 0.60) via Settings.load().
+Rules are ordered (first hit wins); see the module docstring in `match.py` and
+`docs/superpowers/specs/2026-07-03-dublettencheck-rules-and-shadow-compare-design.md`.
+Contact matching keeps its original identifier-signal scoring.
 """
 import pytest
 
@@ -17,10 +18,10 @@ from leadauto.match import (
     ContactMatch,
     ExistingRecords,
     MatchResult,
-    decide,
+    RULE_DECISIONS,
     email_domain,
+    evaluate_account_rules,
     load_existing_records,
-    match_account,
     match_contact,
     match_lead,
     normalize_host,
@@ -28,7 +29,7 @@ from leadauto.match import (
     normalize_name,
 )
 
-SETTINGS = Settings.load()  # auto_link 0.90, review 0.60
+SETTINGS = Settings.load()  # auto_link 0.90, review 0.60 (still read; unused by rules yet)
 
 
 # --- builders ----------------------------------------------------------------
@@ -53,6 +54,7 @@ def _acct(aid="001A", **kw) -> dict:
         "Id": aid, "Name": None, "Website": None,
         "KN_KununuProfileUuid__c": None, "KN_KununuLinkProfile__c": None,
         "KN_VATNumber__c": None, "KN_DBID__c": None, "KN_DBLegalCompanyName__c": None,
+        "BillingPostalCode": None, "BillingCity": None,
     }
     base.update(kw)
     return base
@@ -121,90 +123,114 @@ def test_existing_records_indexes_accounts_and_contacts():
     assert ex.contact_by_email["max@acme.de"][0]["Id"] == "003C"
 
 
-# --- account matching --------------------------------------------------------
+# --- account rule engine ------------------------------------------------------
 
-def test_account_match_profile_uuid_is_top_priority():
+LF = dict(matched=True, matched_name="Acme GmbH", lf_company_id="lf-1")
+
+
+def _lf_enriched(company=None, extracted=None, **kw):
+    """An EnrichedLead that passed the LF gate."""
+    base = {**LF, **kw}
+    return _enriched(extracted=extracted, company=company or {}, **base)
+
+
+def test_rule_no_lf_match_always_reviews():
+    # Even a perfect kununu UUID hit must NOT link without an accepted LF match.
     ex = ExistingRecords.from_records([_acct("001A", KN_KununuProfileUuid__c="puid-1")], [])
-    enr = _enriched(_extracted(kununu_profile_uuid="puid-1"))
-    m = match_account(enr, ex, SETTINGS)
-    assert isinstance(m, AccountMatch)
-    assert m.account_id == "001A"
-    assert m.score == 1.0
-    assert m.reason == "kununu_profile_uuid"
+    enr = _enriched(extracted=_extracted(kununu_profile_uuid="puid-1"))
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "no_lf_match" and r.decision == "review"
+    assert r.account is None
+    assert "kununu_profile_uuid→001A" in r.evidence
 
 
-def test_account_match_kununu_url():
+def test_rule_name_address_links():
     ex = ExistingRecords.from_records(
-        [_acct("001A", KN_KununuLinkProfile__c="https://www.kununu.com/de/acme")], [])
-    enr = _enriched(_extracted(kununu_url="http://kununu.com/de/acme/"))
-    m = match_account(enr, ex, SETTINGS)
-    assert m.account_id == "001A"
-    assert m.score == 0.97
-    assert m.reason == "kununu_url"
+        [_acct("001A", Name="Acme GmbH", BillingPostalCode="10115", BillingCity="Berlin")], [])
+    enr = _lf_enriched(company={"Postal_Code": "10 115", "City": "berlin"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "name_address" and r.decision == "link"
+    assert r.account.account_id == "001A"
 
 
-def test_account_match_vat_from_leadfeeder_company():
-    ex = ExistingRecords.from_records([_acct("001A", KN_VATNumber__c="DE811569869")], [])
-    enr = _enriched(company={"VAT_Id": "DE811569869"})
-    m = match_account(enr, ex, SETTINGS)
-    assert m.account_id == "001A"
-    assert m.score == 0.95
-    assert m.reason == "vat"
-
-
-def test_account_match_dbid_from_register_id():
-    ex = ExistingRecords.from_records([_acct("001A", KN_DBID__c="DB-42")], [])
-    enr = _enriched(company={"Register_Id": "DB-42"})
-    m = match_account(enr, ex, SETTINGS)
-    assert m.score == 0.90
-    assert m.reason == "dbid"
-
-
-def test_account_match_website_host_is_review_band():
-    ex = ExistingRecords.from_records([_acct("001A", Website="https://www.acme.de")], [])
-    enr = _enriched(company={"Website": "http://acme.de/jobs"})
-    m = match_account(enr, ex, SETTINGS)
-    assert m.score == 0.85
-    assert m.reason == "website_host"
-
-
-def test_account_match_email_domain():
-    ex = ExistingRecords.from_records([_acct("001A", Website="https://www.acme.de")], [])
-    enr = _enriched(_extracted(contact_email="max@acme.de"))
-    m = match_account(enr, ex, SETTINGS)
-    assert m.score == 0.70
-    assert m.reason == "email_domain"
-
-
-def test_account_match_fuzzy_name_review_band():
-    ex = ExistingRecords.from_records([_acct("001A", Name="Hufeland Klinikum")], [])
-    enr = _enriched(_extracted(company_name="Hufeland Klinikum GmbH"))
-    m = match_account(enr, ex, SETTINGS)
-    assert m.reason == "fuzzy_name"
-    assert 0.60 <= m.score <= 0.80
-
-
-def test_account_match_highest_signal_wins():
-    # both a strong id and a weak host point at the same account
+def test_rule_name_address_requires_both_plz_and_city():
     ex = ExistingRecords.from_records(
-        [_acct("001A", KN_KununuProfileUuid__c="puid-1", Website="https://acme.de")], [])
-    enr = _enriched(_extracted(kununu_profile_uuid="puid-1"),
-                    company={"Website": "https://acme.de"})
-    m = match_account(enr, ex, SETTINGS)
-    assert m.score == 1.0 and m.reason == "kununu_profile_uuid"
+        [_acct("001A", Name="Acme GmbH", BillingPostalCode="10115", BillingCity="Hamburg")], [])
+    enr = _lf_enriched(company={"Postal_Code": "10115", "City": "Berlin"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "name_only" and r.decision == "review"
 
 
-def test_account_match_ignores_freemail_email_domain():
-    # a freemail/ISP domain must not link to an account that happens to share that host
-    ex = ExistingRecords.from_records([_acct("001A", Website="https://web.de")], [])
-    enr = _enriched(_extracted(contact_email="max@web.de"))
-    assert match_account(enr, ex, SETTINGS) is None
+def test_rule_name_vat_links():
+    ex = ExistingRecords.from_records([_acct("001A", Name="Acme GmbH", KN_VATNumber__c="DE 123")], [])
+    enr = _lf_enriched(company={"VAT_Id": "de123"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "name_vat" and r.decision == "link"
 
 
-def test_account_match_none_when_no_signal():
-    ex = ExistingRecords.from_records([_acct("001A", Name="Totally Different")], [])
-    enr = _enriched(_extracted(company_name="Nothing Alike Inc"))
-    assert match_account(enr, ex, SETTINGS) is None
+def test_rule_kununu_agree_links():
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme Services GmbH",
+               KN_KununuLinkProfile__c="https://www.kununu.com/de/acme")], [])
+    enr = _lf_enriched(extracted=_extracted(kununu_url="kununu.com/de/acme"),
+                       matched_name="Zeta AG", alt_names=["Acme Services GmbH"])
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "kununu_agree" and r.decision == "link"
+    assert r.account.account_id == "001A"
+
+
+def test_rule_kununu_conflict_reviews():
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Completely Different Firm",
+               KN_KununuLinkProfile__c="https://www.kununu.com/de/acme")], [])
+    enr = _lf_enriched(extracted=_extracted(kununu_url="kununu.com/de/acme"))
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "kununu_conflict" and r.decision == "review"
+    assert r.account.account_id == "001A"  # the conflicting account is surfaced
+
+
+def test_rule_kununu_beats_name_only():
+    # kununu URL (rules 4/5) is evaluated before bare name equality (rule 6).
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme GmbH"),
+         _acct("001B", Name="Acme Holding",
+               KN_KununuLinkProfile__c="https://www.kununu.com/de/acme")], [])
+    enr = _lf_enriched(extracted=_extracted(kununu_url="kununu.com/de/acme"),
+                       matched_name="Acme GmbH")
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule in ("kununu_agree", "kununu_conflict")
+    assert r.account.account_id == "001B"
+
+
+def test_rule_name_only_reviews():
+    ex = ExistingRecords.from_records([_acct("001A", Name="Acme GmbH")], [])
+    r = match_lead(_lf_enriched(), ex, SETTINGS)
+    assert r.rule == "name_only" and r.decision == "review"
+    assert r.account.account_id == "001A"
+
+
+def test_rule_weak_signal_reviews_with_evidence():
+    ex = ExistingRecords.from_records([_acct("001A", KN_VATNumber__c="DE123")], [])
+    enr = _lf_enriched(matched_name="Zeta AG", company={"VAT_Id": "DE123"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "weak_signal" and r.decision == "review"
+    assert r.account.account_id == "001A"
+    assert "vat→001A" in r.evidence
+
+
+def test_rule_no_match_creates():
+    ex = ExistingRecords.from_records([], [])
+    r = match_lead(_lf_enriched(), ex, SETTINGS)
+    assert r.rule == "no_match" and r.decision == "create_new"
+    assert r.account is None
+
+
+def test_rule_decisions_cover_all_rules():
+    assert set(RULE_DECISIONS) == {
+        "no_lf_match", "name_address", "name_vat", "kununu_agree",
+        "kununu_conflict", "name_only", "weak_signal", "no_match",
+    }
+    assert set(RULE_DECISIONS.values()) == {"link", "review", "create_new"}
 
 
 # --- contact matching --------------------------------------------------------
@@ -259,41 +285,34 @@ def test_contact_match_none():
     assert match_contact(enr, ex, account_id="001A", settings=SETTINGS) is None
 
 
-# --- decision + full match_lead ----------------------------------------------
-
-def test_decide_bands():
-    assert decide(1.0, SETTINGS) == "link"
-    assert decide(0.90, SETTINGS) == "link"
-    assert decide(0.85, SETTINGS) == "review"
-    assert decide(0.60, SETTINGS) == "review"
-    assert decide(0.59, SETTINGS) == "create_new"
-    assert decide(None, SETTINGS) == "create_new"
-
+# --- full match_lead (account rule + contact together) ------------------------
 
 def test_match_lead_link_with_account_and_contact():
+    # kununu URL hit + name agreement -> link (rule kununu_agree), contact matched too.
     ex = ExistingRecords.from_records(
-        [_acct("001A", KN_KununuProfileUuid__c="puid-1")],
+        [_acct("001A", Name="Acme GmbH", KN_KununuLinkProfile__c="https://www.kununu.com/de/acme")],
         [_contact("003C", "001A", KN_KununuUserUUID__c="uuid-1")])
-    enr = _enriched(_extracted(kununu_profile_uuid="puid-1", kununu_user_uuid="uuid-1"))
+    enr = _lf_enriched(extracted=_extracted(kununu_url="kununu.com/de/acme", kununu_user_uuid="uuid-1"))
     res = match_lead(enr, ex, SETTINGS)
     assert isinstance(res, MatchResult)
-    assert res.decision == "link"
+    assert res.rule == "kununu_agree" and res.decision == "link"
     assert res.account.account_id == "001A"
     assert res.contact.contact_id == "003C"
 
 
 def test_match_lead_review_band_no_autolink():
+    # website_host is a demoted (weak) signal -> review, never auto-link.
     ex = ExistingRecords.from_records([_acct("001A", Website="https://acme.de")], [])
-    enr = _enriched(company={"Website": "https://acme.de"})
+    enr = _lf_enriched(company={"Website": "https://acme.de"})
     res = match_lead(enr, ex, SETTINGS)
-    assert res.decision == "review"
+    assert res.rule == "weak_signal" and res.decision == "review"
     assert res.account.account_id == "001A"
     assert res.contact is None
 
 
 def test_match_lead_create_new_when_no_match():
     ex = ExistingRecords.from_records([], [])
-    enr = _enriched(_extracted(company_name="Brand New GmbH"))
+    enr = _lf_enriched(extracted=_extracted(company_name="Brand New GmbH"))
     res = match_lead(enr, ex, SETTINGS)
     assert res.decision == "create_new"
     assert res.account is None

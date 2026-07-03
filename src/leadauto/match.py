@@ -1,21 +1,23 @@
-"""Module 3a — multi-signal match of an enriched Lead vs existing Accounts/Contacts.
+"""Module 3a — rule-based Dublettencheck of an enriched Lead vs existing Accounts/Contacts.
 
-The matcher is deliberately split into pure scoring (operating on an in-memory
-`ExistingRecords` index) and a thin org-boundary loader (`load_existing_records`) that
-pulls candidate records in one batched query each. Both sides normalize URLs/hosts/names,
-so the comparison is robust to the org storing full URLs and legal-suffix name variants.
+Ordered rules mirror the business decision tree (spec: docs/superpowers/specs/
+2026-07-03-dublettencheck-rules-and-shadow-compare-design.md); first hit wins:
 
-Signal priority and scores follow the approved plan:
+  1 no_lf_match      no accepted LF company                             -> review
+  2 name_address     normalized name equal + postal code + city equal   -> link
+  3 name_vat         normalized name equal + VAT equal                  -> link
+  4 kununu_agree     profile UUID/URL on an Account + name agreement    -> link
+  5 kununu_conflict  profile UUID/URL hit, name disagrees               -> review
+  6 name_only        normalized name equal, nothing else                -> review
+  7 weak_signal      only VAT/DBID/host/email-domain/fuzzy point at one -> review
+  8 no_match         nothing                                            -> create_new
 
-  Account  kununu_profile_uuid 1.00 · kununu_url 0.97 · vat 0.95 · dbid 0.90 ·
-           website_host 0.85 · email_domain 0.70 · fuzzy_name 0.60–0.80
-  Contact  kununu_user_uuid 1.00 · email_in_account 0.95 · email_global / linkedin 0.85
-
-Decision (on the account score): >= auto_link -> link; >= review -> review; else create_new.
-Only strong identifier signals reach the auto_link band, so host/domain/fuzzy never auto-link.
+Contact matching keeps its identifier signals (kununu user UUID / email); numeric
+scores survive only as contact-side display metadata.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -30,12 +32,18 @@ from .textnorm import (  # noqa: F401
     FREEMAIL_DOMAINS as _FREEMAIL_DOMAINS,
     LEGAL_SUFFIXES as _LEGAL_SUFFIXES,
     email_domain,
+    normalize_city,
     normalize_host,
     normalize_name,
+    normalize_postal,
     normalize_url as _normalize_url,
 )
 
 _FUZZY_FLOOR = 0.90  # rapidfuzz ratio below this never counts as a name match
+
+
+def _norm_vat(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).upper()
 
 
 def normalize_kununu_url(value: str | None) -> str | None:
@@ -47,7 +55,7 @@ def normalize_kununu_url(value: str | None) -> str | None:
 @dataclass
 class AccountMatch:
     account_id: str
-    score: float
+    score: float | None   # display metadata only; rules decide, not scores
     reason: str
 
 
@@ -64,6 +72,8 @@ class MatchResult:
     account: AccountMatch | None
     contact: ContactMatch | None
     decision: str  # "link" | "review" | "create_new"
+    rule: str = ""
+    evidence: list[str] = field(default_factory=list)
 
 
 # --- existing-record index ---------------------------------------------------
@@ -98,7 +108,7 @@ class ExistingRecords:
             url = normalize_kununu_url(a.get("KN_KununuLinkProfile__c"))
             if url:
                 by_url.setdefault(url, a)
-            vat = (a.get("KN_VATNumber__c") or "").strip()
+            vat = _norm_vat(a.get("KN_VATNumber__c"))
             if vat:
                 by_vat.setdefault(vat, a)
             dbid = (a.get("KN_DBID__c") or "").strip()
@@ -140,61 +150,149 @@ class ExistingRecords:
         )
 
 
-# --- scoring -----------------------------------------------------------------
+# --- rule engine ---------------------------------------------------------------
 
-def _best_fuzzy_account(name: str | None, existing: ExistingRecords):
-    """Highest-scoring fuzzy name match (>= floor), mapped onto the 0.60–0.80 band."""
-    target = normalize_name(name)
+RULE_DECISIONS = {
+    "no_lf_match": "review",
+    "name_address": "link",
+    "name_vat": "link",
+    "kununu_agree": "link",
+    "kununu_conflict": "review",
+    "name_only": "review",
+    "weak_signal": "review",
+    "no_match": "create_new",
+}
+
+
+def _lead_name_norm(enriched: EnrichedLead) -> str | None:
+    return normalize_name(enriched.matched_name or enriched.extracted.best_company)
+
+
+def _account_names_norm(account: dict) -> set[str]:
+    names = (account.get("Name"), account.get("KN_DBLegalCompanyName__c"))
+    return {n for raw in names if (n := normalize_name(raw))}
+
+
+def _name_equal_accounts(enriched: EnrichedLead, existing: ExistingRecords) -> list[dict]:
+    target = _lead_name_norm(enriched)
+    return existing.acct_by_norm_name.get(target, []) if target else []
+
+
+def _address_equal(account: dict, company: dict) -> bool:
+    plz = normalize_postal(company.get("Postal_Code"))
+    city = normalize_city(company.get("City"))
+    if not plz or not city:
+        return False
+    return (normalize_postal(account.get("BillingPostalCode")) == plz
+            and normalize_city(account.get("BillingCity")) == city)
+
+
+def _kununu_account(enriched: EnrichedLead, existing: ExistingRecords):
+    """(account, signal_name) for a profile-UUID or kununu-URL hit, else None."""
+    e = enriched.extracted
+    puid = (e.kununu_profile_uuid or "").strip()
+    if puid and puid in existing.acct_by_profile_uuid:
+        return existing.acct_by_profile_uuid[puid], "kununu_profile_uuid"
+    url = normalize_kununu_url(e.kununu_url)
+    if url and url in existing.acct_by_kununu_url:
+        return existing.acct_by_kununu_url[url], "kununu_url"
+    return None
+
+
+def _kununu_name_agreement(account: dict, enriched: EnrichedLead) -> int:
+    """Max 0-100 agreement between the account's names and the lead's identities
+    (LF company name, parsed profile/company name, feed assigned-company names)."""
+    identities = [enriched.matched_name, enriched.extracted.best_company,
+                  *(enriched.alt_names or [])]
+    best = 0
+    for acct_name in _account_names_norm(account):
+        for ident in identities:
+            ident_norm = normalize_name(ident)
+            if ident_norm:
+                best = max(best, int(fuzz.token_set_ratio(acct_name, ident_norm)))
+    return best
+
+
+def _best_fuzzy_account(enriched: EnrichedLead, existing: ExistingRecords) -> dict | None:
+    """Closest non-identical fuzzy name hit (>= floor); exact equality is rule 2/3/6's job."""
+    target = _lead_name_norm(enriched)
     if not target:
         return None
     best = None
     for norm, accts in existing.acct_by_norm_name.items():
-        ratio = fuzz.token_sort_ratio(target, norm) / 100.0
-        if ratio < _FUZZY_FLOOR:
+        if norm == target:
             continue
-        score = round(min(0.80, 0.60 + (ratio - _FUZZY_FLOOR) * 2.0), 2)
-        if best is None or score > best[0]:
-            best = (score, "fuzzy_name", accts[0])
-    return best
+        ratio = fuzz.token_sort_ratio(target, norm) / 100.0
+        if ratio >= _FUZZY_FLOOR and (best is None or ratio > best[0]):
+            best = (ratio, accts[0])
+    return best[1] if best else None
 
 
-def match_account(enriched: EnrichedLead, existing: ExistingRecords, settings) -> AccountMatch | None:
+def _weak_hits(enriched: EnrichedLead, existing: ExistingRecords) -> list[tuple[str, dict]]:
+    """Demoted signals: they surface candidates as evidence but never link."""
     e = enriched.extracted
     company = enriched.company or {}
-    candidates: list[tuple[float, str, dict]] = []
-
-    puid = (e.kununu_profile_uuid or "").strip()
-    if puid and puid in existing.acct_by_profile_uuid:
-        candidates.append((1.0, "kununu_profile_uuid", existing.acct_by_profile_uuid[puid]))
-
-    url = normalize_kununu_url(e.kununu_url)
-    if url and url in existing.acct_by_kununu_url:
-        candidates.append((0.97, "kununu_url", existing.acct_by_kununu_url[url]))
-
-    vat = (company.get("VAT_Id") or e.vat_number or "").strip()
+    hits: list[tuple[str, dict]] = []
+    vat = _norm_vat(company.get("VAT_Id") or e.vat_number)
     if vat and vat in existing.acct_by_vat:
-        candidates.append((0.95, "vat", existing.acct_by_vat[vat]))
-
+        hits.append(("vat", existing.acct_by_vat[vat]))
     dbid = (company.get("Register_Id") or "").strip()
     if dbid and dbid in existing.acct_by_dbid:
-        candidates.append((0.90, "dbid", existing.acct_by_dbid[dbid]))
-
+        hits.append(("dbid", existing.acct_by_dbid[dbid]))
     host = normalize_host(company.get("Website") or e.lead_website)
     if host and host in existing.acct_by_host:
-        candidates.append((0.85, "website_host", existing.acct_by_host[host][0]))
-
+        hits.append(("website_host", existing.acct_by_host[host][0]))
     domain = email_domain(e.contact_email or e.lead_email)
     if domain and domain not in _FREEMAIL_DOMAINS and domain in existing.acct_by_host:
-        candidates.append((0.70, "email_domain", existing.acct_by_host[domain][0]))
-
-    fuzzy = _best_fuzzy_account(e.best_company, existing)
+        hits.append(("email_domain", existing.acct_by_host[domain][0]))
+    fuzzy = _best_fuzzy_account(enriched, existing)
     if fuzzy:
-        candidates.append(fuzzy)
+        hits.append(("fuzzy_name", fuzzy))
+    return hits
 
-    if not candidates:
-        return None
-    score, reason, acct = max(candidates, key=lambda c: c[0])
-    return AccountMatch(account_id=acct["Id"], score=score, reason=reason)
+
+def _fire(enriched: EnrichedLead, existing: ExistingRecords, settings,
+          kununu, name_accts, weak) -> tuple[str, AccountMatch | None]:
+    if not enriched.matched:
+        return "no_lf_match", None
+    company = enriched.company or {}
+    for acct in name_accts:
+        if _address_equal(acct, company):
+            return "name_address", AccountMatch(acct["Id"], None, "name_address")
+    vat = _norm_vat(company.get("VAT_Id") or enriched.extracted.vat_number)
+    if vat:
+        for acct in name_accts:
+            if _norm_vat(acct.get("KN_VATNumber__c")) == vat:
+                return "name_vat", AccountMatch(acct["Id"], None, "name_vat")
+    if kununu:
+        acct, _sig = kununu
+        agree = _kununu_name_agreement(acct, enriched)
+        rule = ("kununu_agree" if agree >= settings.dedupe_name_agree_min
+                else "kununu_conflict")
+        return rule, AccountMatch(acct["Id"], None, rule)
+    if name_accts:
+        return "name_only", AccountMatch(name_accts[0]["Id"], None, "name_only")
+    if weak:
+        return "weak_signal", AccountMatch(weak[0][1]["Id"], None, "weak_signal")
+    return "no_match", None
+
+
+def evaluate_account_rules(
+    enriched: EnrichedLead, existing: ExistingRecords, settings
+) -> tuple[str, AccountMatch | None, list[str]]:
+    """(fired rule, account, evidence). Evidence lists all demoted-signal hits, plus
+    name/kununu hits when they did not fire — the full picture on Klärfall rows."""
+    kununu = _kununu_account(enriched, existing)
+    name_accts = _name_equal_accounts(enriched, existing)
+    weak = _weak_hits(enriched, existing)
+    rule, account = _fire(enriched, existing, settings, kununu, name_accts, weak)
+
+    evidence = [f"{sig}→{acct['Id']}" for sig, acct in weak]
+    if kununu and rule not in ("kununu_agree", "kununu_conflict"):
+        evidence.insert(0, f"{kununu[1]}→{kununu[0]['Id']}")
+    if name_accts and rule not in ("name_address", "name_vat", "name_only"):
+        evidence.insert(0, f"name→{name_accts[0]['Id']}")
+    return rule, account, evidence
 
 
 def match_contact(
@@ -226,23 +324,12 @@ def match_contact(
     return ContactMatch(contact_id=contact["Id"], score=score, reason=reason)
 
 
-def decide(score: float | None, settings) -> str:
-    """Map an account score onto the conversion decision band."""
-    if score is None:
-        return "create_new"
-    if score >= settings.auto_link_threshold:
-        return "link"
-    if score >= settings.review_threshold:
-        return "review"
-    return "create_new"
-
-
 def match_lead(enriched: EnrichedLead, existing: ExistingRecords, settings) -> MatchResult:
-    account = match_account(enriched, existing, settings)
-    decision = decide(account.score if account else None, settings)
+    rule, account, evidence = evaluate_account_rules(enriched, existing, settings)
     account_id = account.account_id if account else None
     contact = match_contact(enriched, existing, account_id, settings)
-    return MatchResult(enriched=enriched, account=account, contact=contact, decision=decision)
+    return MatchResult(enriched=enriched, account=account, contact=contact,
+                       decision=RULE_DECISIONS[rule], rule=rule, evidence=evidence)
 
 
 # --- org boundary ------------------------------------------------------------

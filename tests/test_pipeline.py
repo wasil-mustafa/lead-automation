@@ -96,8 +96,14 @@ def test_stage1_matches_links_and_advances_watermark(tmp_path):
                      dry_run=True, qa_path=qa, state_path=state_path)
     assert len(res.results) == 1
     r = res.results[0]
-    assert r.decision == "link"
-    assert r.account.account_id == "001A"
+    # LeadFeeder is disabled here (lf_client=None) so the lead never gets an accepted LF
+    # company match; rule 1 (no_lf_match) always reviews, even though the account carries
+    # the same kununu profile UUID the task's Description parses out (see brief invariant).
+    assert r.rule == "no_lf_match"
+    assert r.decision == "review"
+    assert r.account is None
+    # Contact matching is independent of the account rule: the kununu user UUID identifier
+    # signal still resolves the existing Contact.
     assert r.contact.contact_id == "003C"
     # watermark advanced to the task's CreatedDate
     assert res.new_state.last_task_created == "2026-06-19T10:00:00.000+0000"

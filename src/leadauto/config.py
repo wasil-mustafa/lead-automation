@@ -148,6 +148,10 @@ class Settings:
         return int(self.raw["matching"].get("lf_name_agree_rescue", 90))
 
     @property
+    def dedupe_name_agree_min(self) -> int:
+        return int(self.raw["matching"].get("dedupe_name_agree_min", 85))
+
+    @property
     def auto_link_threshold(self) -> float:
         return float(self.raw["matching"].get("auto_link_threshold", 0.90))
 
