@@ -70,8 +70,10 @@ def test_stage1_records_predictions_on_dry_run(tmp_path, monkeypatch):
     assert [q.lead_id for q in preds] == ["00Q9"]
     assert preds[0].rule == "no_lf_match"     # lf_client=None -> unmatched -> review
 
-    # non-dry runs and predictions_path=None must not write
+    # A NON-dry run must NOT write predictions, even when a path is given.
     p2 = tmp_path / "none.jsonl"
-    s1.run_stage1(None, None, SETTINGS, state=State(), dry_run=True,
-                  qa_path=None, state_path=None, predictions_path=None)
+    monkeypatch.setattr(s1, "write_back",
+                        lambda *a, **k: {"payloads": [], "failures": []})
+    s1.run_stage1(None, None, SETTINGS, state=State(), dry_run=False,
+                  qa_path=None, state_path=None, predictions_path=p2)
     assert not p2.exists()

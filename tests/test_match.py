@@ -4,7 +4,9 @@ The pure rule engine is tested directly against in-memory `ExistingRecords` buil
 plain account/contact dicts (the same shape `SfClient.query` returns). The org boundary
 (`load_existing_records`) is tested through a FakeClient that routes by SObject.
 
-Rules are ordered (first hit wins); see the module docstring in `match.py` and
+Rules are ordered (first hit wins) and drive link/review/create_new via the fixed
+`RULE_DECISIONS` mapping — not score thresholds; see the module docstring in
+`match.py` and
 `docs/superpowers/specs/2026-07-03-dublettencheck-rules-and-shadow-compare-design.md`.
 Contact matching keeps its original identifier-signal scoring.
 """
@@ -29,7 +31,7 @@ from leadauto.match import (
     normalize_name,
 )
 
-SETTINGS = Settings.load()  # auto_link 0.90, review 0.60 (still read; unused by rules yet)
+SETTINGS = Settings.load()  # dedupe_name_agree_min 85
 
 
 # --- builders ----------------------------------------------------------------

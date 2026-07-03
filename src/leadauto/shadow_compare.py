@@ -32,7 +32,9 @@ FIELDS_COLUMNS = ["lead_id", "field", "status", "lf_value", "human_value"]
 
 
 def _norm_country(v):
-    return str(v).strip().upper() or None if v else None
+    if not v:
+        return None
+    return str(v).strip().upper() or None
 
 
 def _norm_text(v):
@@ -86,6 +88,10 @@ def _is_new_account(account: dict | None, converted_date_raw) -> bool:
     raw = str(converted_date_raw).strip()
     if "T" in raw:
         return abs(created - _parse_sf_dt(raw)) <= timedelta(hours=1)
+    # Known edge: created.date() is a UTC calendar date compared against a
+    # Date-only ConvertedDate, so a conversion near local midnight can land on
+    # the "wrong" side by one day. Acceptable — this only affects the backtest
+    # metric, never a live decision.
     return created.date().isoformat() == raw
 
 
