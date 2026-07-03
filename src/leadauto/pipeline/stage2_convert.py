@@ -2,8 +2,9 @@
 
 The reviewer commits `review/approved_<date>.csv` (the Review sheet rows with `Approve?=yes`).
 This stage reads those rows, turns each into a `ConversionTarget` — linking the matched
-Account when present and the matched Contact only when its score clears the auto-link bar —
-and runs the match-aware, idempotent bulk conversion. `dry_run` performs no conversion.
+Account when present and the matched Contact only when its match reason is an identifier
+signal — and runs the match-aware, idempotent bulk conversion. `dry_run` performs no
+conversion.
 """
 from __future__ import annotations
 
@@ -15,6 +16,11 @@ from ..convert import ConversionTarget, convert_leads
 from ..logging import get_logger
 
 _APPROVE_YES = {"yes", "y", "true", "x", "1"}
+
+# Contact reasons that identify the same person (vs. a name/heuristic match): linking on
+# these is safe. Weaker reasons (contact_email_global, linkedin) create a fresh contact
+# under the linked account instead.
+_CONTACT_LINK_REASONS = {"kununu_user_uuid", "contact_email_in_account"}
 
 
 @dataclass
@@ -37,9 +43,9 @@ def _is_approved(row: dict) -> bool:
 def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
     """Build conversion targets from approved rows.
 
-    Account is linked when `account_match_id` is present (the reviewer validated it);
-    Contact is linked only when `contact_match_id` is present AND `contact_score` clears
-    the auto-link threshold — weaker contact matches create a fresh contact under the account.
+    Account is linked when `account_match_id` is present (the reviewer validated it).
+    Contact is linked only when its match reason is an identifier signal — kununu user
+    UUID or an email inside the linked account; weaker matches create a fresh contact.
     Blanking `account_match_id`/`contact_match_id` forces create-new.
     """
     targets: list[ConversionTarget] = []
@@ -51,13 +57,8 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
             continue
         account_id = (row.get("account_match_id") or "").strip() or None
         contact_id = (row.get("contact_match_id") or "").strip() or None
-        if contact_id:
-            try:
-                cscore = float(row.get("contact_score") or 0)
-            except (TypeError, ValueError):
-                cscore = 0.0
-            if cscore < settings.auto_link_threshold:
-                contact_id = None
+        if contact_id and (row.get("contact_reason") or "").strip() not in _CONTACT_LINK_REASONS:
+            contact_id = None
         targets.append(ConversionTarget(lead_id, account_id=account_id, contact_id=contact_id))
     return targets
 

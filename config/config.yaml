@@ -47,8 +47,6 @@ matching:
   lf_name_agree_min: 85      # required agreement (0-100) when score >= lf_min_match_score
   lf_name_agree_rescue: 90   # agreement that accepts a candidate regardless of score
   dedupe_name_agree_min: 85  # rule-4 floor: account name vs LF/profile/assigned-company names
-  auto_link_threshold: 0.90  # >= : link to existing Account/Contact
-  review_threshold: 0.60     # [review, auto_link): flag for review; < review: create new
 
 pipeline:
   review_gate: true          # master toggle; false => auto-convert

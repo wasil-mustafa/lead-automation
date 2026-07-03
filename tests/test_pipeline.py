@@ -141,18 +141,16 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path):
 
 # --- Stage 2: approved -> targets --------------------------------------------
 
-def test_targets_from_approved_links_account_and_strong_contact():
-    rows = [{"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
-             "contact_match_id": "003C", "contact_score": "1.0", "decision": "link"}]
+def test_contact_linked_only_on_identifier_reasons():
+    rows = [
+        {"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
+         "contact_match_id": "003C", "contact_reason": "kununu_user_uuid"},
+        {"Approve?": "yes", "lead_id": "00Q2", "account_match_id": "001A",
+         "contact_match_id": "003D", "contact_reason": "contact_email_global"},
+    ]
     targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget("00Q1", account_id="001A", contact_id="003C")]
-
-
-def test_targets_from_approved_drops_weak_contact_match():
-    rows = [{"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
-             "contact_match_id": "003C", "contact_score": "0.85", "decision": "review"}]
-    targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget("00Q1", account_id="001A", contact_id=None)]
+    assert targets[0].contact_id == "003C"
+    assert targets[1].contact_id is None  # weak reason -> create fresh contact
 
 
 def test_targets_from_approved_skips_unapproved():
