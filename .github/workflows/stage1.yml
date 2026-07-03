@@ -123,6 +123,20 @@ jobs:
           echo "Salesforce authentication failed after 3 attempts." >&2
           exit 1
 
+      - name: Shadow compare (score past dry-run predictions)
+        continue-on-error: true   # a compare hiccup must not block enrichment
+        env:
+          PYTHONPATH: src
+        run: python -m leadauto shadow-compare
+
+      - name: Upload shadow comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-automation-shadow-${{ github.run_id }}
+          path: shadow_comparison.xlsx
+          if-no-files-found: ignore
+
       - name: Run Stage 1
         env:
           PYTHONPATH: src
@@ -145,15 +159,19 @@ jobs:
           path: qa_artifact.xlsx
           if-no-files-found: warn
 
-      - name: Commit advanced watermark
-        if: ${{ needs.gate.outputs.dry_run != 'true' }}
+      - name: Commit state (shadow files always; watermark only on live runs)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/watermark.json
+          for f in state/predictions.jsonl state/shadow_results.jsonl; do
+            [ -f "$f" ] && git add "$f"
+          done
+          if [ "${{ needs.gate.outputs.dry_run }}" != "true" ]; then
+            git add state/watermark.json
+          fi
           if git diff --cached --quiet; then
-            echo "No watermark change to commit."
+            echo "No state changes to commit."
           else
-            git commit -m "chore: advance lead-automation watermark [skip ci]"
+            git commit -m "chore: update lead-automation state [skip ci]"
             git push
           fi
