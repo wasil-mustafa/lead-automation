@@ -48,6 +48,24 @@ def test_tasks_since_requires_subjects():
         soql.tasks_since(WATERMARK, [])
 
 
+def test_tasks_since_status_filter_when_given():
+    q = soql.tasks_since(WATERMARK, SUBJECTS,
+                         statuses=["In Progress", "in Arbeit", "Not Started"])
+    assert "Status IN ('In Progress', 'in Arbeit', 'Not Started')" in q
+    assert "ORDER BY CreatedDate ASC" in q  # status clause precedes ORDER BY
+
+
+def test_tasks_since_no_status_clause_when_empty():
+    assert "Status IN" not in soql.tasks_since(WATERMARK, SUBJECTS)
+    assert "Status IN" not in soql.tasks_since(WATERMARK, SUBJECTS, statuses=[])
+
+
+def test_tasks_since_status_filter_escapes_and_no_double_quotes():
+    q = soql.tasks_since(WATERMARK, SUBJECTS, statuses=["O'Done"])
+    assert "\\'" in q
+    assert '"' not in q
+
+
 def test_tasks_since_escapes_single_quote_in_subject():
     q = soql.tasks_since(WATERMARK, ["O'Brien Event"])
     assert "\\'" in q          # the apostrophe is escaped, not left bare

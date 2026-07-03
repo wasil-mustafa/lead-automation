@@ -76,7 +76,9 @@ def read_extracted_leads(
         log.info("No enabled task subjects in scope; nothing to extract.")
         return ExtractionResult()
 
-    raw_tasks = client.query(soql.tasks_since(since, subjects, limit=limit))
+    raw_tasks = client.query(
+        soql.tasks_since(since, subjects, settings.fresh_task_statuses, limit=limit)
+    )
     log.info("Fetched %d in-scope task(s) since %s", len(raw_tasks), since)
 
     fresh = [t for t in raw_tasks if t.get("Id") not in processed]
