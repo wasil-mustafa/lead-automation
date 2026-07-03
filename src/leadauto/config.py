@@ -25,6 +25,9 @@ class Settings:
     raw: dict
     leadfeeder_api_key: str | None
     sf_auth_url: str | None
+    kununu_api_token: str | None = None
+    kununu_api_user: str | None = None
+    kununu_api_password: str | None = None
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "Settings":
@@ -38,6 +41,9 @@ class Settings:
             # Accept the existing repo secret name (SFDX_AUTH_URL) as a fallback so the
             # ensure_org sfdx-url login path works without a second secret.
             sf_auth_url=os.environ.get("SF_AUTH_URL") or os.environ.get("SFDX_AUTH_URL"),
+            kununu_api_token=os.environ.get("KUNUNU_API_TOKEN"),
+            kununu_api_user=os.environ.get("KUNUNU_API_USER"),
+            kununu_api_password=os.environ.get("KUNUNU_API_PASSWORD"),
         )
 
     # --- Salesforce ---
@@ -89,6 +95,25 @@ class Settings:
     @property
     def lf_match_batch(self) -> int:
         return int(self.raw["leadfeeder"].get("match_batch", 200))
+
+    # --- kununu profile feed ---
+    @property
+    def kununu_feed_enabled(self) -> bool:
+        return bool(self.raw.get("kununu_feed", {}).get("enabled", False))
+
+    @property
+    def kununu_feed_cache_path(self) -> Path:
+        rel = self.raw.get("kununu_feed", {}).get("cache_path", "kununu_profiles.jsonl")
+        return REPO_ROOT / rel
+
+    @property
+    def kununu_feed_max_age_hours(self) -> int:
+        return int(self.raw.get("kununu_feed", {}).get("max_age_hours", 24))
+
+    @property
+    def kununu_feed_url(self) -> str:
+        return self.raw.get("kununu_feed", {}).get(
+            "url", "https://api.data.kununu.com/v1/feeds/data-management/profiles.jsonl")
 
     # --- Task routing ---
     @property

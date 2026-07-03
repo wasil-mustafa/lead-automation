@@ -8,6 +8,10 @@ Scripts/
 *.xlsx
 *.xlsm
 
+# kununu profile feed cache (updated daily, not committed)
+kununu_profiles.jsonl
+kununu_profiles.jsonl.part
+
 # Secrets & local env
 .env
 *.pem

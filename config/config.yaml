@@ -19,6 +19,15 @@ leadfeeder:
   retrieve_batch: 100        # GET /companies & /contacts (API max 100)
   match_batch: 200           # POST /companies/match (API max 200)
 
+# kununu DWH profile feed: resolves a lead's profile to its assigned-company names,
+# which widen the LF name-agreement gate's evidence. Harmless without credentials
+# (KUNUNU_API_TOKEN or KUNUNU_API_USER/KUNUNU_API_PASSWORD env) — the gate then
+# behaves exactly as before.
+kununu_feed:
+  enabled: true
+  cache_path: kununu_profiles.jsonl   # gitignored; ~530 MB when downloaded
+  max_age_hours: 24                   # daily freshness (confirmed requirement)
+
 # Task Subjects the pipeline processes, mapped to their parser key.
 # Simplified scope (2026-07-02): ONLY Claimed Profile + EBP Trial. Subjects not listed
 # here are left for humans (e.g. Kontaktanfrage) or ignored (Ecom, event/content types).
