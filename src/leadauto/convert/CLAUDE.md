@@ -15,12 +15,15 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
      (identifier signals). Weaker reasons (`contact_email_global`, `linkedin`) deliberately
      create a fresh Contact under the linked Account.
    - Blanking `account_match_id`/`contact_match_id` in the CSV forces create-new.
-3. `convert_leads` runs anonymous Apex per batch (default 50, `--batch-size`):
+3. run_preflight (convert/preflight.py) re-queries the approved leads' current state and drops
+   any lead failing the "Conversion requirements" below — failures land in preflight_failures.csv
+   (uploaded with the stage-2 log) and Stage2Result.preflight_failures; --no-preflight bypasses.
+4. `convert_leads` runs anonymous Apex per batch (default 50, `--batch-size`):
    bulk `Database.convertLead(list, allOrNone=false)`, per-lead `setAccountId`/`setContactId`,
    `setDoNotCreateOpportunity(true)`, `setOwnerId(config owner_id)`. Converted status is
    resolved dynamically in Apex: the configured label if the org has it, else the org's first
    converted `LeadStatus` by `SortOrder`.
-4. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob decoded by
+5. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob decoded by
    `parse_results` — never regex-scrape debug lines.
 
 ## Commands
@@ -39,7 +42,8 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 - **The `lead-conversion` GitHub Environment does NOT exist yet** (verified 2026-07-05).
   `stage2.yml` references it and GitHub would auto-create it UNPROTECTED on first dispatch —
   create it with required reviewers in repo Settings → Environments BEFORE any live dispatch.
-- Config `owner_id` is Wasil (placeholder) — swap to the integration user before live runs.
+- Config `owner_id` stays Wasil's user DELIBERATELY (decision 2026-07-05) — converted records
+  are assigned to him at setOwnerId time; queue ownership ends at conversion.
 
 ## Gotchas
 
@@ -98,6 +102,9 @@ NOT enforced by any rule (layout-only, does not block API conversion): `KN_Regio
 Open question: does the org's Lead→Contact field mapping copy `KN_LinkedInProfileLink__c`
 (a company URL) into Contact `KN_LinkedInProfile__c`? Contact rule `KN_LinkedInLinkValidation`
 requires `linkedin.com/in/` and would reject company links — verify the mapping before go-live.
+Stage-1 write-back now fills KN_NoOwnDBID__c / address (CountryCode) / KN_Employee__c fallback /
+FirstName / Phone (fill-only-blank; spec docs/superpowers/specs/2026-07-05-writeback-gaps-and-stage2-preflight-design.md),
+and the QA Review sheet previews these checks in convert_blockers.
 
 ## Live-testing plan (prod only, no sandbox — risk-ordered)
 

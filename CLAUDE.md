@@ -34,7 +34,7 @@ Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artif
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 219 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 290 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -61,6 +61,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `dry_run: true`.
 - **NOT yet live:** Salesforce write-back and LeadConvert — no live write has ever run.
   The Dublettencheck rule distribution has only been smoke-tested WITHOUT LeadFeeder.
+- **Write-back fills conversion requirements** (NoOwnDBID tick, address via CountryCode, employee
+  fallback, FirstName, Phone — fill-only-blank); **Stage 2 preflights** approved leads and
+  skips+reports rule violations (preflight_failures.csv).
 
 ## Conventions & gotchas (verified against org `headless`)
 
@@ -91,7 +94,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (humans set it for kununu score <3.0 — a triage practice that automation replaces); humans keep
   closing those tasks, so shadow evidence comes mostly from the non-No-Demand minority. The few
   pool-user-owned leads (contact-attached tasks) are out of scope for now. Config `owner_id` =
-  Wasil (placeholder — swap to the integration user before live conversions).
+  Wasil (deliberate, 2026-07-05 — converted records are assigned to him).
 - **Real Lead fields:** `Email`, `KN_CompanyEmail__c` (there is NO `KN_Email__c`),
   `KN_KununuProfileName__c`, `KN_KununuUserUUID__c`, `KN_KununuLinkProfile__c`, `KN_Region__c`,
   `KN_VATNumber__c`, plus `KN_DB*` firmographics. Account match: `KN_KununuProfileUuid__c`,
@@ -152,7 +155,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 1. **End-to-end live validation:** small live write-back (`stage1 --limit 5`, inspect `KN_*` on
    those Leads) → one gated `stage2` conversion. Prereqs + risk-ordered 3-path testing plan in
    `src/leadauto/convert/CLAUDE.md` (create the `lead-conversion` GitHub Environment FIRST — it
-   does not exist yet; swap `owner_id`).
+   does not exist yet).
 2. **Task-type rollout:** `claimer` + `ebp_trial` are enabled; add `event`, then `content`,
    calibrating from the review sheet's false-match rate.
 3. **Validate the rule engine WITH LeadFeeder:** read the `match_rule`/Summary breakdown of the
