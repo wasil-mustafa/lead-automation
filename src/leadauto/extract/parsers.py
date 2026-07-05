@@ -66,6 +66,11 @@ def _clean_email(value: str | None) -> str | None:
     return None if "@kununu" in value.lower() else value
 
 
+def _bool(value) -> bool:
+    """Coerce SF query booleans (True/False or Bulk-CSV 'true'/'false' strings)."""
+    return value is True or str(value).strip().lower() == "true"
+
+
 def _base(task: dict, lead: dict, task_type: str) -> ExtractedLead:
     return ExtractedLead(
         lead_id=lead.get("Id") or task.get("WhoId") or "",
@@ -77,6 +82,18 @@ def _base(task: dict, lead: dict, task_type: str) -> ExtractedLead:
         lead_first_name=lead.get("FirstName"),
         lead_last_name=lead.get("LastName"),
         lead_website=lead.get("Website"),
+        lead_street=lead.get("Street"),
+        lead_city=lead.get("City"),
+        lead_postal_code=lead.get("PostalCode"),
+        lead_country_code=lead.get("CountryCode"),
+        lead_country=lead.get("Country"),
+        lead_phone=lead.get("Phone"),
+        lead_source=lead.get("LeadSource"),
+        lead_opted_out_email=_bool(lead.get("HasOptedOutOfEmail")),
+        lead_dbid=lead.get("KN_DBID__c"),
+        lead_no_own_dbid=_bool(lead.get("KN_NoOwnDBID__c")),
+        lead_employee_category=lead.get("KN_Employee__c"),
+        lead_language=lead.get("KN_Language__c"),
     )
 
 
