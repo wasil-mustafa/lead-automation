@@ -191,3 +191,36 @@ def test_summary_counts_rules():
     assert metrics.get("rule_name_only") == 1
     assert metrics.get("rule_no_match") == 1
     assert metrics.get("rule_kununu_conflict") == 0
+
+
+# --- convert_blockers ---------------------------------------------------------
+
+def _blockers_result(extracted, account=None):
+    return MatchResult(enriched=EnrichedLead(extracted=extracted), account=account,
+                       contact=None, decision="review", rule="no_lf_match", evidence=[])
+
+
+def test_convert_blockers_column_lists_failed_checks():
+    e = ExtractedLead(lead_id="00Q1", task_id="00T1", task_type="claimer",
+                      lead_last_name="Muster")  # everything conversion-relevant blank
+    wb = build_workbook([_blockers_result(e)], skipped=[])
+    ws = wb["Review"]
+    header = [c.value for c in ws[1]]
+    assert "convert_blockers" in header
+    assert header.index("convert_blockers") < header.index("decision")
+    blockers = ws.cell(row=2, column=header.index("convert_blockers") + 1).value
+    assert "employee_category" in blockers and "language" in blockers
+    assert "address_create_new" in blockers  # no account match -> create-new assumption
+
+
+def test_convert_blockers_empty_when_payload_fills_gaps():
+    e = ExtractedLead(lead_id="00Q1", task_id="00T1", task_type="claimer",
+                      lead_last_name="Muster", lead_language="German",
+                      lead_source="Web", street="Weg 1", city="HH",
+                      postal_code="20095", country_code="DE",
+                      company_size="11-50")
+    wb = build_workbook([_blockers_result(e)], skipped=[])
+    ws = wb["Review"]
+    header = [c.value for c in ws[1]]
+    blockers = ws.cell(row=2, column=header.index("convert_blockers") + 1).value
+    assert not blockers  # write-back payload satisfies employee/dbid/address checks
