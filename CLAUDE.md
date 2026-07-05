@@ -158,7 +158,13 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   window). The 2 pool-user-owned leads (Rohdaten/Clean Pool) carry contact-attached tasks — **out of
   scope for now, revisit later** (Wasil). Stage 1 runs on cron `0 7,8,16,17 * * *` with a `gate` job
   keeping only firings at 09:00/18:00 Europe/Vienna (DST-proof) — **scheduled runs are FORCED
-  dry-run** (flip in the gate job at go-live). This replaced the 06:00-UTC weekday cron that would
+  dry-run** (flip in the gate job at go-live). **NOTE (2026-07-05, branch `task-status-fresh-filter`):
+  the Vienna wall-clock-hour check was REMOVED — GitHub delivers this repo's scheduled runs hours late
+  and drops most firings, so the exact-hour check (`HOUR == 9 || HOUR == 18`, evaluated at *execution*
+  time) was ~never true and skipped `enrich` on every scheduled run. The gate now only forces dry-run;
+  every delivered firing runs `enrich` (overlap guarded by the `concurrency` group). Cron simplified to
+  `23 7,16 * * *` (twice daily, ~09:23/18:23 Vienna summer; DST drift accepted; :23 offset dodges the
+  congested top-of-hour slot). See [[github-scheduled-runs-delayed-dropped]].** This replaced the 06:00-UTC weekday cron that would
   have fired with `--no-dry-run` (empty `inputs` on schedule events fell into the else branch —
   live-write time bomb defused); the watermark-commit guard footgun is fixed the same way
   (string output from the gate job). Owner facts: current window is 198× Lead 'Pre-Sales' Queue,
