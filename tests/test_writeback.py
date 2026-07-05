@@ -161,3 +161,72 @@ def test_write_back_skips_leads_with_no_enrichment():
     result = write_back(client, [_enriched(bare)], dry_run=False)
     assert client.calls == []  # only the Id, nothing to write -> skipped
     assert result["processed"] == 0
+
+
+from leadauto.writeback import normalize_phone, split_first_name, employee_bin_from_size
+
+
+class TestNormalizePhone:
+    def test_strips_separators(self):
+        assert normalize_phone("+49 40 41 91-31") == "+4940419131"
+
+    def test_double_zero_becomes_plus(self):
+        assert normalize_phone("0049 (40) 419131") == "+4940419131"
+
+    def test_dots_and_slashes_stripped(self):
+        assert normalize_phone("+43.1/512 34 56") == "+4315123456"
+
+    def test_national_number_rejected(self):
+        assert normalize_phone("040 419131") is None  # no country prefix — can't infer
+
+    def test_garbage_rejected(self):
+        assert normalize_phone("+49 40 CALL-ME") is None
+
+    def test_too_short_rejected(self):
+        assert normalize_phone("+4912") is None  # fewer than 6 digits
+
+    def test_empty_and_none(self):
+        assert normalize_phone("") is None
+        assert normalize_phone(None) is None
+
+
+class TestSplitFirstName:
+    def test_leading_remainder_when_ends_with_lastname(self):
+        assert split_first_name("Max Mustermann", "Mustermann") == "Max"
+
+    def test_case_insensitive(self):
+        assert split_first_name("max MUSTERMANN", "Mustermann") == "max"
+
+    def test_multiword_first(self):
+        assert split_first_name("Anna Maria Schmidt", "Schmidt") == "Anna Maria"
+
+    def test_mismatched_lastname_skipped(self):
+        assert split_first_name("Max Mustermann", "Meier") is None
+
+    def test_name_is_only_lastname(self):
+        assert split_first_name("Mustermann", "Mustermann") is None
+
+    def test_none_inputs(self):
+        assert split_first_name(None, "Meier") is None
+        assert split_first_name("Max Meier", None) is None
+
+
+class TestEmployeeBinFromSize:
+    def test_exact_label(self):
+        assert employee_bin_from_size("51-100") == "51-100"
+
+    def test_label_with_suffix_maps_upper_bound(self):
+        assert employee_bin_from_size("51-100 Mitarbeiter") == "51-100"
+
+    def test_german_dot_upper_bound(self):
+        assert employee_bin_from_size("501-1.000") == "751-1.000"  # upper bound 1000 -> its bin
+
+    def test_open_ended(self):
+        assert employee_bin_from_size("10.001+") == "10.001-30.000"
+
+    def test_no_number(self):
+        assert employee_bin_from_size("unbekannt") is None
+
+    def test_empty(self):
+        assert employee_bin_from_size("") is None
+        assert employee_bin_from_size(None) is None

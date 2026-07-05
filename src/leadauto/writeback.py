@@ -20,6 +20,7 @@ Org-verified 2026-07-03 (read-only describe + data sampling on `headless`):
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
 from .leadfeeder.enrich import EnrichedLead
@@ -58,6 +59,58 @@ def revenue_millions(value) -> float | None:
         return round(float(value) / 1_000_000, 2)
     except (TypeError, ValueError):
         return None
+
+
+def normalize_phone(value) -> str | None:
+    """Normalize to the org's +<digits> phone format; None when not confidently possible.
+
+    Strips spaces/dashes/dots/parens/slashes, converts a 00 international prefix to +,
+    and accepts only + followed by 6-15 digits (KN_ValidatePhone / KN_ContactValidPhoneNumber
+    reject everything else). National 0... numbers are dropped: guessing a country is worse
+    than leaving the field blank.
+    """
+    if not value:
+        return None
+    s = re.sub(r"[\s\-.()/]", "", str(value).strip())
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    return s if re.fullmatch(r"\+[0-9]{6,15}", s) else None
+
+
+def split_first_name(source_name, last_name) -> str | None:
+    """Leading remainder of `source_name` when it ends with the Lead's `last_name`.
+
+    Guard against writing a different person's name: no last-name agreement, no split.
+    """
+    if not source_name or not last_name:
+        return None
+    src, ln = str(source_name).strip(), str(last_name).strip()
+    if not ln or not src.lower().endswith(ln.lower()):
+        return None
+    first = src[: len(src) - len(ln)].strip()
+    return first or None
+
+
+def employee_bin_from_size(size) -> str | None:
+    """Map a parsed kununu company-size string onto the KN_Employee__c picklist.
+
+    Exact label match first; otherwise the range's upper bound (German dot separators
+    stripped) goes through employee_bin(). Used only as a fill-blank fallback when
+    LeadFeeder has no Employee_Count.
+    """
+    if not size:
+        return None
+    s = str(size).strip()
+    if s in {label for _, label in _EMPLOYEE_BINS} | {"> 100.000"}:
+        return s
+    nums = re.findall(r"\d[\d.]*", s)
+    if not nums:
+        return None
+    try:
+        upper = int(nums[-1].replace(".", ""))
+    except ValueError:
+        return None
+    return employee_bin(upper)
 
 
 def _iso2(value) -> str | None:
