@@ -251,8 +251,10 @@ Git: remote `github.com/wasil-mustafa/lead-automation` (private). **Default bran
 scheduler runs** — fixes must land there. LeadFeeder throttle/retry/batching landed via PR #1; the Bulk-API/431
 fix via PR #2; CI login hardening via PR #3; name-agreement gate merged via PR #4 (squash, 2026-07-03);
 assigned-companies gate merged via PR #5, country-fields drop via PR #6 (both 2026-07-03); Dublettencheck
-rule engine + shadow comparison merged via PR #10 (2026-07-04). Active branch: `task-status-fresh-filter`
-(process only open/fresh Tasks by Status — PR pending).
+rule engine + shadow comparison merged via PR #10 (2026-07-04); Task-status freshness filter merged via
+PR #11 (2026-07-03); scheduled-run gate fix + simplified cron merged via PR #12 (2026-07-05 — the old
+execution-time Vienna-hour gate skipped `enrich` on EVERY scheduled run; now every delivered firing runs,
+forced dry-run, cron `23 7,16 * * *`). No active feature branch — work from `master`.
 Design + plans live in `docs/superpowers/{specs,plans}/`.
 
 ## Review follow-ups (from the whole-branch review)
