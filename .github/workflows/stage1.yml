@@ -21,10 +21,13 @@ on:
         type: boolean
         default: true
   schedule:
-    # Target: 09:00 and 18:00 Europe/Vienna, daily. GitHub cron is UTC and
-    # DST-blind, so fire at both candidate UTC hours (CEST=UTC+2, CET=UTC+1)
-    # and let the `gate` job keep only the firings that are 9/18 Vienna time.
-    - cron: "0 7,8,16,17 * * *"
+    # Twice daily: ~09:23 and ~18:23 Vienna in summer (~08:23/17:23 in winter —
+    # DST drift is accepted). GitHub cron is UTC, best-effort only: firings run
+    # late and some are dropped entirely, especially on low-activity repos.
+    # The :23 offset avoids the congested top-of-hour slot, which is dropped
+    # most often. If GitHub still under-delivers, the fix is an external
+    # scheduler hitting workflow_dispatch, not more cron entries.
+    - cron: "23 7,16 * * *"
 
 # Never let two enrich runs overlap (they share the watermark file).
 concurrency:
@@ -36,35 +39,32 @@ permissions:
 
 jobs:
   gate:
-    # Decides (a) whether this firing runs (Vienna-hour check for schedule
-    # events) and (b) the effective dry-run mode. Scheduled runs are FORCED
-    # dry-run for now — flip here at go-live. This also fixes the old footgun
-    # where a schedule event's empty `inputs.dry_run` fell into --no-dry-run.
+    # Decides the effective dry-run mode. Scheduled runs are FORCED dry-run for
+    # now — flip here at go-live. This also fixes the old footgun where a
+    # schedule event's empty `inputs.dry_run` fell into --no-dry-run.
+    #
+    # We deliberately do NOT gate on the Vienna wall-clock hour anymore. GitHub
+    # delivers these scheduled runs hours late and drops most firings, so the
+    # old exact-hour check (`HOUR == 9 || HOUR == 18`, evaluated at *execution*
+    # time) was essentially never true and skipped `enrich` on every scheduled
+    # run. The cron still targets ~09:00/18:00 Vienna; every delivered firing now
+    # runs. Overlap is prevented by the `concurrency` group above.
     runs-on: ubuntu-latest
     outputs:
-      run: ${{ steps.decide.outputs.run }}
       dry_run: ${{ steps.decide.outputs.dry_run }}
     steps:
-      - name: Decide run + dry-run mode
+      - name: Decide dry-run mode
         id: decide
         run: |
-          RUN="true"
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            HOUR=$(TZ=Europe/Vienna date +%-H)
-            if [ "$HOUR" != "9" ] && [ "$HOUR" != "18" ]; then
-              RUN="false"
-              echo "Vienna hour $HOUR is not a target slot (9/18); skipping."
-            fi
             DRY="true"   # scheduled runs stay dry until go-live
           else
             DRY="${{ inputs.dry_run }}"
           fi
-          echo "run=$RUN" >> "$GITHUB_OUTPUT"
           echo "dry_run=$DRY" >> "$GITHUB_OUTPUT"
 
   enrich:
     needs: gate
-    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
       # Quiet the sf CLI's background async work — a source of intermittent
