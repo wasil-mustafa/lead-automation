@@ -206,6 +206,10 @@ class TestSplitFirstName:
     def test_name_is_only_lastname(self):
         assert split_first_name("Mustermann", "Mustermann") is None
 
+    def test_lastname_inside_word_rejected(self):
+        # "Bauer" is not the trailing word of "Neubauer" — no word boundary, no split.
+        assert split_first_name("Michael Neubauer", "Bauer") is None
+
     def test_none_inputs(self):
         assert split_first_name(None, "Meier") is None
         assert split_first_name("Max Meier", None) is None

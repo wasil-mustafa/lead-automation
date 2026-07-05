@@ -36,6 +36,9 @@ _EMPLOYEE_BINS: list[tuple[int, str]] = [
     (30000, "10.001-30.000"), (100000, "30.001-100.000"),
 ]
 
+# All valid KN_Employee__c labels (the bins plus the open-ended top band).
+_EMPLOYEE_LABELS: frozenset[str] = frozenset(label for _, label in _EMPLOYEE_BINS) | {"> 100.000"}
+
 
 def employee_bin(count) -> str | None:
     """Map an employee headcount onto the KN_Employee__c picklist band. None if absent."""
@@ -85,7 +88,9 @@ def split_first_name(source_name, last_name) -> str | None:
     if not source_name or not last_name:
         return None
     src, ln = str(source_name).strip(), str(last_name).strip()
-    if not ln or not src.lower().endswith(ln.lower()):
+    # Whole trailing word only: " Bauer" must not match inside "Neubauer". This also
+    # rejects source == lastname (no first name to split off).
+    if not ln or not src.lower().endswith(" " + ln.lower()):
         return None
     first = src[: len(src) - len(ln)].strip()
     return first or None
@@ -101,7 +106,7 @@ def employee_bin_from_size(size) -> str | None:
     if not size:
         return None
     s = str(size).strip()
-    if s in {label for _, label in _EMPLOYEE_BINS} | {"> 100.000"}:
+    if s in _EMPLOYEE_LABELS:
         return s
     nums = re.findall(r"\d[\d.]*", s)
     if not nums:
