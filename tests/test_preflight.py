@@ -96,3 +96,56 @@ def test_failure_carries_value_and_detail():
                        create_new=True)
     f = next(x for x in fails if x.check == "dbid_numeric")
     assert isinstance(f, Failure) and f.value == "HRB 1" and "digits" in f.detail
+
+
+from pathlib import Path
+
+from leadauto.convert import ConversionTarget
+from leadauto.convert.preflight import run_preflight, write_failures_csv
+
+
+class FakeClient:
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries = []
+
+    def query(self, soql):
+        self.queries.append(soql)
+        return self.rows
+
+
+def test_run_preflight_splits_ok_and_failures():
+    rows = [dict(GOOD, Id="00Q_OK"), dict(GOOD, Id="00Q_BAD", KN_Employee__c="")]
+    targets = [ConversionTarget("00Q_OK"), ConversionTarget("00Q_BAD")]
+    ok, failures = run_preflight(FakeClient(rows), targets)
+    assert [t.lead_id for t in ok] == ["00Q_OK"]
+    assert failures == [{"lead_id": "00Q_BAD", "check": "employee_category", "value": "",
+                         "detail": "KN_Employee__c blank (KN_EmployeeCategoryMandatory)"}]
+
+
+def test_run_preflight_create_new_depends_on_account_id():
+    rows = [dict(GOOD, Id="00Q1", Street="")]
+    linked = [ConversionTarget("00Q1", account_id="001X")]
+    ok, failures = run_preflight(FakeClient(rows), linked)
+    assert ok and not failures  # linked account -> no address requirement
+
+
+def test_run_preflight_missing_lead_reported():
+    ok, failures = run_preflight(FakeClient([]), [ConversionTarget("00QGONE")])
+    assert not ok
+    assert failures[0]["check"] == "not_found"
+
+
+def test_run_preflight_empty_targets_no_query():
+    client = FakeClient([])
+    assert run_preflight(client, []) == ([], [])
+    assert client.queries == []
+
+
+def test_write_failures_csv(tmp_path):
+    path = write_failures_csv(
+        [{"lead_id": "00Q1", "check": "language", "value": "", "detail": "d"}],
+        tmp_path / "preflight_failures.csv")
+    text = Path(path).read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "lead_id,check,value,detail"
+    assert "00Q1,language" in text

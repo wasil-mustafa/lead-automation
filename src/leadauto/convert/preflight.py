@@ -16,6 +16,9 @@ from pathlib import Path
 from ..logging import get_logger
 
 # Same comma blob + substring semantics as KN_LeadValidatePrivateMail's CONTAINS().
+# The substring match (short tokens can false-positive against e.g. "gmail"/"mail.com")
+# is a DELIBERATE mirror of the org formula's CONTAINS semantics — do not "fix" it
+# into a stricter match.
 _FREEMAIL_BLOB = "gmail,yahoo,outlook,hotmail,aol,icloud,protonmail,zoho,mail.com"
 _POSTAL_LEN_BY_COUNTRY = {"Germany": 5, "Switzerland": 4}
 _COUNTRY_BY_CC = {"DE": "Germany", "CH": "Switzerland"}
@@ -76,6 +79,10 @@ def check_lead(fields: dict, *, create_new: bool) -> list[Failure]:
     email = (fields.get("Email") or "").strip().lower()
     if email and "@" in email and not _is_true(fields.get("HasOptedOutOfEmail")):
         token = email.split("@", 1)[1].split(".", 1)[0]
+        # The org rule KN_LeadValidatePrivateMail has a Status != 'New' condition that is
+        # deliberately NOT mirrored here, because conversion always moves Status off 'New'
+        # in the same transaction — at the moment this check predicts (conversion time),
+        # the condition is always satisfied.
         if token and token in _FREEMAIL_BLOB:
             fails.append(Failure("freemail_email", email,
                                  "private email blocks conversion unless opted out "
@@ -99,3 +106,44 @@ def check_lead(fields: dict, *, create_new: bool) -> list[Failure]:
                              f"PostalCode must be {expected} chars for {country} "
                              "(KN_Checklengthpostalcode)"))
     return fails
+
+
+def run_preflight(client, targets, logger=None):
+    """Split targets into (convertible, failure-records) against live Lead state.
+
+    One bulk query; each failing target yields one row per failed check
+    (keys = PREFLIGHT_CSV_COLUMNS). create-new is assumed when the target
+    has no account_id.
+    """
+    log = logger or get_logger("convert.preflight")
+    if not targets:
+        return [], []
+    from ..sf import soql  # local import: keep module import-light for qa_artifact
+    rows = client.query(soql.leads_preflight([t.lead_id for t in targets]))
+    by_id = {row.get("Id"): row for row in rows}
+    ok, failures = [], []
+    for t in targets:
+        row = by_id.get(t.lead_id)
+        if row is None:
+            failures.append({"lead_id": t.lead_id, "check": "not_found", "value": "",
+                             "detail": "Lead not returned by the org (deleted or inaccessible)"})
+            continue
+        fails = check_lead(row, create_new=t.account_id is None)
+        if fails:
+            failures.extend({"lead_id": t.lead_id, "check": f.check,
+                             "value": f.value, "detail": f.detail} for f in fails)
+        else:
+            ok.append(t)
+    log.info("Preflight: %d/%d target(s) pass, %d failure record(s)",
+             len(ok), len(targets), len(failures))
+    return ok, failures
+
+
+def write_failures_csv(failures: list[dict], path) -> Path:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=PREFLIGHT_CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(failures)
+    return p

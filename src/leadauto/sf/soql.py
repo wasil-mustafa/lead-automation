@@ -77,6 +77,17 @@ def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
     return soql
 
 
+def leads_preflight(ids: Sequence[str]) -> str:
+    """Current conversion-relevant state of the given Leads (Stage-2 preflight).
+
+    No owner or IsConverted filter: already-converted or re-owned leads must come back
+    so the preflight can REPORT them instead of silently dropping them.
+    """
+    if not ids:
+        raise ValueError("leads_preflight requires at least one Id")
+    return f"SELECT {_LEAD_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
+
+
 # --- match lookups (Module 3a) ----------------------------------------------
 # Existing Accounts/Contacts are pulled in one batched query each (no N+1). Exact
 # identifier fields use `IN (...)`; URL/host fields use `LIKE` because the org stores
