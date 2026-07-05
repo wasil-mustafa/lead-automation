@@ -16,6 +16,8 @@ from typing import Sequence
 _TASK_FIELDS = "Id, WhoId, Who.Name, Subject, Description, CreatedDate"
 _LEAD_FIELDS = (
     "Id, FirstName, LastName, Company, Email, Website, Status, IsConverted, LeadSource, "
+    "HasOptedOutOfEmail, Phone, Street, City, PostalCode, Country, CountryCode, "
+    "KN_DBID__c, KN_NoOwnDBID__c, KN_Employee__c, KN_Language__c, "
     "KN_KununuProfileName__c, KN_KununuUserUUID__c, KN_KununuLinkProfile__c"
 )
 
@@ -73,6 +75,17 @@ def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
     if limit and limit > 0:
         soql += f" LIMIT {limit}"
     return soql
+
+
+def leads_preflight(ids: Sequence[str]) -> str:
+    """Current conversion-relevant state of the given Leads (Stage-2 preflight).
+
+    No owner or IsConverted filter: already-converted or re-owned leads must come back
+    so the preflight can REPORT them instead of silently dropping them.
+    """
+    if not ids:
+        raise ValueError("leads_preflight requires at least one Id")
+    return f"SELECT {_LEAD_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
 
 
 # --- match lookups (Module 3a) ----------------------------------------------

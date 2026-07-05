@@ -24,6 +24,18 @@ class ExtractedLead:
     lead_first_name: str | None = None
     lead_last_name: str | None = None
     lead_website: str | None = None
+    lead_street: str | None = None
+    lead_city: str | None = None
+    lead_postal_code: str | None = None
+    lead_country_code: str | None = None
+    lead_country: str | None = None
+    lead_phone: str | None = None
+    lead_source: str | None = None
+    lead_opted_out_email: bool = False
+    lead_dbid: str | None = None
+    lead_no_own_dbid: bool = False
+    lead_employee_category: str | None = None
+    lead_language: str | None = None
 
     # parsed company signals
     company_name: str | None = None

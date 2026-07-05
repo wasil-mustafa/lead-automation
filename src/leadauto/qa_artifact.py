@@ -14,7 +14,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
+from .convert.preflight import check_lead
 from .match import RULE_DECISIONS
+from .writeback import lead_field_payload
 
 REVIEW_COLUMNS = [
     "lead_id", "task_id", "task_type", "subject",
@@ -25,6 +27,7 @@ REVIEW_COLUMNS = [
     "match_rule", "match_evidence",
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
+    "convert_blockers",
     "decision", "Approve?",
 ]
 CONTACT_FOUND_COLUMNS = [
@@ -40,6 +43,31 @@ _HEADER_FONT = Font(bold=True)
 
 def _yn(value: bool) -> str:
     return "yes" if value else "no"
+
+
+def _convert_blockers(result) -> str:
+    """Preview of stage-2 preflight over the lead's post-write-back state.
+
+    Current lead values overlaid with the write-back payload (fill-only-blank, so the
+    overlay IS the post-run state). No proposed account match -> strictest create-new
+    assumption. Empty string = would pass preflight today.
+    """
+    e = result.enriched.extracted
+    # This key set pairs with soql._LEAD_FIELDS / check_lead's reads by convention —
+    # extend both when adding a check.
+    fields = {
+        "IsConverted": False,
+        "Street": e.lead_street, "City": e.lead_city, "PostalCode": e.lead_postal_code,
+        "Country": e.lead_country, "CountryCode": e.lead_country_code,
+        "Phone": e.lead_phone, "Email": e.lead_email,
+        "HasOptedOutOfEmail": e.lead_opted_out_email, "LeadSource": e.lead_source,
+        "KN_DBID__c": e.lead_dbid, "KN_NoOwnDBID__c": e.lead_no_own_dbid,
+        "KN_Employee__c": e.lead_employee_category, "KN_Language__c": e.lead_language,
+    }
+    payload = lead_field_payload(result.enriched)
+    fields.update((k, v) for k, v in payload.items() if k != "Id")
+    fails = check_lead(fields, create_new=result.account is None)
+    return "; ".join(f.check for f in fails)
 
 
 def _review_row(result) -> dict:
@@ -65,6 +93,7 @@ def _review_row(result) -> dict:
         "contact_match_id": con.contact_id if con else None,
         "contact_score": con.score if con else None,
         "contact_reason": con.reason if con else None,
+        "convert_blockers": _convert_blockers(result),
         "decision": result.decision, "Approve?": None,
     }
 

@@ -95,5 +95,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lead-automation-stage2-log-${{ github.run_id }}
-          path: stage2_log.txt
+          path: |
+            stage2_log.txt
+            preflight_failures.csv
           if-no-files-found: warn

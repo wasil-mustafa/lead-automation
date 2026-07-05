@@ -15,12 +15,15 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
      (identifier signals). Weaker reasons (`contact_email_global`, `linkedin`) deliberately
      create a fresh Contact under the linked Account.
    - Blanking `account_match_id`/`contact_match_id` in the CSV forces create-new.
-3. `convert_leads` runs anonymous Apex per batch (default 50, `--batch-size`):
+3. run_preflight (convert/preflight.py) re-queries the approved leads' current state and drops
+   any lead failing the "Conversion requirements" below — failures land in preflight_failures.csv
+   (uploaded with the stage-2 log) and Stage2Result.preflight_failures; --no-preflight bypasses.
+4. `convert_leads` runs anonymous Apex per batch (default 50, `--batch-size`):
    bulk `Database.convertLead(list, allOrNone=false)`, per-lead `setAccountId`/`setContactId`,
    `setDoNotCreateOpportunity(true)`, `setOwnerId(config owner_id)`. Converted status is
    resolved dynamically in Apex: the configured label if the org has it, else the org's first
    converted `LeadStatus` by `SortOrder`.
-4. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob decoded by
+5. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob decoded by
    `parse_results` — never regex-scrape debug lines.
 
 ## Commands
@@ -39,7 +42,8 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 - **The `lead-conversion` GitHub Environment does NOT exist yet** (verified 2026-07-05).
   `stage2.yml` references it and GitHub would auto-create it UNPROTECTED on first dispatch —
   create it with required reviewers in repo Settings → Environments BEFORE any live dispatch.
-- Config `owner_id` is Wasil (placeholder) — swap to the integration user before live runs.
+- Config `owner_id` stays Wasil's user DELIBERATELY (decision 2026-07-05) — converted records
+  are assigned to him at setOwnerId time; queue ownership ends at conversion.
 
 ## Gotchas
 
@@ -67,10 +71,12 @@ leads sit unaffected until then. Population counts = all 25,040 unconverted queu
 
 Fire at conversion (must be satisfied by write-back first):
 - **`KN_DbIdValidation` — EXACTLY ONE of `KN_DBID__c` / `KN_NoOwnDBID__c=true`** (XOR: both set
-  is also an error). 71% of leads currently violate it. Write-back sets `KN_DBID__c` from LF
-  `Register_Id` but never sets `KN_NoOwnDBID__c` when there is none — GAP.
+  is also an error). 71% of leads currently violate it. Write-back now sets `KN_NoOwnDBID__c=true`
+  whenever the Lead's `KN_DBID__c` is blank (closed 2026-07-05; `KN_DBID__c` itself is
+  D&B-integration-owned and never written).
 - **`KN_EmployeeCategoryMandatory` — `KN_Employee__c` required.** 97% currently blank; write-back
-  fills it only when LF returns `Employee_Count` — GAP for LF-misses.
+  fills it from LF `Employee_Count`, falling back to the claimer task's parsed company size
+  (closed 2026-07-05; leads with neither source are caught by preflight).
 - **`KN_LanguageCodemandatoryifqualified` — `KN_Language__c` required** (keyed on Qualified only).
   Only 16 leads blank — near-universally auto-populated; still needs a preflight check.
 - **`KN_LeadValidatePrivateMail` — freemail `Email` (gmail/yahoo/outlook/hotmail/aol/icloud/
@@ -80,11 +86,13 @@ Fire at conversion (must be satisfied by write-back first):
 - **Account `KN_ConvertedLeadAddressValidation` — `BillingStreet` + `BillingCountry` required on
   accounts with `KN_ConvertedLeadCheck__c`** ⇒ Lead `Street` + `Country` must be populated for
   the create-new path (the legacy `Street=','` hack). 49% of leads lack Street or Country;
-  write-back only fills `KN_DB*` copies, never the standard address — GAP.
+  write-back now fills the standard address (`Street`/`City`/`PostalCode`/`CountryCode`,
+  fill-only-blank; closed 2026-07-05).
 
 Fire on ANY Lead edit (constrain write-back itself, no status gate):
-- `KN_ValidateDandBonlyNumberLead` — `KN_DBID__c` digits-only (LF `Register_Id` values like
-  `HRB 12345` would be rejected rows — sanitize/validate).
+- `KN_ValidateDandBonlyNumberLead` — `KN_DBID__c` digits-only (`KN_DBID__c` is never written by
+  the pipeline; the rule constrains D&B/human edits and is mirrored in preflight's
+  `dbid_numeric` check).
 - `KN_Addresstoolong` — `Street` ≤ 100 chars.
 - `KN_Checklengthpostalcode` — `PostalCode` length 5 if `Country="Germany"`, 4 if
   `"Switzerland"` (English country names; Austria uncovered; E-commerce LeadSource exempt).
@@ -98,6 +106,9 @@ NOT enforced by any rule (layout-only, does not block API conversion): `KN_Regio
 Open question: does the org's Lead→Contact field mapping copy `KN_LinkedInProfileLink__c`
 (a company URL) into Contact `KN_LinkedInProfile__c`? Contact rule `KN_LinkedInLinkValidation`
 requires `linkedin.com/in/` and would reject company links — verify the mapping before go-live.
+Stage-1 write-back now fills KN_NoOwnDBID__c / address (CountryCode) / KN_Employee__c fallback /
+FirstName / Phone (fill-only-blank; spec docs/superpowers/specs/2026-07-05-writeback-gaps-and-stage2-preflight-design.md),
+and the QA Review sheet previews these checks in convert_blockers.
 
 ## Live-testing plan (prod only, no sandbox — risk-ordered)
 

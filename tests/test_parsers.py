@@ -100,3 +100,35 @@ def test_dispatch_routes_claimer():
     settings = Settings.load()
     e = extract_lead(_task("Inbound Sales Task: New Claimed Profile", CLAIMER_DESC), _lead(), settings)
     assert e is not None and e.task_type == "claimer"
+
+
+def test_base_maps_new_lead_native_fields():
+    task = {"Id": "00T1", "WhoId": "00Q1", "Subject": "s", "Description": ""}
+    lead = {
+        "Id": "00Q1", "LastName": "Muster", "Street": "Gasse 1", "City": "Wien",
+        "PostalCode": "1010", "CountryCode": "AT", "Country": "Austria",
+        "Phone": "+431234567", "LeadSource": "Web", "HasOptedOutOfEmail": "true",
+        "KN_DBID__c": "12345", "KN_NoOwnDBID__c": "false",
+        "KN_Employee__c": "11-50", "KN_Language__c": "German",
+    }
+    e = parse_claimer(task, lead)
+    assert e.lead_street == "Gasse 1"
+    assert e.lead_city == "Wien"
+    assert e.lead_postal_code == "1010"
+    assert e.lead_country_code == "AT"
+    assert e.lead_country == "Austria"
+    assert e.lead_phone == "+431234567"
+    assert e.lead_source == "Web"
+    assert e.lead_opted_out_email is True
+    assert e.lead_dbid == "12345"
+    assert e.lead_no_own_dbid is False
+    assert e.lead_employee_category == "11-50"
+    assert e.lead_language == "German"
+
+
+def test_base_bool_coercion_accepts_real_booleans():
+    task = {"Id": "00T1", "WhoId": "00Q1", "Subject": "s", "Description": ""}
+    lead = {"Id": "00Q1", "LastName": "M", "HasOptedOutOfEmail": False, "KN_NoOwnDBID__c": True}
+    e = parse_claimer(task, lead)
+    assert e.lead_opted_out_email is False
+    assert e.lead_no_own_dbid is True
