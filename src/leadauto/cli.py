@@ -96,6 +96,8 @@ def stage2(
     dry_run: Optional[bool] = typer.Option(None, "--dry-run/--no-dry-run",
                                            help="Override config dry_run."),
     batch_size: int = typer.Option(50, "--batch-size", help="Leads converted per Apex run."),
+    preflight: bool = typer.Option(True, "--preflight/--no-preflight",
+                                   help="Check conversion requirements and skip failing leads."),
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
 ) -> None:
     """Convert the Leads approved in the QA artifact (review/approved_*.csv)."""
@@ -108,11 +110,13 @@ def stage2(
             raise typer.Exit(code=1)
         log.info("Using approved file %s", approved)
     sf = _build_sf_client(settings, log)
-    res = run_stage2(sf, settings, approved, dry_run=dry_run, batch_size=batch_size, logger=log)
+    res = run_stage2(sf, settings, approved, dry_run=dry_run, batch_size=batch_size,
+                     preflight=preflight, logger=log)
+    skipped_leads = len({f["lead_id"] for f in res.preflight_failures})
     typer.echo(
         f"Stage 2 {'(dry-run) ' if res.dry_run else ''}done: "
         f"{len(res.targets)} target(s) | converted={res.result.get('converted', 0)} "
-        f"failed={res.result.get('failed', 0)}"
+        f"failed={res.result.get('failed', 0)} | preflight_skipped={skipped_leads}"
     )
 
 

@@ -204,7 +204,7 @@ def test_run_stage2_dry_run_makes_no_conversions(tmp_path):
     _write_approved(p, [{"lead_id": "00Q1", "account_match_id": "001A",
                          "contact_score": "1.0", "Approve?": "yes"}])
     client = FakeApexClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=True)
+    res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
     assert client.apex_calls == []
     assert res.result["converted"] == 0
     assert res.result["planned"] == 1
@@ -217,6 +217,81 @@ def test_run_stage2_live_converts_approved(tmp_path):
         {"lead_id": "00Q2", "Approve?": "no"},
     ])
     client = FakeApexClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=False)
+    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
     assert len(client.apex_calls) == 1
     assert res.result["converted"] == 1   # only the approved lead
+
+
+# --- Stage 2: preflight gate --------------------------------------------------
+
+import csv as _csv
+
+_GOOD_ROW = {
+    "IsConverted": False, "KN_Employee__c": "11-50", "KN_DBID__c": "",
+    "KN_NoOwnDBID__c": "true", "KN_Language__c": "German", "Street": "Weg 1",
+    "Country": "Germany", "CountryCode": "DE", "PostalCode": "20095",
+    "Phone": "", "Email": "info@acme.de", "HasOptedOutOfEmail": False, "LeadSource": "Web",
+}
+
+
+class _PreflightSfFake:
+    """query() answers the preflight SOQL; apex_run records conversions."""
+    def __init__(self, rows):
+        self.rows = rows
+        self.apex_calls = []
+
+    def query(self, soql):
+        return self.rows
+
+    def apex_run(self, apex):
+        self.apex_calls.append(apex)
+        return '@@LEADAUTO@@[{"leadId": "00Q_OK", "success": true}]@@LEADAUTO@@'
+
+
+class _PreflightSettings:
+    dry_run = False
+    owner_id = "005X"
+    converted_status = "Qualified"
+
+
+def _approved_csv(tmp_path, rows, name="approved_x.csv"):
+    p = tmp_path / name
+    cols = ["lead_id", "account_match_id", "contact_match_id", "contact_reason", "Approve?"]
+    with p.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
+    return p
+
+
+def test_stage2_preflight_excludes_failing_leads(tmp_path):
+    approved = _approved_csv(tmp_path, [
+        {"lead_id": "00Q_OK", "Approve?": "yes"},
+        {"lead_id": "00Q_BAD", "Approve?": "yes"},
+    ])
+    client = _PreflightSfFake([dict(_GOOD_ROW, Id="00Q_OK"),
+                               dict(_GOOD_ROW, Id="00Q_BAD", KN_Language__c="")])
+    res = run_stage2(client, _PreflightSettings(), approved,
+                     failures_csv=tmp_path / "preflight_failures.csv")
+    assert [t.lead_id for t in res.targets] == ["00Q_OK"]
+    assert res.preflight_failures[0]["lead_id"] == "00Q_BAD"
+    assert "00Q_BAD" not in "".join(client.apex_calls)
+    assert (tmp_path / "preflight_failures.csv").exists()
+
+
+def test_stage2_no_preflight_bypasses(tmp_path):
+    approved = _approved_csv(tmp_path, [{"lead_id": "00Q_BAD", "Approve?": "yes"}], "approved_y.csv")
+    client = _PreflightSfFake([])
+    res = run_stage2(client, _PreflightSettings(), approved, preflight=False,
+                     failures_csv=tmp_path / "pf.csv")
+    assert [t.lead_id for t in res.targets] == ["00Q_BAD"]
+    assert res.preflight_failures == []
+    assert not (tmp_path / "pf.csv").exists()
+
+
+def test_stage2_dry_run_still_preflights(tmp_path):
+    approved = _approved_csv(tmp_path, [{"lead_id": "00Q_BAD", "Approve?": "yes"}], "approved_z.csv")
+    client = _PreflightSfFake([dict(_GOOD_ROW, Id="00Q_BAD", KN_Employee__c="")])
+    res = run_stage2(client, _PreflightSettings(), approved, dry_run=True,
+                     failures_csv=tmp_path / "pf.csv")
+    assert res.preflight_failures and not client.apex_calls

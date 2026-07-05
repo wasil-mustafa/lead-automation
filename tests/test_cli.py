@@ -46,3 +46,30 @@ def test_shadow_compare_command(monkeypatch):
     result = CliRunner().invoke(cli.app, ["shadow-compare"])
     assert result.exit_code == 0
     assert "resolved=2" in result.output and "hits=1" in result.output
+
+
+def test_stage2_cli_reports_preflight_skips(monkeypatch, tmp_path):
+    from leadauto import cli
+    from leadauto.pipeline.stage2_convert import Stage2Result
+
+    captured = {}
+
+    def fake_run_stage2(sf, settings, approved, *, dry_run=None, batch_size=50,
+                        preflight=True, failures_csv="preflight_failures.csv", logger=None):
+        captured["preflight"] = preflight
+        return Stage2Result(targets=[], result={"converted": 0, "failed": 0},
+                            dry_run=True,
+                            preflight_failures=[{"lead_id": "00Q1", "check": "language",
+                                                 "value": "", "detail": "d"}])
+
+    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
+    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
+    approved = tmp_path / "approved_1.csv"
+    approved.write_text("lead_id,Approve?\n00Q1,yes\n", encoding="utf-8")
+
+    from typer.testing import CliRunner
+    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved),
+                                          "--no-preflight"])
+    assert result.exit_code == 0
+    assert captured["preflight"] is False
+    assert "preflight_skipped=1" in result.output
