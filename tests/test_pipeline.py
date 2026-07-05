@@ -295,3 +295,17 @@ def test_stage2_dry_run_still_preflights(tmp_path):
     res = run_stage2(client, _PreflightSettings(), approved, dry_run=True,
                      failures_csv=tmp_path / "pf.csv")
     assert res.preflight_failures and not client.apex_calls
+
+
+def test_stage2_preflight_writes_csv_even_with_zero_targets(tmp_path):
+    # All rows unapproved -> zero targets; preflight (default on) must still write the
+    # header-only CSV so the CI artifact always shows preflight ran.
+    approved = _approved_csv(tmp_path, [{"lead_id": "00Q_NO", "Approve?": "no"}], "approved_w.csv")
+    client = _PreflightSfFake([])
+    res = run_stage2(client, _PreflightSettings(), approved,
+                     failures_csv=tmp_path / "pf.csv")
+    assert res.targets == []
+    assert res.preflight_failures == []
+    assert not client.apex_calls
+    assert (tmp_path / "pf.csv").exists()
+    assert (tmp_path / "pf.csv").read_text(encoding="utf-8").strip() == "lead_id,check,value,detail"

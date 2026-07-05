@@ -78,7 +78,9 @@ def run_stage2(
     rows = read_approved(approved_csv)
     targets = targets_from_approved(rows, settings)
     pf_failures: list[dict] = []
-    if preflight and targets:
+    if preflight:
+        # Runs even with zero targets: run_preflight returns ([], []) without querying,
+        # and the header-only CSV proves in the CI artifact that preflight ran.
         targets, pf_failures = run_preflight(sf_client, targets, logger=log)
         path = write_failures_csv(pf_failures, failures_csv)
         if pf_failures:
