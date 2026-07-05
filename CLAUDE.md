@@ -45,8 +45,11 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   (repo secret **set 2026-07-02** from the local `headless` org's sfdx auth url — regenerate with
   `sf org display --target-org headless --verbose --json | jq -r .result.sfdxAuthUrl` and pipe into
   `gh secret set`; reused by both workflows' login step); `config.py` reads `SF_AUTH_URL` and falls back
-  to `SFDX_AUTH_URL`. Plus `LEADFEEDER_API_KEY` (GitHub Secret + local `LEADFEEDER_API_KEY.txt`, gitignored).
-  Never hardcode. The legacy LeadFeeder key in `Scripts/` is live (confirmed working) and must be rotated.
+  to `SFDX_AUTH_URL`. Plus `LEADFEEDER_API_KEY` (GitHub Secret). **All local plaintext secrets were
+  deleted 2026-07-05** (per Wasil — repo lives in a OneDrive-synced folder): `LEADFEEDER_API_KEY.txt`,
+  `.env` (`KUNUNU_API_TOKEN`), and the hardcoded key in the 6 legacy `Scripts/` files (now
+  `os.environ["LEADFEEDER_API_KEY"]`). Keys live ONLY in GitHub Secrets; no rotation planned.
+  For local runs set `LEADFEEDER_API_KEY` / `KUNUNU_API_TOKEN` as env vars ad hoc. Never hardcode.
 - **Conversion is anonymous Apex** (`convert/converter.py`): bulk `Database.convertLead(list, false)`,
   per-lead `setAccountId`/`setContactId`, `IsConverted=false` re-filter (idempotent), results returned
   as a `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob (no regex debug-scraping).
@@ -173,7 +176,12 @@ sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --r
   have fired with `--no-dry-run` (empty `inputs` on schedule events fell into the else branch —
   live-write time bomb defused); the watermark-commit guard footgun is fixed the same way
   (string output from the gate job). Owner facts: current window is 198× Lead 'Pre-Sales' Queue,
-  101× Lead Entry Queue; 260/301 leads are status "No Demand" (open scope question); config
+  101× Lead Entry Queue; 260/301 leads are status "No Demand" — **resolved (Wasil, 2026-07-05):**
+  humans set "No Demand" + route to Pre-Sales when the kununu score is <3.0 (not worth manual
+  enrichment effort); with automated enrichment/conversion this practice changes and these leads
+  ARE in scope. Humans will keep CLOSING the tasks, so the Status freshness gate drops handled
+  leads and shadow-compare rarely gets human-conversion outcomes for them — expect shadow
+  hit/miss evidence to come mostly from the non-No-Demand minority. Config
   `owner_id` = Wasil (placeholder — swap to the integration user before live conversions).
 - ✅ **First live-credit CI crash fixed (2026-07-03, PR #8):** the first stage1 run WITH LeadFeeder
   credits crashed in `flatten_company` — LF retrieve payloads carry explicit `"name": null` industry
@@ -226,7 +234,9 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
    wrong labels would have been rejected rows).
 2. **Validate end-to-end** per the plan: `stage1 --dry-run --no-leadfeeder` read-only sanity → small live
    `--limit 5` write-back (inspect KN_* on those Leads) → one gated `stage2` conversion (verify
-   link-vs-create, owner/status, no Opportunity, re-run = no-op).
+   link-vs-create, owner/status, no Opportunity, re-run = no-op). **Open problem (Wasil, 2026-07-05):**
+   how to safely test the three conversion paths (new account / existing account+new contact /
+   existing contact) — has to happen in live prod; no sandbox path planned.
 3. **Roll out task types**: enable `ebp_trial` in `config.yaml` `enabled_task_types`, then `event`, then
    `content`, calibrating thresholds from the review sheet's false-match rate.
 4. **CI**: ✅ repo secrets set (`SFDX_AUTH_URL`, `LEADFEEDER_API_KEY`); ✅ login hardened (3× retry +
@@ -236,7 +246,9 @@ status bullet above and Next-steps item 5 for what remains (live-only validation
 5. ✅ Alt-names gate validated on the control set (2026-07-03); feed field name confirmed; secret set.
    ✅ Country fields dropped from the LF match payload + full-set re-validation (92.7% accepted,
    wrong-company at baseline) — PR #6.
-6. Rotate the legacy hardcoded LeadFeeder key in `Scripts/`.
+6. ✅ **Secrets cleanup (2026-07-05):** local plaintext copies deleted, legacy `Scripts/` keys
+   replaced with env lookups (see the secrets bullet above). Rotation deliberately skipped (Wasil).
+   Residual: OneDrive recycle bin / version history retains the deleted files for a while.
 7. **Dublettencheck rule engine — validate on live data (branch `dublettencheck-rules`):** the rule
    distribution has only been smoke-tested WITHOUT LeadFeeder (all leads → `no_lf_match`). Read the
    `match_rule`/Summary breakdown of the next scheduled dry-run QA artifact (WITH LeadFeeder) to see
@@ -263,9 +275,8 @@ match signal; Apex `converted_status`/owner escaping; write-back row-failures su
 new QA **Failures** sheet (`update_bulk` parses `sf data update bulk --json`, reporting
 `confirmed=False` on an unrecognized shape rather than assuming success).
 Open:
-- **`daily-tagger.yml`** references `main_profile_tag.py`, which is NOT in the repo — a
-  separate automation, out of this plan's scope. Decide whether to keep/remove it (it would
-  fail CI as-is). Not touched (not created here).
+- ✅ **`daily-tagger.yml`** — stale item: the file no longer exists in `.github/workflows/`
+  (verified 2026-07-05); nothing to decide.
 - **Write-back idempotency (live-validation task):** confirm the real `sf data update bulk
   --json` shape (the parser's assumed keys), then decide whether to exclude failed leads'
   tasks from the watermark advance vs. rely on the Failures sheet + overlap-window retry.
