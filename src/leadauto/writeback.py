@@ -11,12 +11,10 @@ Org-verified 2026-07-03 (read-only describe + data sampling on `headless`):
   * `KN_Employee__c` is a RESTRICTED picklist; `_EMPLOYEE_BINS` mirrors its 14 labels
     verbatim (German dot separators). `KN_Region__c` is also restricted — the parsers
     only emit Germany/Austria/Switzerland (or None), all valid.
-  * `KN_DBRevenueinMillions__c` is double(18,2) storing MILLIONS (org samples carry
-    6-decimal absolute/1e6 values), so LeadFeeder's absolute `revenue.value` / 1e6 fits.
-  * `KN_DBISO2CountryCode__c` holds uppercase alpha-2 (DE/CH/AT — 100% of org rows);
-    LeadFeeder `address.country` is alpha-2 and `_iso2` uppercases it.
   * `KN_KununuProfileClaimed__c` is a real checkbox — the Bulk API CSV accepts the
     "true"/"false" strings written here.
+  * `KN_DB*` fields are auto-populated by the org's D&B integration and are never
+    written here (Wasil, 2026-07-05); conversion-requirement fields are fill-only-blank.
 """
 from __future__ import annotations
 
@@ -52,16 +50,6 @@ def employee_bin(count) -> str | None:
         if n <= upper:
             return label
     return "> 100.000"
-
-
-def revenue_millions(value) -> float | None:
-    """Convert absolute revenue to millions, rounded to 2 dp. None if absent/non-numeric."""
-    if value is None or value == "":
-        return None
-    try:
-        return round(float(value) / 1_000_000, 2)
-    except (TypeError, ValueError):
-        return None
 
 
 def normalize_phone(value) -> str | None:
@@ -134,6 +122,19 @@ def _put(payload: dict, field: str, value) -> None:
     payload[field] = value
 
 
+_POSTAL_LEN_BY_CC = {"DE": 5, "CH": 4}  # KN_Checklengthpostalcode (Austria unchecked)
+
+
+def _blank(value) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _fill(payload: dict, field: str, current, value) -> None:
+    """_put, but only when the Lead's current value is blank (fill-only-blank policy)."""
+    if _blank(current):
+        _put(payload, field, value)
+
+
 def lead_field_payload(enriched: EnrichedLead) -> dict:
     """Build the Id-keyed write-back dict for one enriched Lead (only populated fields)."""
     e = enriched.extracted
@@ -151,20 +152,35 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     if isinstance(e.claimed_at, date):
         _put(payload, "KN_KununuProfileClaimedAt__c", e.claimed_at.isoformat())
 
-    # firmographics (from LeadFeeder)
-    _put(payload, "KN_DBLegalCompanyName__c", enriched.matched_name)
-    _put(payload, "KN_DBStreetHouseNumber__c", company.get("Street"))
-    _put(payload, "KN_DBPostalCode__c", company.get("Postal_Code"))
-    _put(payload, "KN_DBCity__c", company.get("City"))
-    _put(payload, "KN_DBISO2CountryCode__c", _iso2(company.get("Country")) or e.country_code)
-    _put(payload, "KN_DBNumberofEmployees__c", company.get("Employee_Count"))
-    _put(payload, "KN_Employee__c", employee_bin(company.get("Employee_Count")))
-    _put(payload, "KN_DBRevenueinMillions__c", revenue_millions(company.get("Revenue")))
+    # firmographics (LeadFeeder) — KN_DB* fields are D&B-integration-owned, never written
+    emp = employee_bin(company.get("Employee_Count"))
+    if emp:
+        _put(payload, "KN_Employee__c", emp)
+    else:
+        _fill(payload, "KN_Employee__c", e.lead_employee_category,
+              employee_bin_from_size(e.company_size))
     _put(payload, "KN_VATNumber__c", company.get("VAT_Id") or e.vat_number)
-    _put(payload, "KN_DBMainIndustryTextperWZ08__c", company.get("Industry"))
     _put(payload, "KN_LinkedInProfileLink__c", company.get("Company_LinkedIn"))
     _put(payload, "KN_CompanyEmail__c", company.get("Company_Email"))
-    _put(payload, "KN_DBID__c", company.get("Register_Id"))
+
+    # conversion requirements (org validation rules; all fill-only-blank)
+    if _blank(e.lead_dbid) and not e.lead_no_own_dbid:
+        payload["KN_NoOwnDBID__c"] = "true"  # KN_DbIdValidation XOR
+    contact = enriched.contact or {}
+    street = e.street or company.get("Street")
+    _fill(payload, "Street", e.lead_street, (street or "")[:100] or None)
+    _fill(payload, "City", e.lead_city, e.city or company.get("City"))
+    country = (e.country_code or _iso2(company.get("Country")) or "").upper()
+    if _blank(e.lead_country):
+        _fill(payload, "CountryCode", e.lead_country_code, country or None)
+    postal = e.postal_code or company.get("Postal_Code")
+    effective_cc = ((e.lead_country_code or country) or "").upper()
+    expected_len = _POSTAL_LEN_BY_CC.get(effective_cc)
+    if postal and (expected_len is None or len(str(postal).strip()) == expected_len):
+        _fill(payload, "PostalCode", e.lead_postal_code, str(postal).strip())
+    _fill(payload, "FirstName", e.lead_first_name,
+          split_first_name(e.contact_name or contact.get("full_name"), e.lead_last_name))
+    _fill(payload, "Phone", e.lead_phone, normalize_phone(contact.get("best_contact_phone")))
 
     return payload
 
