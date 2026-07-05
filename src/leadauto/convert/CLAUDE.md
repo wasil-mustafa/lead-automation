@@ -48,11 +48,9 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   `Database.DMLOptions.DuplicateRuleHeader.AllowSave` does not apply to conversion (only to
   plain DML). If a Block rule fires: fix the duplicate or downgrade the rule to Alert.
   Provenance + failed REST workaround: `docs/legacy/convert-leads/`.
-- **Validation rules block conversion of sparse leads.** The May-2026 manual runs had to patch
-  `Street = ','`, `KN_Employee__c = '11-50'`, `KN_NoOwnDBID__c = true` before converting
-  (`docs/legacy/convert-leads/convertLead.apex`). Re-verify the org's current Lead/Account/
-  Contact validation rules before go-live; stage 1 write-back fills `KN_Employee__c` but not
-  `Street`/`KN_NoOwnDBID__c`.
+- **Validation rules block conversion of sparse leads** — see "Conversion requirements" below
+  (org-verified 2026-07-05). The May-2026 manual runs had to patch `Street = ','`,
+  `KN_Employee__c = '11-50'`, `KN_NoOwnDBID__c = true` (`docs/legacy/convert-leads/convertLead.apex`).
 - `parse_results` returns `[]` on any missing sentinel / bad JSON and `convert_leads` only
   logs a WARNING for that batch — converted/failed counts silently exclude it. Check logs on
   any live run.
@@ -60,6 +58,46 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   control-set joins had to go through `ConvertedContactId`.
 - `Lead.ConvertedDate` is Date-only (no time component) — shadow-compare treats "same UTC day"
   as the match window.
+
+## Conversion requirements (active validation rules, org-verified 2026-07-05)
+
+Retrieved read-only via Tooling API (24 active rules on Lead/Account/Contact). Lead rules keyed
+on `Status = 'Qualified'` OR `IsConverted = TRUE` fire DURING conversion (proven in May 2026);
+leads sit unaffected until then. Population counts = all 25,040 unconverted queue-owned leads.
+
+Fire at conversion (must be satisfied by write-back first):
+- **`KN_DbIdValidation` — EXACTLY ONE of `KN_DBID__c` / `KN_NoOwnDBID__c=true`** (XOR: both set
+  is also an error). 71% of leads currently violate it. Write-back sets `KN_DBID__c` from LF
+  `Register_Id` but never sets `KN_NoOwnDBID__c` when there is none — GAP.
+- **`KN_EmployeeCategoryMandatory` — `KN_Employee__c` required.** 97% currently blank; write-back
+  fills it only when LF returns `Employee_Count` — GAP for LF-misses.
+- **`KN_LanguageCodemandatoryifqualified` — `KN_Language__c` required** (keyed on Qualified only).
+  Only 16 leads blank — near-universally auto-populated; still needs a preflight check.
+- **`KN_LeadValidatePrivateMail` — freemail `Email` (gmail/yahoo/outlook/hotmail/aol/icloud/
+  protonmail/zoho/mail.com) BLOCKS when `Status != 'New'` unless `HasOptedOutOfEmail`.** ~7%
+  (1,776) of leads are in this state — conversion-blocking; needs a policy (opt-out flag vs
+  clear email vs route to review).
+- **Account `KN_ConvertedLeadAddressValidation` — `BillingStreet` + `BillingCountry` required on
+  accounts with `KN_ConvertedLeadCheck__c`** ⇒ Lead `Street` + `Country` must be populated for
+  the create-new path (the legacy `Street=','` hack). 49% of leads lack Street or Country;
+  write-back only fills `KN_DB*` copies, never the standard address — GAP.
+
+Fire on ANY Lead edit (constrain write-back itself, no status gate):
+- `KN_ValidateDandBonlyNumberLead` — `KN_DBID__c` digits-only (LF `Register_Id` values like
+  `HRB 12345` would be rejected rows — sanitize/validate).
+- `KN_Addresstoolong` — `Street` ≤ 100 chars.
+- `KN_Checklengthpostalcode` — `PostalCode` length 5 if `Country="Germany"`, 4 if
+  `"Switzerland"` (English country names; Austria uncovered; E-commerce LeadSource exempt).
+- `KN_ValidatePhone` (+ Contact `KN_ContactValidPhoneNumber`) — `Phone` must match
+  `+<digits only>`, no spaces (e.g. `+4940419131`); normalize before ever writing phone.
+- `KN_ProvideReasonForNoDemand` — No-Demand leads need a reason; 0 currently violate, so
+  write-back updates are safe.
+
+NOT enforced by any rule (layout-only, does not block API conversion): `KN_Region__c`, `City`,
+`FirstName`/`Salutation`, email/phone presence. `LastName`/`Company` are schema-required.
+Open question: does the org's Lead→Contact field mapping copy `KN_LinkedInProfileLink__c`
+(a company URL) into Contact `KN_LinkedInProfile__c`? Contact rule `KN_LinkedInLinkValidation`
+requires `linkedin.com/in/` and would reject company links — verify the mapping before go-live.
 
 ## Live-testing plan (prod only, no sandbox — risk-ordered)
 
