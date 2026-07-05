@@ -71,10 +71,12 @@ leads sit unaffected until then. Population counts = all 25,040 unconverted queu
 
 Fire at conversion (must be satisfied by write-back first):
 - **`KN_DbIdValidation` — EXACTLY ONE of `KN_DBID__c` / `KN_NoOwnDBID__c=true`** (XOR: both set
-  is also an error). 71% of leads currently violate it. Write-back sets `KN_DBID__c` from LF
-  `Register_Id` but never sets `KN_NoOwnDBID__c` when there is none — GAP.
+  is also an error). 71% of leads currently violate it. Write-back now sets `KN_NoOwnDBID__c=true`
+  whenever the Lead's `KN_DBID__c` is blank (closed 2026-07-05; `KN_DBID__c` itself is
+  D&B-integration-owned and never written).
 - **`KN_EmployeeCategoryMandatory` — `KN_Employee__c` required.** 97% currently blank; write-back
-  fills it only when LF returns `Employee_Count` — GAP for LF-misses.
+  fills it from LF `Employee_Count`, falling back to the claimer task's parsed company size
+  (closed 2026-07-05; leads with neither source are caught by preflight).
 - **`KN_LanguageCodemandatoryifqualified` — `KN_Language__c` required** (keyed on Qualified only).
   Only 16 leads blank — near-universally auto-populated; still needs a preflight check.
 - **`KN_LeadValidatePrivateMail` — freemail `Email` (gmail/yahoo/outlook/hotmail/aol/icloud/
@@ -84,11 +86,13 @@ Fire at conversion (must be satisfied by write-back first):
 - **Account `KN_ConvertedLeadAddressValidation` — `BillingStreet` + `BillingCountry` required on
   accounts with `KN_ConvertedLeadCheck__c`** ⇒ Lead `Street` + `Country` must be populated for
   the create-new path (the legacy `Street=','` hack). 49% of leads lack Street or Country;
-  write-back only fills `KN_DB*` copies, never the standard address — GAP.
+  write-back now fills the standard address (`Street`/`City`/`PostalCode`/`CountryCode`,
+  fill-only-blank; closed 2026-07-05).
 
 Fire on ANY Lead edit (constrain write-back itself, no status gate):
-- `KN_ValidateDandBonlyNumberLead` — `KN_DBID__c` digits-only (LF `Register_Id` values like
-  `HRB 12345` would be rejected rows — sanitize/validate).
+- `KN_ValidateDandBonlyNumberLead` — `KN_DBID__c` digits-only (`KN_DBID__c` is never written by
+  the pipeline; the rule constrains D&B/human edits and is mirrored in preflight's
+  `dbid_numeric` check).
 - `KN_Addresstoolong` — `Street` ≤ 100 chars.
 - `KN_Checklengthpostalcode` — `PostalCode` length 5 if `Country="Germany"`, 4 if
   `"Switzerland"` (English country names; Austria uncovered; E-commerce LeadSource exempt).

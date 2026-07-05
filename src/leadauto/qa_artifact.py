@@ -53,6 +53,8 @@ def _convert_blockers(result) -> str:
     assumption. Empty string = would pass preflight today.
     """
     e = result.enriched.extracted
+    # This key set pairs with soql._LEAD_FIELDS / check_lead's reads by convention —
+    # extend both when adding a check.
     fields = {
         "IsConverted": False,
         "Street": e.lead_street, "City": e.lead_city, "PostalCode": e.lead_postal_code,

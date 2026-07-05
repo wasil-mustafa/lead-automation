@@ -155,6 +155,8 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     # firmographics (LeadFeeder) — KN_DB* fields are D&B-integration-owned, never written
     emp = employee_bin(company.get("Employee_Count"))
     if emp:
+        # Deliberate exception to the fill-only-blank rule below: LF headcount is fresher
+        # than a stale manual pick, so this overwrites unconditionally (pre-existing behavior).
         _put(payload, "KN_Employee__c", emp)
     else:
         _fill(payload, "KN_Employee__c", e.lead_employee_category,
