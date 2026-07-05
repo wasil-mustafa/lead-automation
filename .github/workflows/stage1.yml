@@ -21,13 +21,12 @@ on:
         type: boolean
         default: true
   schedule:
-    # Twice daily: ~09:23 and ~18:23 Vienna in summer (~08:23/17:23 in winter —
+    # Twice daily: ~08:00 and ~17:00 Vienna in summer (~09:00/18:00 in winter —
     # DST drift is accepted). GitHub cron is UTC, best-effort only: firings run
     # late and some are dropped entirely, especially on low-activity repos.
-    # The :23 offset avoids the congested top-of-hour slot, which is dropped
-    # most often. If GitHub still under-delivers, the fix is an external
+    # If GitHub still under-delivers, the fix is an external
     # scheduler hitting workflow_dispatch, not more cron entries.
-    - cron: "23 7,16 * * *"
+    - cron: "0 8,17 * * *"
 
 # Never let two enrich runs overlap (they share the watermark file).
 concurrency:
