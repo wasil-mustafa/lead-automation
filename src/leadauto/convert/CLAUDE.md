@@ -18,13 +18,21 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
 3. run_preflight (convert/preflight.py) re-queries the approved leads' current state and drops
    any lead failing the "Conversion requirements" below — failures land in preflight_failures.csv
    (uploaded with the stage-2 log) and Stage2Result.preflight_failures; --no-preflight bypasses.
-4. `convert_leads` runs anonymous Apex per batch (default 50, `--batch-size`):
+4. `convert_leads` runs anonymous Apex per batch (default **10**, `--batch-size`; kept small
+   because each conversion cascades Account/Contact triggers, flows and validation/duplicate
+   rules synchronously in one transaction — 50/tx risks governor limits):
    bulk `Database.convertLead(list, allOrNone=false)`, per-lead `setAccountId`/`setContactId`,
    `setDoNotCreateOpportunity(true)`, `setOwnerId(config owner_id)`. Converted status is
    resolved dynamically in Apex: the configured label if the org has it, else the org's first
-   converted `LeadStatus` by `SortOrder`.
-5. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob decoded by
-   `parse_results` — never regex-scrape debug lines.
+   converted `LeadStatus` by `SortOrder`. The whole body is wrapped in try/catch — any uncaught
+   exception reports every not-yet-reported lead as failed, so a batch can never vanish silently.
+5. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob (emitted at
+   `LoggingLevel.ERROR` so no debug-log filter drops it) decoded by `parse_results` — never
+   regex-scrape debug lines. `convert_leads` reconciles the returned leadIds against its input:
+   leads already converted before the run get an explicit `alreadyConverted` result row (so a
+   re-run is a true no-op — counted `already_converted`, never `missing`), while any input lead
+   with NO result row at all (dead run, lost sentinel) is counted `missing`. Only `failed`/
+   `missing` fail the job; `already_converted` does not.
 
 ## Commands
 
@@ -37,8 +45,17 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 ## Safety model
 
 - `dry_run` short-circuits in `convert_leads` before ANY Apex runs; config has `dry_run: true`
-  and the workflow input defaults to true. These are currently the ONLY safeguards.
-- Idempotent: the Apex re-filters `IsConverted = false`, so re-running a batch is a no-op.
+  and the workflow input defaults to true.
+- IDs from the approved CSV are validated to the 15/18-char alphanumeric shape in
+  `targets_from_approved` (raises `ValueError` → CLI exits non-zero) and re-guarded to
+  alphanumeric-only before embedding in Apex (`converter._apex_id`), so a malformed or
+  malicious cell can neither inject into the conversion Apex nor crash a batch at map-build.
+- A contact link without an account link is dropped in `targets_from_approved` (LeadConvert
+  requires `setAccountId` alongside `setContactId`; the lead converts create-new instead).
+- Idempotent: the Apex only converts `IsConverted = false` leads and emits an explicit
+  `alreadyConverted` row for the rest, so re-running a batch (or an approved CSV where some rows
+  already converted) is a no-op that exits **green** — already-converted leads count as
+  `already_converted`, not `missing`/`failed`.
 - **The `lead-conversion` GitHub Environment does NOT exist yet** (verified 2026-07-05).
   `stage2.yml` references it and GitHub would auto-create it UNPROTECTED on first dispatch —
   create it with required reviewers in repo Settings → Environments BEFORE any live dispatch.
@@ -55,9 +72,11 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 - **Validation rules block conversion of sparse leads** — see "Conversion requirements" below
   (org-verified 2026-07-05). The May-2026 manual runs had to patch `Street = ','`,
   `KN_Employee__c = '11-50'`, `KN_NoOwnDBID__c = true` (`docs/legacy/convert-leads/convertLead.apex`).
-- `parse_results` returns `[]` on any missing sentinel / bad JSON and `convert_leads` only
-  logs a WARNING for that batch — converted/failed counts silently exclude it. Check logs on
-  any live run.
+- `parse_results` returns `[]` on any missing sentinel / bad JSON. `convert_leads` no longer
+  lets that pass silently: it reconciles returned leadIds against the batch and counts any
+  absent lead as `missing` (logged at ERROR), and `apex_run` now runs `sf apex run --json` and
+  raises `SfError` on a compile error / uncaught exception. The `stage2` CLI exits non-zero when
+  `failed` or `missing` is non-zero, so CI fails loudly instead of reporting a false green.
 - LeadConvert **re-parents the Lead's Tasks onto the Contact** (`Who.Type` flips) — the reason
   control-set joins had to go through `ConvertedContactId`.
 - `Lead.ConvertedDate` is Date-only (no time component) — shadow-compare treats "same UTC day"

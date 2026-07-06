@@ -8,6 +8,8 @@ boundary is a FakeApexClient that echoes a serialized result for the lead ids it
 import json
 import re
 
+import pytest
+
 from leadauto.config import Settings
 from leadauto.convert import (
     SENTINEL,
@@ -68,6 +70,32 @@ def test_build_apex_escapes_single_quote_in_status():
     assert "'Qual'ified'" not in apex  # unescaped form must not appear
 
 
+def test_build_apex_always_emits_sentinel_and_guards_exceptions():
+    # An uncaught Apex exception must not swallow the whole batch: the run is wrapped in
+    # try/catch and the sentinel is always printed at ERROR level.
+    apex = build_convert_apex([ConversionTarget("00Q1")], owner_id=None,
+                              converted_status="Qualified")
+    assert "try {" in apex and "catch (Exception" in apex
+    assert "LoggingLevel.ERROR" in apex
+    assert apex.count(SENTINEL) == 2   # one JSON.serialize call, opened + closed
+
+
+def test_build_apex_rejects_id_injection():
+    # A value that could break out of the Apex string literal is refused, not escaped.
+    with pytest.raises(ValueError, match="non-alphanumeric"):
+        build_convert_apex([ConversionTarget("00Q1'); System.abortJob('x")],
+                           owner_id=None, converted_status="Qualified")
+
+
+def test_build_apex_reports_already_converted_leads():
+    # Already-converted inputs must get an explicit result row (idempotent no-op) rather
+    # than being silently filtered out and later counted as `missing`.
+    apex = build_convert_apex([ConversionTarget("00Q1")], owner_id=None,
+                              converted_status="Qualified")
+    assert "IsConverted = true" in apex
+    assert "'alreadyConverted'" in apex
+
+
 # --- result parsing ----------------------------------------------------------
 
 def test_parse_results_extracts_json_between_sentinels():
@@ -116,3 +144,57 @@ def test_convert_leads_empty_is_noop():
     res = convert_leads(client, [], SETTINGS, dry_run=False)
     assert client.apex_calls == []
     assert res["converted"] == 0 and res["planned"] == 0
+
+
+class _PartialApexClient:
+    """Echoes a result only for the first lead of each batch; the rest go unaccounted for."""
+    def apex_run(self, apex: str) -> str:
+        head = apex.split("Map<Id,Id>", 1)[0]
+        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
+        out = [{"leadId": ids[0], "success": True}] if ids else []
+        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+
+
+def test_convert_leads_reports_leads_missing_from_results():
+    # A lead the Apex never returns at all (a run that died before the sentinel) must
+    # surface as `missing`, never silently drop from the counts.
+    client = _PartialApexClient()
+    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False)
+    assert res["converted"] == 1
+    assert res["missing"] == 1
+    assert res["missing_ids"] == ["00Q2"]
+
+
+class _AlreadyConvertedApexClient:
+    """Simulates a re-run: every input lead is already converted, so the Apex returns an
+    `alreadyConverted` row for each (no fresh conversion happens)."""
+    def apex_run(self, apex: str) -> str:
+        head = apex.split("Map<Id,Id>", 1)[0]
+        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
+        out = [{"leadId": i, "success": True, "alreadyConverted": True} for i in ids]
+        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+
+
+def test_convert_leads_already_converted_is_noop_not_missing():
+    # Re-running an already-converted batch is a clean no-op: leads count as
+    # `already_converted`, not `missing`/`failed`/`converted`, so the job stays green.
+    client = _AlreadyConvertedApexClient()
+    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False)
+    assert res["already_converted"] == 2
+    assert res["converted"] == 0
+    assert res["failed"] == 0
+    assert res["missing"] == 0 and res["missing_ids"] == []
+
+
+def test_convert_leads_no_sentinel_marks_whole_batch_missing():
+    class _SilentClient:
+        def apex_run(self, apex: str) -> str:
+            return "compiled, but produced no sentinel"
+
+    res = convert_leads(_SilentClient(), [ConversionTarget("00Q1"), ConversionTarget("00Q2")],
+                        SETTINGS, dry_run=False)
+    assert res["converted"] == 0
+    assert res["missing"] == 2
+    assert set(res["missing_ids"]) == {"00Q1", "00Q2"}

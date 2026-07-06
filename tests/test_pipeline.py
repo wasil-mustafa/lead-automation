@@ -6,6 +6,7 @@ the dry-run rails (no writes / no conversions), the watermark advance, and the Q
 """
 import csv
 
+import pytest
 from openpyxl import load_workbook
 
 from leadauto.config import Settings
@@ -141,28 +142,55 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path):
 
 
 # --- Stage 2: approved -> targets --------------------------------------------
+# targets_from_approved enforces the 15/18-char alphanumeric Salesforce Id shape (the
+# approved CSV is hand-edited and its Ids are embedded in conversion Apex), so test rows
+# must use realistic Ids rather than the "00Q1" shorthand used for pure Apex-string asserts.
+LEAD1 = "00Q000000000001"
+LEAD2 = "00Q000000000002"
+LEAD3 = "00Q000000000003"
+ACCT1 = "001000000000001"
+ACCT2 = "001000000000002"
+CONT1 = "003000000000001"
+CONT2 = "003000000000002"
+
 
 def test_contact_linked_only_on_identifier_reasons():
     rows = [
-        {"Approve?": "yes", "lead_id": "00Q1", "account_match_id": "001A",
-         "contact_match_id": "003C", "contact_reason": "kununu_user_uuid"},
-        {"Approve?": "yes", "lead_id": "00Q2", "account_match_id": "001A",
-         "contact_match_id": "003D", "contact_reason": "contact_email_global"},
+        {"Approve?": "yes", "lead_id": LEAD1, "account_match_id": ACCT1,
+         "contact_match_id": CONT1, "contact_reason": "kununu_user_uuid"},
+        {"Approve?": "yes", "lead_id": LEAD2, "account_match_id": ACCT1,
+         "contact_match_id": CONT2, "contact_reason": "contact_email_global"},
     ]
     targets = targets_from_approved(rows, SETTINGS)
-    assert targets[0].contact_id == "003C"
+    assert targets[0].contact_id == CONT1
     assert targets[1].contact_id is None  # weak reason -> create fresh contact
 
 
 def test_targets_from_approved_skips_unapproved():
     rows = [
-        {"Approve?": "", "lead_id": "00Q1", "account_match_id": "001A"},
-        {"Approve?": "no", "lead_id": "00Q2", "account_match_id": "001B"},
-        {"Approve?": "yes", "lead_id": "00Q3", "account_match_id": "", "contact_match_id": "",
+        {"Approve?": "", "lead_id": LEAD1, "account_match_id": ACCT1},
+        {"Approve?": "no", "lead_id": LEAD2, "account_match_id": ACCT2},
+        {"Approve?": "yes", "lead_id": LEAD3, "account_match_id": "", "contact_match_id": "",
          "decision": "create_new"},
     ]
     targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget("00Q3", account_id=None, contact_id=None)]
+    assert targets == [ConversionTarget(LEAD3, account_id=None, contact_id=None)]
+
+
+def test_targets_from_approved_rejects_malformed_id():
+    # A malformed Id would be embedded in conversion Apex; fail the whole run loudly instead.
+    rows = [{"Approve?": "yes", "lead_id": "00Q1", "account_match_id": ""}]
+    with pytest.raises(ValueError, match="Malformed Salesforce Id"):
+        targets_from_approved(rows, SETTINGS)
+
+
+def test_contact_link_dropped_without_account_link():
+    # setContactId requires setAccountId; a contact link with no account link would always
+    # fail at convert time, so it is dropped and the lead converts create-new.
+    rows = [{"Approve?": "yes", "lead_id": LEAD1, "account_match_id": "",
+             "contact_match_id": CONT1, "contact_reason": "kununu_user_uuid"}]
+    targets = targets_from_approved(rows, SETTINGS)
+    assert targets == [ConversionTarget(LEAD1, account_id=None, contact_id=None)]
 
 
 # --- Stage 2 orchestration ---------------------------------------------------
@@ -201,7 +229,7 @@ def test_read_approved_reads_rows(tmp_path):
 
 def test_run_stage2_dry_run_makes_no_conversions(tmp_path):
     p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": "00Q1", "account_match_id": "001A",
+    _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
                          "contact_score": "1.0", "Approve?": "yes"}])
     client = FakeApexClient()
     res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
@@ -213,13 +241,14 @@ def test_run_stage2_dry_run_makes_no_conversions(tmp_path):
 def test_run_stage2_live_converts_approved(tmp_path):
     p = tmp_path / "approved.csv"
     _write_approved(p, [
-        {"lead_id": "00Q1", "account_match_id": "001A", "contact_score": "1.0", "Approve?": "yes"},
-        {"lead_id": "00Q2", "Approve?": "no"},
+        {"lead_id": LEAD1, "account_match_id": ACCT1, "contact_score": "1.0", "Approve?": "yes"},
+        {"lead_id": LEAD2, "Approve?": "no"},
     ])
     client = FakeApexClient()
     res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
     assert len(client.apex_calls) == 1
     assert res.result["converted"] == 1   # only the approved lead
+    assert res.result["missing"] == 0     # the converted lead was reconciled in the results
 
 
 # --- Stage 2: preflight gate --------------------------------------------------
@@ -235,7 +264,7 @@ _GOOD_ROW = {
 
 
 class _PreflightSfFake:
-    """query() answers the preflight SOQL; apex_run records conversions."""
+    """query() answers the preflight SOQL; apex_run echoes success for every lead it sees."""
     def __init__(self, rows):
         self.rows = rows
         self.apex_calls = []
@@ -244,8 +273,15 @@ class _PreflightSfFake:
         return self.rows
 
     def apex_run(self, apex):
+        import json
+        import re
+
+        from leadauto.convert import SENTINEL
         self.apex_calls.append(apex)
-        return '@@LEADAUTO@@[{"leadId": "00Q_OK", "success": true}]@@LEADAUTO@@'
+        head = apex.split("Map<Id,Id>", 1)[0]
+        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
+        out = [{"leadId": i, "success": True} for i in ids]
+        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
 
 
 class _PreflightSettings:
@@ -266,32 +302,32 @@ def _approved_csv(tmp_path, rows, name="approved_x.csv"):
 
 def test_stage2_preflight_excludes_failing_leads(tmp_path):
     approved = _approved_csv(tmp_path, [
-        {"lead_id": "00Q_OK", "Approve?": "yes"},
-        {"lead_id": "00Q_BAD", "Approve?": "yes"},
+        {"lead_id": LEAD1, "Approve?": "yes"},
+        {"lead_id": LEAD2, "Approve?": "yes"},
     ])
-    client = _PreflightSfFake([dict(_GOOD_ROW, Id="00Q_OK"),
-                               dict(_GOOD_ROW, Id="00Q_BAD", KN_Language__c="")])
+    client = _PreflightSfFake([dict(_GOOD_ROW, Id=LEAD1),
+                               dict(_GOOD_ROW, Id=LEAD2, KN_Language__c="")])
     res = run_stage2(client, _PreflightSettings(), approved,
                      failures_csv=tmp_path / "preflight_failures.csv")
-    assert [t.lead_id for t in res.targets] == ["00Q_OK"]
-    assert res.preflight_failures[0]["lead_id"] == "00Q_BAD"
-    assert "00Q_BAD" not in "".join(client.apex_calls)
+    assert [t.lead_id for t in res.targets] == [LEAD1]
+    assert res.preflight_failures[0]["lead_id"] == LEAD2
+    assert LEAD2 not in "".join(client.apex_calls)
     assert (tmp_path / "preflight_failures.csv").exists()
 
 
 def test_stage2_no_preflight_bypasses(tmp_path):
-    approved = _approved_csv(tmp_path, [{"lead_id": "00Q_BAD", "Approve?": "yes"}], "approved_y.csv")
+    approved = _approved_csv(tmp_path, [{"lead_id": LEAD2, "Approve?": "yes"}], "approved_y.csv")
     client = _PreflightSfFake([])
     res = run_stage2(client, _PreflightSettings(), approved, preflight=False,
                      failures_csv=tmp_path / "pf.csv")
-    assert [t.lead_id for t in res.targets] == ["00Q_BAD"]
+    assert [t.lead_id for t in res.targets] == [LEAD2]
     assert res.preflight_failures == []
     assert not (tmp_path / "pf.csv").exists()
 
 
 def test_stage2_dry_run_still_preflights(tmp_path):
-    approved = _approved_csv(tmp_path, [{"lead_id": "00Q_BAD", "Approve?": "yes"}], "approved_z.csv")
-    client = _PreflightSfFake([dict(_GOOD_ROW, Id="00Q_BAD", KN_Employee__c="")])
+    approved = _approved_csv(tmp_path, [{"lead_id": LEAD2, "Approve?": "yes"}], "approved_z.csv")
+    client = _PreflightSfFake([dict(_GOOD_ROW, Id=LEAD2, KN_Employee__c="")])
     res = run_stage2(client, _PreflightSettings(), approved, dry_run=True,
                      failures_csv=tmp_path / "pf.csv")
     assert res.preflight_failures and not client.apex_calls

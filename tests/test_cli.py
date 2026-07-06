@@ -73,3 +73,70 @@ def test_stage2_cli_reports_preflight_skips(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert captured["preflight"] is False
     assert "preflight_skipped=1" in result.output
+
+
+def test_stage2_cli_exits_nonzero_on_failed_or_missing(monkeypatch, tmp_path):
+    # A failed or unaccounted-for conversion must fail the job, not just log a count.
+    from leadauto import cli
+    from leadauto.pipeline.stage2_convert import Stage2Result
+
+    def fake_run_stage2(sf, settings, approved, **kwargs):
+        return Stage2Result(
+            targets=[object()],
+            result={"converted": 0, "failed": 1, "missing": 1, "missing_ids": ["00Q000000000009"]},
+            dry_run=False, preflight_failures=[])
+
+    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
+    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
+    approved = tmp_path / "approved_2.csv"
+    approved.write_text("lead_id,Approve?\n00Q000000000009,yes\n", encoding="utf-8")
+
+    from typer.testing import CliRunner
+    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved),
+                                          "--no-preflight", "--no-dry-run"])
+    assert result.exit_code == 1
+    assert "failed=1 missing=1" in result.output
+
+
+def test_stage2_cli_zero_exit_on_already_converted_only(monkeypatch, tmp_path):
+    # A re-run where every lead was already converted is an idempotent no-op: it must exit
+    # 0 (green), not fail the job the way `failed`/`missing` do.
+    from leadauto import cli
+    from leadauto.pipeline.stage2_convert import Stage2Result
+
+    def fake_run_stage2(sf, settings, approved, **kwargs):
+        return Stage2Result(
+            targets=[object(), object()],
+            result={"converted": 0, "already_converted": 2, "failed": 0, "missing": 0,
+                    "missing_ids": []},
+            dry_run=False, preflight_failures=[])
+
+    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
+    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
+    approved = tmp_path / "approved_4.csv"
+    approved.write_text("lead_id,Approve?\n00Q000000000009,yes\n", encoding="utf-8")
+
+    from typer.testing import CliRunner
+    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved),
+                                          "--no-preflight", "--no-dry-run"])
+    assert result.exit_code == 0
+    assert "already=2" in result.output
+
+
+def test_stage2_cli_exits_nonzero_on_malformed_csv(monkeypatch, tmp_path):
+    # A bad Id in the approved CSV raises ValueError inside run_stage2; the CLI turns it
+    # into a readable non-zero exit rather than a traceback.
+    from leadauto import cli
+
+    def fake_run_stage2(sf, settings, approved, **kwargs):
+        raise ValueError("Malformed Salesforce Id(s) in the approved CSV — fix the file")
+
+    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
+    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
+    approved = tmp_path / "approved_3.csv"
+    approved.write_text("lead_id,Approve?\nbad,yes\n", encoding="utf-8")
+
+    from typer.testing import CliRunner
+    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved)])
+    assert result.exit_code == 1
+    assert "Malformed Salesforce Id" in result.output

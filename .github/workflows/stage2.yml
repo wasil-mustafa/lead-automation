@@ -17,9 +17,9 @@ on:
         type: boolean
         default: true
       batch_size:
-        description: "Leads converted per Apex run"
+        description: "Leads converted per Apex run (small: each conversion cascades triggers/flows/rules in one tx)"
         type: number
-        default: 50
+        default: 10
       approved:
         description: "Approved CSV path (blank = newest review/approved_*.csv)"
         type: string
@@ -82,6 +82,9 @@ jobs:
       - name: Run Stage 2
         env:
           PYTHONPATH: src
+        # Explicit bash => GitHub adds -o pipefail; without it the `| tee` pipe would
+        # swallow a failing stage2 exit code and report the job green.
+        shell: bash
         run: |
           FLAGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi
