@@ -9,6 +9,7 @@ match-validity gate: blank -> fill, equal -> no-op, present-and-different -> con
 """
 from __future__ import annotations
 
+from ..logging import get_logger
 from ..textnorm import normalize_url
 
 # (lead_field, account_field) — overwrite the Account field when the lead value differs.
@@ -58,3 +59,52 @@ def account_update(account: dict, lead: dict, *, kununu_url, kununu_profile_uuid
         if _norm(val) and _norm(val) != _norm(account.get(acct_field)):
             payload[acct_field] = val
     return None, payload
+
+
+def resolve_pool_links(client, link_targets, settings, *, dry_run=False, logger=None):
+    """Enrich pool-owned linked Accounts; route kununu-conflict leads to review.
+
+    Returns (surviving_targets, review_failures). Non-pool / missing-account links pass
+    through unchanged. Writes to Salesforce only when not dry_run.
+    """
+    log = logger or get_logger("convert.pool_enrich")
+    pool_owner = settings.rohdaten_pool_owner_id
+    linked = [t for t in link_targets if t.account_id]
+    if not linked or not pool_owner:
+        return list(link_targets), []
+
+    from ..sf import soql
+    accounts = {a["Id"]: a for a in client.query(
+        soql.accounts_pool_fields(sorted({t.account_id for t in linked})))}
+    leads = {r["Id"]: r for r in client.query(
+        soql.leads_pool_enrich(sorted({t.lead_id for t in linked})))}
+
+    surviving, review, updates = [], [], []
+    for t in link_targets:
+        acct = accounts.get(t.account_id) if t.account_id else None
+        if acct is None or _norm(acct.get("OwnerId")) != pool_owner:
+            surviving.append(t)                       # not pool-owned -> leave alone
+            continue
+        reason, payload = account_update(
+            acct, leads.get(t.lead_id, {}),
+            kununu_url=t.kununu_url, kununu_profile_uuid=t.kununu_profile_uuid)
+        if reason:
+            review.append({"lead_id": t.lead_id, "check": reason, "value": t.account_id or "",
+                           "detail": "kununu identity differs from the linked pool account; "
+                                     "needs review"})
+            continue                                  # do NOT convert this lead
+        surviving.append(t)
+        if len(payload) > 1:                          # more than just Id
+            updates.append(payload)
+
+    if updates and not dry_run:
+        try:
+            res = client.update_bulk("Account", updates)
+            log.info("Pool-account enrichment: %d updated, %d failed",
+                     res["processed"], res["failed"])
+        except Exception as exc:                      # best-effort; must not block convert
+            log.error("Pool-account enrichment failed (continuing to convert): %s", exc)
+    elif updates:
+        log.info("[dry-run] would update %d pool account(s)", len(updates))
+    log.info("Pool links: %d converting, %d routed to review", len(surviving), len(review))
+    return surviving, review
