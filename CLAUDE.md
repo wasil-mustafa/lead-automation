@@ -34,7 +34,7 @@ Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artif
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 290 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 293 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -51,7 +51,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 290 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 293 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
@@ -107,7 +107,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Payloads go to temp files for apex/bulk. **Large SOQL auto-routes to Bulk API 2.0:** a plain
   `sf data query` puts SOQL in the GET URL, so long `IN(...)` lists overflow the header limit →
   HTTP 431; `SfClient.query` routes SOQL over 2000 chars through `sf data export bulk --query-file`.
-  (`sf data query` has no `--bulk`/`--wait` flags.)
+  (`sf data query` has no `--bulk`/`--wait` flags.) **Bulk-export records are stringly typed** even
+  with `--result-format json`: booleans arrive as `'true'`/`'false'` strings (`'false'` is truthy!)
+  and nulls as `''` — coerce with an `_is_true`-style helper (see `extract/parsers.py`,
+  `convert/preflight.py`, `shadow_compare.py`); live-proven 2026-07-06 when 299 pending
+  predictions all "resolved" as misses.
 - **CI Salesforce login is flaky** (`sf org login sfdx-url` hangs intermittently — CLI issue, not a
   bad credential, which prints `invalid_grant`). Both workflows retry login 3× and pin
   `@salesforce/cli@2.140.6`; job-level `SF_AUTOUPDATE_DISABLE`/`SF_DISABLE_TELEMETRY`.
@@ -144,7 +148,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `state/predictions.jsonl`; `python -m leadauto shadow-compare` (in the scheduled workflow,
   read-only) scores them against real human conversions into `state/shadow_results.jsonl` +
   a `shadow_comparison.xlsx` artifact. `Lead.ConvertedDate` is Date-only → "human created a new
-  account" = `Account.CreatedDate` same UTC day.
+  account" = `Account.CreatedDate` same UTC day. Field checks mirror the write-back payload
+  (`PostalCode`/`City`/`CountryCode` vs the converted account's Billing address,
+  `FirstName`/`Phone` vs the converted Contact, `KN_Employee__c` vs the lead); legacy
+  `KN_DB*` payload keys still score in-flight pre-KN_DB-removal predictions.
 - **`scripts/` == legacy `Scripts/` on case-insensitive Windows** (same physical dir).
   `.gitignore` ignores `scripts/*` and tracks ONLY `leadfeeder_probe.py` +
   `control_check_alt_names.py`. The untracked `Convert Leads/` folder is the legacy manual

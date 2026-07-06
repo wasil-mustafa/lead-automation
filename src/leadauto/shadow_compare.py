@@ -18,6 +18,7 @@ from .qa_artifact import _add_sheet
 from .sf import soql
 from .state import REPO_ROOT, _parse_sf_dt
 from .textnorm import normalize_city, normalize_host, normalize_postal
+from .writeback import normalize_phone
 
 DEFAULT_RESULTS_PATH = REPO_ROOT / "state" / "shadow_results.jsonl"
 DEFAULT_XLSX_PATH = REPO_ROOT / "shadow_comparison.xlsx"
@@ -31,6 +32,12 @@ DECISIONS_COLUMNS = [
 FIELDS_COLUMNS = ["lead_id", "field", "status", "lf_value", "human_value"]
 
 
+def _is_true(v) -> bool:
+    """Coerce SF booleans: 300 pending IDs push the lead query over the Bulk-API
+    threshold, and bulk export returns 'true'/'false' STRINGS ('false' is truthy!)."""
+    return v is True or str(v).strip().lower() == "true"
+
+
 def _norm_country(v):
     if not v:
         return None
@@ -41,21 +48,24 @@ def _norm_text(v):
     return (str(v).strip() or None) if v is not None else None
 
 
-def _norm_revenue(v):
-    try:
-        return round(float(v), 2)
-    except (TypeError, ValueError):
+def _norm_name(v):
+    if v is None:
         return None
+    return str(v).strip().casefold() or None
 
 
-# (label, payload key, source record, org field, normalizer)
+# (label, payload keys — first present wins, source record, org field, normalizer).
+# Payload keys mirror what write-back actually writes; the legacy KN_DB* second
+# keys keep scoring in-flight predictions recorded before write-back stopped
+# writing the D&B-owned fields.
 _FIELD_CHECKS = [
-    ("postal_code", "KN_DBPostalCode__c", "account", "BillingPostalCode", normalize_postal),
-    ("city", "KN_DBCity__c", "account", "BillingCity", normalize_city),
-    ("country", "KN_DBISO2CountryCode__c", "lead", "KN_DBISO2CountryCode__c", _norm_country),
-    ("employee_bin", "KN_Employee__c", "lead", "KN_Employee__c", _norm_text),
-    ("revenue_millions", "KN_DBRevenueinMillions__c", "lead", "KN_DBRevenueinMillions__c",
-     _norm_revenue),
+    ("postal_code", ("PostalCode", "KN_DBPostalCode__c"),
+     "account", "BillingPostalCode", normalize_postal),
+    ("city", ("City", "KN_DBCity__c"), "account", "BillingCity", normalize_city),
+    ("country", ("CountryCode",), "account", "BillingCountryCode", _norm_country),
+    ("employee_bin", ("KN_Employee__c",), "lead", "KN_Employee__c", _norm_text),
+    ("first_name", ("FirstName",), "contact", "FirstName", _norm_name),
+    ("phone", ("Phone",), "contact", "Phone", normalize_phone),
 ]
 
 
@@ -70,12 +80,14 @@ def _verdict(ours_raw, theirs_raw, norm) -> dict:
     return {"status": status, "lf": ours_raw, "human": theirs_raw}
 
 
-def compare_fields(pred, lead: dict, account: dict | None) -> dict:
+def compare_fields(pred, lead: dict, account: dict | None,
+                   contact: dict | None = None) -> dict:
+    recs = {"lead": lead or {}, "account": account or {}, "contact": contact or {}}
     out = {}
-    for label, pkey, source, okey, norm in _FIELD_CHECKS:
-        rec = (account or {}) if source == "account" else (lead or {})
-        out[label] = _verdict(pred.payload.get(pkey), rec.get(okey), norm)
-    out["website"] = _verdict(pred.lf_website, (account or {}).get("Website"), normalize_host)
+    for label, pkeys, source, okey, norm in _FIELD_CHECKS:
+        ours = next((pred.payload[k] for k in pkeys if pred.payload.get(k) is not None), None)
+        out[label] = _verdict(ours, recs[source].get(okey), norm)
+    out["website"] = _verdict(pred.lf_website, recs["account"].get("Website"), normalize_host)
     return out
 
 
@@ -132,11 +144,14 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
     acct_ids = sorted({l["ConvertedAccountId"] for l in leads if l.get("ConvertedAccountId")})
     accounts = sf_client.query(soql.accounts_by_ids(acct_ids)) if acct_ids else []
     acct_by_id = {a["Id"]: a for a in accounts}
+    contact_ids = sorted({l["ConvertedContactId"] for l in leads if l.get("ConvertedContactId")})
+    contacts = sf_client.query(soql.contacts_by_ids(contact_ids)) if contact_ids else []
+    contact_by_id = {c["Id"]: c for c in contacts}
 
     new_results: list[dict] = []
     for pred in pending:
         lead = lead_by_id.get(pred.lead_id)
-        if not lead or not lead.get("IsConverted"):
+        if not lead or not _is_true(lead.get("IsConverted")):
             if now - _parse_sf_dt(pred.predicted_at) > timedelta(days=_EXPIRE_DAYS):
                 pred.status = "expired"
                 stats["expired"] += 1
@@ -144,8 +159,9 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
                 stats["pending"] += 1
             continue
         account = acct_by_id.get(lead.get("ConvertedAccountId"))
+        contact = contact_by_id.get(lead.get("ConvertedContactId"))
         result, detail = classify_decision(pred, lead, account)
-        fields = compare_fields(pred, lead, account)
+        fields = compare_fields(pred, lead, account, contact)
         record = {
             "lead_id": pred.lead_id, "resolved_at": now.isoformat(),
             "rule": pred.rule, "decision": pred.decision,
