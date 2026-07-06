@@ -127,6 +127,31 @@ def test_read_skips_already_enriched_lead():
     assert "enrich" in result.skipped[0].reason.lower()
 
 
+def test_read_skips_internal_lead_email():
+    settings = Settings.load()  # config.yaml excludes kununu/xing/onlyfy
+    client = FakeClient(tasks=[_task("T1", "00Q1")],
+                        leads=[_lead("00Q1", email="tester@kununu.com")])
+    result = read_extracted_leads(client, settings, since=SINCE)
+    assert result.leads == []
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason == "internal company email domain"
+    # still accounted for -> watermark advances, task is never re-fetched
+    assert [t["Id"] for t in result.processed_tasks] == ["T1"]
+
+
+def test_read_skips_internal_contact_email_from_description():
+    settings = Settings.load()
+    # Lead.Email is external, but the parsed Description contact email is internal.
+    internal_desc = CLAIMER_DESC.replace("geschaeftsleitung@hufeland.de",
+                                         "colleague@xing.com")
+    client = FakeClient(tasks=[_task("T1", "00Q1", desc=internal_desc)],
+                        leads=[_lead("00Q1", email="external@acme.de")])
+    result = read_extracted_leads(client, settings, since=SINCE)
+    assert result.leads == []
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason == "internal company email domain"
+
+
 def test_read_skips_lead_not_found_or_converted():
     settings = Settings.load()
     # Lead query returns nothing for the WhoId (converted, or WhoId was a Contact).

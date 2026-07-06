@@ -47,6 +47,32 @@ def email_domain(value: str | None) -> str | None:
     return domain or None
 
 
+def domain_sld(value: str | None) -> str | None:
+    """Second-level label of an email address or host — 'kununu' from
+    'a@mail.kununu.com', 'kununu.at', or a bare 'kununu'. Lowercase; None if empty.
+
+    Assumes single-label public suffixes (.com/.at/.io/.de); a multi-label TLD like
+    '.co.uk' would yield the wrong label ('co'), but the own-company domains this
+    guards don't use them.
+    """
+    host = email_domain(value) if value and "@" in value else normalize_host(value)
+    if not host:
+        return None
+    labels = [l for l in host.split(".") if l]
+    if not labels:
+        return None
+    return labels[-2] if len(labels) >= 2 else labels[0]
+
+
+def is_internal_email(value: str | None, domains) -> bool:
+    """True if the email's second-level domain label is in `domains` (bare lowercase
+    roots, e.g. {'kununu', 'xing', 'onlyfy'}). Matches any TLD; blank/garbage -> False."""
+    if not domains:
+        return False
+    sld = domain_sld(value)
+    return sld is not None and sld in domains
+
+
 def normalize_url(value: str | None) -> str | None:
     """Lowercase URL without scheme/www and trailing slash (used for kununu & LinkedIn)."""
     if not value:

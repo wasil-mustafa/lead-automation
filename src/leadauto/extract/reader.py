@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from ..logging import get_logger
 from ..sf import soql
+from ..textnorm import is_internal_email
 from .models import ExtractedLead
 from .parsers import extract_lead
 
@@ -113,6 +114,12 @@ def read_extracted_leads(
         extracted = extract_lead(task, lead, settings)
         if extracted is None:
             result.skipped.append(Skipped(tid, who, subject, "subject out of scope"))
+            continue
+        internal = settings.excluded_email_domains
+        if is_internal_email(extracted.lead_email, internal) or \
+                is_internal_email(extracted.contact_email, internal):
+            result.skipped.append(Skipped(tid, who, subject,
+                                          "internal company email domain"))
             continue
         result.leads.append(extracted)
 

@@ -132,6 +132,15 @@ class Settings:
         return [subj for subj, key in self.task_types.items() if key in enabled]
 
     @property
+    def excluded_email_domains(self) -> set[str]:
+        """Own-company email domain roots (second-level labels). A lead whose Lead.Email
+        or parsed contact email matches one is internal and excluded from Stage 1
+        extraction and shadow scoring. Empty set when the key is unset."""
+        from .textnorm import domain_sld
+        raw = self.raw.get("excluded_email_domains", []) or []
+        return {r for r in (domain_sld(str(e)) for e in raw) if r}
+
+    @property
     def fresh_task_statuses(self) -> list[str]:
         """Task statuses that count as fresh/unhandled and get processed. Explicit
         allowlist (the org picklist flags 'Abgeschlossen'=Completed as not-closed, so

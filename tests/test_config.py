@@ -69,3 +69,20 @@ def test_fresh_task_statuses_from_config_yaml():
 def test_fresh_task_statuses_defaults_empty_when_missing():
     s = Settings(raw={}, leadfeeder_api_key=None, sf_auth_url=None)
     assert s.fresh_task_statuses == []
+
+
+def test_excluded_email_domains_from_config_yaml():
+    s = Settings.load()  # config.yaml lists the own-company domains
+    assert s.excluded_email_domains == {"kununu", "xing", "onlyfy"}
+
+
+def test_excluded_email_domains_normalizes_to_second_level_labels():
+    # Bare roots, full domains, and @-prefixed forms all reduce to the SLD.
+    s = Settings(raw={"excluded_email_domains": ["@Kununu.com", "XING", "onlyfy.io"]},
+                 leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.excluded_email_domains == {"kununu", "xing", "onlyfy"}
+
+
+def test_excluded_email_domains_defaults_empty_when_missing():
+    s = Settings(raw={}, leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.excluded_email_domains == set()
