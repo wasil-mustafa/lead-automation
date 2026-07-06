@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..convert import ConversionTarget, convert_leads
+from ..convert.pool_enrich import resolve_pool_links
 from ..convert.preflight import run_preflight, write_failures_csv
 from ..logging import get_logger
 
@@ -117,6 +118,17 @@ def run_stage2(
         if pf_failures:
             log.warning("Preflight skipped %d lead(s); details -> %s",
                         len({f['lead_id'] for f in pf_failures}), path)
+    # Pool-account enrichment + kununu conflict gate (link targets only). Writes only on
+    # live runs; kununu conflicts are dropped from conversion and reported like preflight.
+    link_targets = [t for t in targets if t.account_id]
+    other_targets = [t for t in targets if not t.account_id]
+    kept_links, review_failures = resolve_pool_links(
+        sf_client, link_targets, settings, dry_run=dry_run, logger=log)
+    targets = kept_links + other_targets
+    if review_failures:
+        pf_failures.extend(review_failures)
+        write_failures_csv(pf_failures, failures_csv)
+        log.warning("Routed %d lead(s) to review (kununu conflict)", len(review_failures))
     log.info("Stage 2: %d approved row(s) -> %d conversion target(s) (dry_run=%s)",
              len(rows), len(targets), dry_run)
     result = convert_leads(sf_client, targets, settings,
