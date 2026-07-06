@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..logging import get_logger
 
@@ -186,6 +186,44 @@ def parse_results(output: str, sentinel: str = SENTINEL) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _cluster_by_company(targets: list[ConversionTarget]) -> list[list[ConversionTarget]]:
+    """Group create-new targets by lf_company_id (first-seen order); blank key => singleton.
+    First member of each cluster is the primary (create-new), the rest are secondaries."""
+    groups: dict[str, list[ConversionTarget]] = {}
+    order: list[str] = []
+    singletons: list[list[ConversionTarget]] = []
+    for t in targets:
+        key = (t.lf_company_id or "").strip()
+        if not key:
+            singletons.append([t])
+            continue
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(t)
+    return [groups[k] for k in order] + singletons
+
+
+def _run_convert(client, targets, settings, batch_size, log, phase_label=""):
+    """Convert one target list in batches; return (results, missing_ids)."""
+    results: list[dict] = []
+    missing_ids: list[str] = []
+    for i in range(0, len(targets), batch_size):
+        batch = targets[i:i + batch_size]
+        apex = build_convert_apex(
+            batch, owner_id=settings.owner_id, converted_status=settings.converted_status)
+        parsed = parse_results(client.apex_run(apex))
+        returned = {_short_id(str(r.get("leadId") or "")) for r in parsed}
+        absent = [t.lead_id for t in batch if _short_id(t.lead_id) not in returned]
+        if absent:
+            log.error("%sBatch %d: %d of %d lead(s) have no conversion result: %s",
+                      phase_label, i // batch_size + 1, len(absent), len(batch),
+                      ", ".join(absent))
+            missing_ids.extend(absent)
+        results.extend(parsed)
+    return results, missing_ids
+
+
 def convert_leads(
     client, targets: list[ConversionTarget], settings, *,
     dry_run: bool = False, batch_size: int = 10, logger=None,
@@ -208,26 +246,39 @@ def convert_leads(
         return {"converted": 0, "already_converted": 0, "failed": 0, "planned": 0,
                 "missing": 0, "missing_ids": [], "results": []}
 
-    all_results: list[dict] = []
-    missing_ids: list[str] = []
-    for i in range(0, planned, batch_size):
-        batch = targets[i:i + batch_size]
-        apex = build_convert_apex(
-            batch, owner_id=settings.owner_id, converted_status=settings.converted_status,
-        )
-        output = client.apex_run(apex)
-        parsed = parse_results(output)
-        returned = {_short_id(str(r.get("leadId") or "")) for r in parsed}
-        absent = [t.lead_id for t in batch if _short_id(t.lead_id) not in returned]
-        if absent:
-            log.error("Batch %d: %d of %d lead(s) have no conversion result "
-                      "(already converted, or the run died before the sentinel): %s",
-                      i // batch_size + 1, len(absent), len(batch), ", ".join(absent))
-            missing_ids.extend(absent)
-        all_results.extend(parsed)
+    existing_link = [t for t in targets if t.account_id]
+    create_new = [t for t in targets if not t.account_id]
+    clusters = _cluster_by_company(create_new)
+    primaries = [c[0] for c in clusters]
 
+    results1, missing1 = _run_convert(
+        client, existing_link + primaries, settings, batch_size, log, "phase1 ")
+    acct_by_primary = {_short_id(str(r.get("leadId") or "")): r["accountId"]
+                       for r in results1 if r.get("success") and r.get("accountId")}
+
+    phase2_targets: list[ConversionTarget] = []
+    orphan_results: list[dict] = []
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        primary, secondaries = cluster[0], cluster[1:]
+        new_acct = acct_by_primary.get(_short_id(primary.lead_id))
+        if new_acct:
+            phase2_targets.extend(replace(s, account_id=new_acct) for s in secondaries)
+        else:
+            orphan_results.extend(
+                {"leadId": s.lead_id, "success": False,
+                 "errors": [f"primary {primary.lead_id} created no account; deferred"]}
+                for s in secondaries)
+
+    results2, missing2 = ((_run_convert(client, phase2_targets, settings, batch_size, log,
+                                        "phase2 ")) if phase2_targets else ([], []))
+
+    all_results = results1 + results2 + orphan_results
+    missing_ids = missing1 + missing2
     already = sum(1 for r in all_results if r.get("alreadyConverted"))
-    converted = sum(1 for r in all_results if r.get("success") and not r.get("alreadyConverted"))
+    converted = sum(1 for r in all_results
+                    if r.get("success") and not r.get("alreadyConverted"))
     failed = sum(1 for r in all_results if not r.get("success"))
     log.info("Converted %d lead(s), %d already converted, %d failed, %d missing",
              converted, already, failed, len(missing_ids))
