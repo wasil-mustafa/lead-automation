@@ -84,7 +84,12 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
                         "account link alongside a contact link; converting create-new instead",
                         line, lead_id, contact_id)
             contact_id = None
-        targets.append(ConversionTarget(lead_id, account_id=account_id, contact_id=contact_id))
+        targets.append(ConversionTarget(
+            lead_id, account_id=account_id, contact_id=contact_id,
+            lf_company_id=(row.get("lf_company_id") or "").strip() or None,
+            kununu_profile_uuid=(row.get("kununu_profile_uuid") or "").strip() or None,
+            kununu_url=(row.get("kununu_url") or "").strip() or None,
+        ))
     if bad_ids:
         raise ValueError(
             "Malformed Salesforce Id(s) in the approved CSV — fix the file and re-run: "

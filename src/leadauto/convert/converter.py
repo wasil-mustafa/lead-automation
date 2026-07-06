@@ -53,10 +53,16 @@ def _short_id(sf_id: str) -> str:
 
 @dataclass
 class ConversionTarget:
-    """One Lead to convert; account_id/contact_id link to existing records when present."""
+    """One Lead to convert; account_id/contact_id link to existing records when present.
+
+    lf_company_id clusters same-company create-new leads; kununu_url/kununu_profile_uuid
+    feed the Stage 2 pool-account conflict gate (see convert/pool_enrich.py)."""
     lead_id: str
     account_id: str | None = None
     contact_id: str | None = None
+    lf_company_id: str | None = None
+    kununu_profile_uuid: str | None = None
+    kununu_url: str | None = None
 
 
 def _id_set(targets: list[ConversionTarget]) -> str:

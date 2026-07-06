@@ -193,6 +193,17 @@ def test_contact_link_dropped_without_account_link():
     assert targets == [ConversionTarget(LEAD1, account_id=None, contact_id=None)]
 
 
+def test_targets_from_approved_carries_pool_and_cluster_keys():
+    rows = [{"Approve?": "yes", "lead_id": LEAD1, "account_match_id": ACCT1,
+             "contact_reason": "kununu_user_uuid", "contact_match_id": "",
+             "lf_company_id": "LF-1", "kununu_profile_uuid": "puid-1",
+             "kununu_url": "https://www.kununu.com/de/acme"}]
+    t = targets_from_approved(rows, SETTINGS)[0]
+    assert t.lf_company_id == "LF-1"
+    assert t.kununu_profile_uuid == "puid-1"
+    assert t.kununu_url == "https://www.kununu.com/de/acme"
+
+
 # --- Stage 2 orchestration ---------------------------------------------------
 
 class FakeApexClient:
