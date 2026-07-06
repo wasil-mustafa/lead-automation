@@ -5,8 +5,9 @@ This stage reads those rows, turns each into a `ConversionTarget` — linking th
 Account when present and the matched Contact only when its match reason is an identifier
 signal — and runs the match-aware, idempotent bulk conversion. `dry_run` performs no
 conversion. A read-only preflight (convert/preflight.py) re-checks each approved lead's
-current field state against the org's conversion rules and skips+reports failures before
-any Apex runs.
+current field state against the org's conversion rules and skips+reports failures. Pool-owned
+linked Accounts are enriched and kununu profile-identity conflicts are routed to review before
+any Apex runs (convert/pool_enrich.py).
 """
 from __future__ import annotations
 
