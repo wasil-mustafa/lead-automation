@@ -1,5 +1,12 @@
 """textnorm helpers (shared by the matcher and the LeadFeeder acceptance gate)."""
-from leadauto.textnorm import alnum, domain_root, email_domain, normalize_name
+from leadauto.textnorm import (
+    alnum,
+    domain_root,
+    domain_sld,
+    email_domain,
+    is_internal_email,
+    normalize_name,
+)
 
 
 def test_normalize_name_strips_legal_suffixes_and_punctuation():
@@ -28,6 +35,34 @@ def test_domain_root_rejects_freemail_and_short_roots():
 def test_email_domain_basic():
     assert email_domain("A@Acme.DE") == "acme.de"
     assert email_domain("not-an-email") is None
+
+
+def test_domain_sld_extracts_second_level_label():
+    assert domain_sld("tester@kununu.com") == "kununu"
+    assert domain_sld("a@mail.kununu.com") == "kununu"   # subdomain
+    assert domain_sld("kununu.at") == "kununu"           # bare host, any TLD
+    assert domain_sld("@xing") == "xing"                 # bare root with leading @
+    assert domain_sld("onlyfy") == "onlyfy"              # bare root
+    assert domain_sld("") is None
+    assert domain_sld(None) is None
+
+
+def test_is_internal_email_matches_any_tld():
+    domains = {"kununu", "xing", "onlyfy"}
+    assert is_internal_email("tester@kununu.com", domains) is True
+    assert is_internal_email("tester@kununu.at", domains) is True
+    assert is_internal_email("a@mail.onlyfy.io", domains) is True
+    assert is_internal_email("Jobs@XING.COM", domains) is True   # case-insensitive
+
+
+def test_is_internal_email_negatives():
+    domains = {"kununu", "xing", "onlyfy"}
+    assert is_internal_email("boss@notkununu.com", domains) is False  # not the SLD
+    assert is_internal_email("boss@acme.de", domains) is False
+    assert is_internal_email("not-an-email", domains) is False
+    assert is_internal_email("", domains) is False
+    assert is_internal_email(None, domains) is False
+    assert is_internal_email("x@kununu.com", set()) is False          # nothing configured
 
 
 def test_normalize_postal_strips_whitespace():

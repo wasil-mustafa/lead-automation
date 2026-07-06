@@ -49,6 +49,15 @@ fresh_task_statuses:
   - "in Arbeit"
   - "Not Started"
 
+# Own-company email domains. A lead whose Lead.Email OR parsed contact email sits on one
+# of these is an internal colleague (profile-claim / trial test), not a sales lead — it is
+# excluded from Stage 1 extraction and from shadow scoring. Bare domain roots, matched on
+# the domain's second-level label, so any TLD counts (kununu.com/.at, xing.com, onlyfy.io).
+excluded_email_domains:
+  - kununu
+  - xing
+  - onlyfy
+
 matching:
   lf_min_match_score: 0.70   # LeadFeeder company-match floor
   # Name-agreement gate (calibrated on the 6-month control set, 2026-07-02): LF's score

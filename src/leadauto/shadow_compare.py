@@ -17,7 +17,7 @@ from .predictions import DEFAULT_PREDICTIONS_PATH, load_predictions, save_predic
 from .qa_artifact import _add_sheet
 from .sf import soql
 from .state import REPO_ROOT, _parse_sf_dt
-from .textnorm import normalize_city, normalize_host, normalize_postal
+from .textnorm import is_internal_email, normalize_city, normalize_host, normalize_postal
 from .writeback import normalize_phone
 
 DEFAULT_RESULTS_PATH = REPO_ROOT / "state" / "shadow_results.jsonl"
@@ -124,17 +124,19 @@ def classify_decision(pred, lead: dict, account: dict | None) -> tuple[str, str]
 
 
 def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
-                       xlsx_path=None, now=None, logger=None) -> dict:
+                       xlsx_path=None, now=None, excluded_domains=None,
+                       logger=None) -> dict:
     log = logger or get_logger("shadow")
     ppath = Path(predictions_path) if predictions_path else DEFAULT_PREDICTIONS_PATH
     rpath = Path(results_path) if results_path else DEFAULT_RESULTS_PATH
     xpath = Path(xlsx_path) if xlsx_path else DEFAULT_XLSX_PATH
     now = now or datetime.now(timezone.utc)
+    excluded_domains = excluded_domains or set()
 
     preds = load_predictions(ppath)
     pending = [p for p in preds if p.status == "pending"]
     stats = {"checked": len(pending), "resolved": 0, "hits": 0, "misses": 0,
-             "observed": 0, "expired": 0, "pending": 0, "xlsx": str(xpath)}
+             "observed": 0, "expired": 0, "excluded": 0, "pending": 0, "xlsx": str(xpath)}
     if not pending:
         log.info("Shadow compare: no pending predictions")
         return stats
@@ -151,6 +153,11 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
     new_results: list[dict] = []
     for pred in pending:
         lead = lead_by_id.get(pred.lead_id)
+        if lead and is_internal_email(lead.get("Email"), excluded_domains):
+            # Own-company lead (colleague test); never a real conversion to score.
+            pred.status = "excluded"
+            stats["excluded"] += 1
+            continue
         if not lead or not _is_true(lead.get("IsConverted")):
             if now - _parse_sf_dt(pred.predicted_at) > timedelta(days=_EXPIRE_DAYS):
                 pred.status = "expired"
@@ -188,9 +195,9 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
 
     _write_xlsx(new_results, rpath, stats, now, xpath)
     log.info("Shadow compare: %d resolved (%d hit / %d miss / %d observed), "
-             "%d pending, %d expired",
+             "%d pending, %d expired, %d excluded",
              stats["resolved"], stats["hits"], stats["misses"], stats["observed"],
-             stats["pending"], stats["expired"])
+             stats["pending"], stats["expired"], stats["excluded"])
     return stats
 
 
@@ -220,6 +227,7 @@ def _write_xlsx(new_results, rpath, stats, now, xpath) -> None:
     history = _load_all_results(rpath)
     summary = [["generated_at", now.isoformat()],
                ["resolved_this_run", stats["resolved"]],
+               ["excluded_this_run", stats["excluded"]],
                ["still_pending", stats["pending"]],
                ["total_scored_ever", len(history)]]
     by_rule: dict[str, dict] = {}
