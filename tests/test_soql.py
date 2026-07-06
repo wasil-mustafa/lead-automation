@@ -154,3 +154,26 @@ def test_leads_preflight_requires_ids():
     from leadauto.sf.soql import leads_preflight
     with pytest.raises(ValueError):
         leads_preflight([])
+
+
+def test_accounts_pool_fields_selects_owner_and_identity():
+    q = soql.accounts_pool_fields(["001000000000001"])
+    assert "OwnerId" in q
+    assert "KN_KununuProfileUuid__c" in q and "KN_KununuLinkProfile__c" in q
+    assert "KN_EmployeeCategory__c" in q          # Account employee field name
+    assert "BillingStreet" in q
+    assert "'001000000000001'" in q and "FROM Account" in q
+
+
+def test_leads_pool_enrich_selects_mapped_lead_fields():
+    q = soql.leads_pool_enrich(["00Q000000000001"])
+    assert "KN_KununuProfileName__c" in q and "KN_VATNumber__c" in q
+    assert "KN_Employee__c" in q and "CountryCode" in q
+    assert "FROM Lead" in q
+
+
+def test_pool_builders_reject_empty():
+    with pytest.raises(ValueError):
+        soql.accounts_pool_fields([])
+    with pytest.raises(ValueError):
+        soql.leads_pool_enrich([])
