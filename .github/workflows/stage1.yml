@@ -26,7 +26,7 @@ on:
     # late and some are dropped entirely, especially on low-activity repos.
     # If GitHub still under-delivers, the fix is an external
     # scheduler hitting workflow_dispatch, not more cron entries.
-    - cron: "0 8,17 * * *"
+    - cron: "22 8,17 * * *"
 
 # Never let two enrich runs overlap (they share the watermark file).
 concurrency:
