@@ -112,9 +112,10 @@ def test_leads_shadow_status():
     q = leads_shadow_status(["00Q1", "00Q2"])
     assert q.startswith("SELECT ")
     for f in ("IsConverted", "ConvertedDate", "ConvertedAccountId",
-              "ConvertedContactId", "KN_Employee__c", "KN_DBRevenueinMillions__c",
-              "KN_DBISO2CountryCode__c", "KN_DBPostalCode__c", "KN_DBCity__c"):
+              "ConvertedContactId", "KN_Employee__c"):
         assert f in q
+    # KN_DB* fields are D&B-owned, no longer written back, and no longer compared.
+    assert "KN_DB" not in q
     assert "WHERE Id IN ('00Q1', '00Q2')" in q
     with pytest.raises(ValueError):
         leads_shadow_status([])
@@ -123,8 +124,10 @@ def test_leads_shadow_status():
 def test_accounts_and_contacts_by_ids():
     aq = accounts_by_ids(["001A"])
     assert "CreatedDate" in aq and "BillingPostalCode" in aq and "FROM Account" in aq
+    assert "BillingCountryCode" in aq
     cq = contacts_by_ids(["003C"])
     assert "Email" in cq and "FROM Contact" in cq
+    assert "FirstName" in cq and "Phone" in cq
     with pytest.raises(ValueError):
         accounts_by_ids([])
     with pytest.raises(ValueError):

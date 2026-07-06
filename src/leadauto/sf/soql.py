@@ -178,11 +178,11 @@ def contacts_by_signals(
 
 _LEAD_SHADOW_FIELDS = (
     "Id, IsConverted, ConvertedDate, ConvertedAccountId, ConvertedContactId, "
-    "KN_Employee__c, KN_DBRevenueinMillions__c, KN_DBISO2CountryCode__c, "
-    "KN_DBPostalCode__c, KN_DBCity__c"
+    "KN_Employee__c"
 )
-_ACCOUNT_SHADOW_FIELDS = "Id, Name, CreatedDate, Website, BillingPostalCode, BillingCity"
-_CONTACT_SHADOW_FIELDS = "Id, AccountId, Email, Phone"
+_ACCOUNT_SHADOW_FIELDS = ("Id, Name, CreatedDate, Website, BillingPostalCode, "
+                          "BillingCity, BillingCountryCode")
+_CONTACT_SHADOW_FIELDS = "Id, AccountId, Email, Phone, FirstName"
 
 
 def leads_shadow_status(ids: Sequence[str]) -> str:

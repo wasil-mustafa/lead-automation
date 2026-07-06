@@ -83,6 +83,20 @@ def test_review_is_observed_not_scored(tmp_path):
     assert res["observed"] == 1 and res["hits"] == 0 and res["misses"] == 0
 
 
+def test_bulk_export_string_booleans(tmp_path):
+    # >2000-char SOQL routes through Bulk API export, which returns booleans as
+    # 'true'/'false' STRINGS — a truthy 'false' must not resolve an unconverted lead.
+    preds = [_pred("00Q1"), _pred("00Q2", account_id="001A")]
+    client = FakeClient(leads=[
+        _lead("00Q1", "", IsConverted="false", ConvertedDate="", ConvertedAccountId=""),
+        _lead("00Q2", "001A", IsConverted="true")],
+        accounts=[_account("001A")])
+    res, ppath, *_ = _run(tmp_path, preds, client)
+    statuses = {p.lead_id: p.status for p in load_predictions(ppath)}
+    assert statuses == {"00Q1": "pending", "00Q2": "resolved"}
+    assert res["pending"] == 1 and res["hits"] == 1
+
+
 def test_unconverted_stays_pending_and_old_expires(tmp_path):
     preds = [_pred("00Q1", predicted_at="2026-07-02T09:00:00+00:00"),
              _pred("00Q2", predicted_at="2026-01-01T09:00:00+00:00")]  # > 90 days
@@ -96,22 +110,56 @@ def test_unconverted_stays_pending_and_old_expires(tmp_path):
 
 
 def test_field_agreement(tmp_path):
-    preds = [_pred("00Q1", payload={"KN_DBPostalCode__c": "10115", "KN_DBCity__c": "Berlin",
-                                    "KN_Employee__c": "51-100"},
+    preds = [_pred("00Q1", payload={"PostalCode": "10115", "City": "Berlin",
+                                    "CountryCode": "DE", "KN_Employee__c": "51-100",
+                                    "FirstName": "Anna", "Phone": "+49 30 123456"},
                    lf_website="https://acme.de")]
     client = FakeClient(
-        leads=[_lead(KN_Employee__c="101-200")],
+        leads=[_lead(KN_Employee__c="101-200", ConvertedContactId="003C")],
         accounts=[_account(Website="www.acme.de/jobs", BillingPostalCode="10 115",
-                           BillingCity="berlin")])
+                           BillingCity="berlin", BillingCountryCode="de")],
+        contacts=[{"Id": "003C", "AccountId": "001A",
+                   "FirstName": "anna", "Phone": "+49-30-123456"}])
     res, _, rpath, _ = _run(tmp_path, preds, client)
     import json
     rec = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])
     f = rec["fields"]
     assert f["postal_code"]["status"] == "agree"
     assert f["city"]["status"] == "agree"
+    assert f["country"]["status"] == "agree"
     assert f["website"]["status"] == "agree"
+    assert f["first_name"]["status"] == "agree"
+    assert f["phone"]["status"] == "agree"
     assert f["employee_bin"]["status"] == "differ"
+    assert "revenue_millions" not in f  # KN_DB* no longer written back
+
+
+def test_field_agreement_legacy_payload_keys(tmp_path):
+    # In-flight predictions recorded before write-back stopped writing the
+    # D&B-owned KN_DB* fields must still score postal/city via the legacy keys.
+    preds = [_pred("00Q1", payload={"KN_DBPostalCode__c": "10115",
+                                    "KN_DBCity__c": "Berlin"})]
+    client = FakeClient(
+        leads=[_lead()],
+        accounts=[_account(BillingPostalCode="10115", BillingCity="Berlin")])
+    _, _, rpath, _ = _run(tmp_path, preds, client)
+    import json
+    f = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])["fields"]
+    assert f["postal_code"]["status"] == "agree"
+    assert f["city"]["status"] == "agree"
     assert f["country"]["status"] == "lf_empty"
+    assert f["phone"]["status"] == "lf_empty"
+
+
+def test_contact_fields_without_converted_contact(tmp_path):
+    # No ConvertedContactId → contact-side values are simply missing.
+    preds = [_pred("00Q1", payload={"FirstName": "Anna", "Phone": "+4930123456"})]
+    client = FakeClient(leads=[_lead()], accounts=[_account()])
+    _, _, rpath, _ = _run(tmp_path, preds, client)
+    import json
+    f = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])["fields"]
+    assert f["first_name"]["status"] == "human_empty"
+    assert f["phone"]["status"] == "human_empty"
 
 
 def test_xlsx_written(tmp_path):
