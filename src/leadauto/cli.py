@@ -95,7 +95,10 @@ def stage2(
                                             help="Approved CSV (default: newest review/approved_*.csv)."),
     dry_run: Optional[bool] = typer.Option(None, "--dry-run/--no-dry-run",
                                            help="Override config dry_run."),
-    batch_size: int = typer.Option(50, "--batch-size", help="Leads converted per Apex run."),
+    batch_size: int = typer.Option(10, "--batch-size",
+                                   help="Leads converted per Apex run (kept small: each "
+                                        "conversion cascades Account/Contact triggers, flows "
+                                        "and validation/duplicate rules in one transaction)."),
     preflight: bool = typer.Option(True, "--preflight/--no-preflight",
                                    help="Check conversion requirements and skip failing leads."),
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
@@ -110,14 +113,25 @@ def stage2(
             raise typer.Exit(code=1)
         log.info("Using approved file %s", approved)
     sf = _build_sf_client(settings, log)
-    res = run_stage2(sf, settings, approved, dry_run=dry_run, batch_size=batch_size,
-                     preflight=preflight, logger=log)
+    try:
+        res = run_stage2(sf, settings, approved, dry_run=dry_run, batch_size=batch_size,
+                         preflight=preflight, logger=log)
+    except ValueError as exc:  # malformed approved CSV (bad Ids) — fail readably
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     skipped_leads = len({f["lead_id"] for f in res.preflight_failures})
+    already = res.result.get("already_converted", 0)
+    failed = res.result.get("failed", 0)
+    missing = res.result.get("missing", 0)
     typer.echo(
         f"Stage 2 {'(dry-run) ' if res.dry_run else ''}done: "
         f"{len(res.targets)} target(s) | converted={res.result.get('converted', 0)} "
-        f"failed={res.result.get('failed', 0)} | preflight_skipped={skipped_leads}"
+        f"already={already} failed={failed} missing={missing} | preflight_skipped={skipped_leads}"
     )
+    if failed or missing:
+        # Failed or unaccounted-for conversions must fail the job, not just log. Leads that
+        # were already converted (idempotent re-run) are a no-op and do NOT fail the job.
+        raise typer.Exit(code=1)
 
 
 @app.command("shadow-compare")

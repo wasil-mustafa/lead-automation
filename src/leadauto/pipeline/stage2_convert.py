@@ -11,6 +11,7 @@ any Apex runs.
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from ..convert.preflight import run_preflight, write_failures_csv
 from ..logging import get_logger
 
 _APPROVE_YES = {"yes", "y", "true", "x", "1"}
+
+# Real Salesforce Id shape (15 or 18 alphanumeric). The approved CSV is hand-edited and its
+# values are embedded in conversion Apex, so anything else fails the whole run loudly.
+_SF_ID_RE = re.compile(r"[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?")
 
 # Contact reasons that identify the same person (vs. a name/heuristic match): linking on
 # these is safe. Weaker reasons (contact_email_global, linkedin) create a fresh contact
@@ -51,9 +56,16 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
     Contact is linked only when its match reason is an identifier signal — kununu user
     UUID or an email inside the linked account; weaker matches create a fresh contact.
     Blanking `account_match_id`/`contact_match_id` forces create-new.
+
+    Ids are validated hard (15/18 alphanumeric): a malformed value raises ValueError for
+    the whole run rather than reaching the generated Apex. A contact link without an
+    account link is dropped with a warning — `Database.LeadConvert.setContactId` requires
+    `setAccountId` alongside it, so keeping it would guarantee a conversion error.
     """
+    log = get_logger("pipeline.stage2")
     targets: list[ConversionTarget] = []
-    for row in rows:
+    bad_ids: list[str] = []
+    for line, row in enumerate(rows, start=2):  # data starts on CSV line 2 (after header)
         if not _is_approved(row):
             continue
         lead_id = (row.get("lead_id") or "").strip()
@@ -61,15 +73,29 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
             continue
         account_id = (row.get("account_match_id") or "").strip() or None
         contact_id = (row.get("contact_match_id") or "").strip() or None
+        for col, value in (("lead_id", lead_id), ("account_match_id", account_id),
+                           ("contact_match_id", contact_id)):
+            if value is not None and not _SF_ID_RE.fullmatch(value):
+                bad_ids.append(f"line {line}: {col}={value!r}")
         if contact_id and (row.get("contact_reason") or "").strip() not in _CONTACT_LINK_REASONS:
             contact_id = None
+        if contact_id and not account_id:
+            log.warning("line %d (%s): dropping contact link %s — LeadConvert requires an "
+                        "account link alongside a contact link; converting create-new instead",
+                        line, lead_id, contact_id)
+            contact_id = None
         targets.append(ConversionTarget(lead_id, account_id=account_id, contact_id=contact_id))
+    if bad_ids:
+        raise ValueError(
+            "Malformed Salesforce Id(s) in the approved CSV — fix the file and re-run: "
+            + "; ".join(bad_ids)
+        )
     return targets
 
 
 def run_stage2(
     sf_client, settings, approved_csv: str | Path, *,
-    dry_run: bool | None = None, batch_size: int = 50,
+    dry_run: bool | None = None, batch_size: int = 10,
     preflight: bool = True, failures_csv: str | Path = "preflight_failures.csv",
     logger=None,
 ) -> Stage2Result:

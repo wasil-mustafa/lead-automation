@@ -34,7 +34,7 @@ Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artif
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 293 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 308 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -51,7 +51,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 293 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 308 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).

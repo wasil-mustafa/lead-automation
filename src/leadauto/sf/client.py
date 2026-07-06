@@ -69,11 +69,11 @@ class SfClient:
         self.api_version = api_version
         self.log = logger
 
-    def _run(self, cmd: str) -> subprocess.CompletedProcess:
+    def _run(self, cmd: str, check: bool = True) -> subprocess.CompletedProcess:
         res = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, env=_ENV
         )
-        if res.returncode != 0:
+        if check and res.returncode != 0:
             raise SfError(f"sf command failed ({res.returncode}):\n{cmd}\n{res.stderr}")
         return res
 
@@ -174,8 +174,40 @@ class SfClient:
         }
 
     def apex_run(self, apex_code: str) -> str:
-        """Execute anonymous Apex and return combined stdout."""
-        tmp = Path(tempfile.gettempdir()) / "leadauto_run.apex"
-        tmp.write_text(apex_code, encoding="utf-8")
-        cmd = f'sf apex run --file "{tmp}" --target-org {self.alias}'
-        return self._run(cmd).stdout
+        """Execute anonymous Apex and return the execution debug log.
+
+        Runs with --json and inspects the structured ExecuteAnonymous result, so a compile
+        error or an uncaught runtime exception raises SfError with the real problem instead
+        of returning output that merely lacks whatever the caller expected to find in it.
+        """
+        # Unique temp file (like update_bulk): a fixed name would collide on overlap.
+        fd, tmp_name = tempfile.mkstemp(prefix="leadauto_apex_", suffix=".apex")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(apex_code)
+            cmd = f'sf apex run --file "{tmp}" --target-org {self.alias} --json'
+            # --json reports failures inside the payload (with a non-zero exit code), so
+            # run uncheck-ed and diagnose from the structured result, not the exit code.
+            res = self._run(cmd, check=False)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        try:
+            data = json.loads(res.stdout)
+        except (json.JSONDecodeError, TypeError):
+            raise SfError(f"sf apex run produced no parseable --json output "
+                          f"(exit {res.returncode}):\n{res.stderr or res.stdout}")
+        result = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(result, dict):
+            raise SfError(f"Unexpected sf apex run --json shape (exit {res.returncode}):\n"
+                          f"{res.stdout[:2000]}")
+        if not result.get("compiled"):
+            raise SfError(f"Apex did not compile: {result.get('compileProblem')}")
+        if not result.get("success"):
+            raise SfError("Apex run failed: "
+                          f"{result.get('exceptionMessage')}\n"
+                          f"{result.get('exceptionStackTrace') or ''}")
+        return result.get("logs") or ""

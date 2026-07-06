@@ -9,7 +9,9 @@ import json
 import re
 import types
 
-from leadauto.sf.client import SfClient, parse_bulk_update_result
+import pytest
+
+from leadauto.sf.client import SfClient, SfError, parse_bulk_update_result
 
 
 def test_parse_bulk_result_extracts_failures():
@@ -92,3 +94,52 @@ def test_query_bulk_flag_forces_bulk(monkeypatch):
     monkeypatch.setattr(client, "_run", _fake_run([{"Id": "00Q1"}], cmds))
     client.query("SELECT Id FROM Lead LIMIT 1", bulk=True)
     assert "data export bulk" in cmds[0]
+
+
+# --- apex_run: diagnose failures from the --json payload, not a lack of expected output --
+
+def _fake_apex_run(payload, capture):
+    """Stand in for SfClient._run: record the cmd, return an ExecuteAnonymous --json blob."""
+    def run(cmd, check=True):
+        capture.append(cmd)
+        return types.SimpleNamespace(returncode=0 if payload.get("success") else 1,
+                                     stdout=json.dumps({"result": payload}), stderr="")
+    return run
+
+
+def test_apex_run_returns_logs_on_success(monkeypatch):
+    client = SfClient("headless")
+    cmds: list[str] = []
+    logs = "USER_DEBUG|@@LEADAUTO@@[]@@LEADAUTO@@"
+    monkeypatch.setattr(client, "_run", _fake_apex_run(
+        {"compiled": True, "success": True, "logs": logs}, cmds))
+    assert client.apex_run("System.debug('x');") == logs
+    assert "--json" in cmds[0]
+
+
+def test_apex_run_raises_on_compile_error(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_apex_run(
+        {"compiled": False, "compileProblem": "Unexpected token", "success": False}, []))
+    with pytest.raises(SfError, match="did not compile"):
+        client.apex_run("this is not apex")
+
+
+def test_apex_run_raises_on_runtime_exception(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_apex_run(
+        {"compiled": True, "success": False,
+         "exceptionMessage": "System.LimitException: Too many SOQL queries: 101",
+         "exceptionStackTrace": "AnonymousBlock: line 1, column 1"}, []))
+    with pytest.raises(SfError, match="Apex run failed"):
+        client.apex_run("run that throws")
+
+
+def test_apex_run_raises_on_unparseable_output(monkeypatch):
+    client = SfClient("headless")
+
+    def run(cmd, check=True):
+        return types.SimpleNamespace(returncode=1, stdout="not json", stderr="boom")
+    monkeypatch.setattr(client, "_run", run)
+    with pytest.raises(SfError, match="no parseable"):
+        client.apex_run("System.debug('x');")
