@@ -21,13 +21,16 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    any lead failing the "Conversion requirements" below — failures land in preflight_failures.csv
    (uploaded with the stage-2 log) and Stage2Result.preflight_failures; --no-preflight bypasses.
 4. `resolve_pool_links` (convert/pool_enrich.py) enriches linked Accounts owned by the pool
-   (`Owner.Name='Rohdaten Pool'`, keyed by config `salesforce.rohdaten_pool_owner_id`): for each
-   approved lead linking an Account, reads the Account's current `KN_KununuProfileLink__c` and
-   compares it to the lead's `kununu_profile_uuid` from the CSV. Kununu identity gate: blank →
-   fill, equal → no-op, present-and-different → conflict (route to review, skip+report like
-   preflight). Same for `KN_KununuProfileUrl__c`/`kununu_url` (normalized). Live runs overwrite
-   the Account's address/employee/region/VAT fields from the lead's enrichment where they differ
-   (fill-only-blank semantics); dry runs pass. Targets failing the identity gate are dropped
+   (`Owner.Name='Rohdaten Pool'`, keyed by config `salesforce.rohdaten_pool_owner_id`). For each
+   approved lead linking an Account it runs a two-part **kununu identity gate**, comparing the
+   Account's stored identity to the values carried on the approved CSV: Account
+   `KN_KununuProfileUuid__c` vs the lead's `kununu_profile_uuid`, and Account
+   `KN_KununuLinkProfile__c` (the profile URL) vs the lead's `kununu_url` (normalized). Each
+   comparison: blank → fill, equal → no-op, present-and-different → conflict (route to review,
+   skip+report like preflight). Targets that pass the gate get their address/employee/region/VAT
+   fields written from the lead's enrichment **where they differ** (overwrite-on-difference — note
+   this is NOT fill-only-blank; the URL/UUID identity fields alone are fill-only-blank). Writes
+   happen only on live runs; dry runs query but don't write. Targets failing the gate are dropped
    from conversion.
 5. `convert_leads` (convert/converter.py) clusters create-new leads by `lf_company_id`: groups
    of leads with the same company ID are deduplicated into one primary (the first in sort order)
