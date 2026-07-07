@@ -55,9 +55,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
-- **Scheduled:** Stage 1 cron `23 7,16 * * *` (~09:23/18:23 Vienna summer), **forced dry-run**
-  (flip in the workflow's gate job at go-live). Shadow files are committed on every run; the
-  watermark only on non-dry runs. Stage 2 is dispatch-only.
+- **Scheduled:** Stage 1 is triggered by an **external cron-job.org job** (id 8029899) hitting the
+  `stage1.yml` `workflow_dispatch` at 09/12/15/18 Vienna; it POSTs `{"ref":"master"}` with no
+  inputs ⇒ `dry_run` defaults **true** (runs stay dry; go live by dispatching with dry_run
+  unchecked). Change the schedule in *that job*, not the workflow. GitHub's own `schedule:` cron
+  was removed. Shadow files committed every run; watermark only on non-dry. Stage 2 is dispatch-only.
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `dry_run: true`.
 - **NOT yet live:** Salesforce write-back and LeadConvert — no live write has ever run.
   The Dublettencheck rule distribution has only been smoke-tested WITHOUT LeadFeeder.
@@ -131,8 +133,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 - **CI Salesforce login is flaky** (`sf org login sfdx-url` hangs intermittently — CLI issue, not a
   bad credential, which prints `invalid_grant`). Both workflows retry login 3× and pin
   `@salesforce/cli@2.140.6`; job-level `SF_AUTOUPDATE_DISABLE`/`SF_DISABLE_TELEMETRY`.
-- **GitHub cron delivers this repo's scheduled runs hours late and drops most firings** — NEVER
-  gate on execution wall-clock hour (the old Vienna-hour check silently skipped every run).
+- **GitHub cron delivers this repo's scheduled runs hours late and drops most firings** — so Stage 1
+  scheduling moved to an **external cron-job.org job** hitting `workflow_dispatch` (see Status; the
+  GitHub `schedule:` block is gone). NEVER gate on execution wall-clock hour (the old Vienna-hour
+  check silently skipped every run).
 
 ### LeadFeeder & kununu feed
 
@@ -159,10 +163,15 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 ### Matching, rule engine & shadow backtest
 
 - **Dublettencheck rule engine** (`match.py`): ordered 8 rules, first hit wins —
-  `no_lf_match`→review, `name_address`→link, `name_vat`→link, `kununu_agree`→link,
+  `no_lf_match`→**skip**, `name_address`→link, `name_vat`→link, `kununu_agree`→link,
   `kununu_conflict`→review, `name_only`→review, `weak_signal`→review, `no_match`→create_new.
-  **Invariant: no accepted LF match ⇒ ALWAYS review** (never auto-link/auto-create, even on a
-  perfect kununu UUID hit). No score thresholds; `MatchResult` carries `rule` + `evidence`
+  **Invariant: no accepted LF match ⇒ terminal `skip`** — the lead is excluded from BOTH account
+  and contact matching (`match_lead` short-circuits: no account, no contact, no evidence), and
+  Stage 2 drops an approved `skip` row rather than converting it. `review` is reserved for cases
+  where a candidate account IS surfaced and a human must adjudicate (kununu_conflict / name_only /
+  weak_signal). Decisions: `link | review | create_new | skip`. In shadow-compare a `skip` lead a
+  human later converted scores as a coverage-gap **miss**. No score thresholds; `MatchResult`
+  carries `rule` + `evidence`
   (demoted VAT/DBID/host/email-domain/fuzzy hits are review evidence only). `name_address` =
   normalized name + `BillingPostalCode` + `BillingCity`; `kununu_agree` splits on
   `matching.dedupe_name_agree_min` (85). QA Review sheet: `match_rule`/`match_evidence`.

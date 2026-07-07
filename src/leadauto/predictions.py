@@ -22,7 +22,7 @@ class Prediction:
     task_id: str
     predicted_at: str              # ISO-8601 UTC of the dry run
     rule: str
-    decision: str                  # link | review | create_new
+    decision: str                  # link | review | create_new | skip
     account_id: str | None = None  # predicted link target
     contact_id: str | None = None
     evidence: list[str] = field(default_factory=list)

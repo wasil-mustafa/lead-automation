@@ -70,6 +70,12 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
     for line, row in enumerate(rows, start=2):  # data starts on CSV line 2 (after header)
         if not _is_approved(row):
             continue
+        if (row.get("decision") or "").strip() == "skip":
+            # Terminal skip (no LeadFeeder match): never converts, even if a reviewer
+            # ticked Approve? — there is nothing to link or create.
+            log.warning("line %d (%s): approved row has decision=skip; not converting",
+                        line, (row.get("lead_id") or "").strip())
+            continue
         lead_id = (row.get("lead_id") or "").strip()
         if not lead_id:
             continue

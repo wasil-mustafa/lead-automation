@@ -10,6 +10,8 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    `review/approved_<date>.csv`. `stage2` picks the newest by filename (`--approved` overrides).
 2. `targets_from_approved` builds one `ConversionTarget(lead_id, account_id?, contact_id?)`
    per approved row (`Approve?` ∈ yes/y/true/x/1):
+   - Rows with `decision == "skip"` (no LeadFeeder match) are dropped even if approved — a
+     terminal skip never converts (Stage 1 excludes them from account/contact matching).
    - Account links whenever `account_match_id` is non-blank (reviewer validated it).
    - Contact links ONLY when `contact_reason` ∈ `{kununu_user_uuid, contact_email_in_account}`
      (identifier signals). Weaker reasons (`contact_email_global`, `linkedin`) deliberately
