@@ -3,14 +3,18 @@
 Ordered rules mirror the business decision tree (spec: docs/superpowers/specs/
 2026-07-03-dublettencheck-rules-and-shadow-compare-design.md); first hit wins:
 
-  1 no_lf_match      no accepted LF company                             -> skip
-  2 name_address     normalized name equal + postal code + city equal   -> link
-  3 name_vat         normalized name equal + VAT equal                  -> link
-  4 kununu_agree     profile UUID/URL on an Account + name agreement    -> link
-  5 kununu_conflict  profile UUID/URL hit, name disagrees               -> review
-  6 name_only        normalized name equal, nothing else                -> review
-  7 weak_signal      only VAT/DBID/host/email-domain/fuzzy point at one -> review
-  8 no_match         nothing                                            -> create_new
+  1  no_lf_match       no accepted LF company                             -> skip
+  2  name_address      normalized name equal + postal code + city equal   -> link
+  3  name_vat          normalized name equal + VAT equal                  -> link
+  4  kununu_agree      profile UUID/URL on an Account + name agreement    -> link
+  5  kununu_conflict   profile UUID/URL hit, name disagrees               -> review
+  6  name_corroborated normalized name equal + a weak signal on the SAME
+                       account (two independent axes)                     -> link
+  7  name_only         normalized name equal on one account, nothing else -> review
+  8  duplicate         normalized name equal on 2+ accounts, none singled
+                       out — the org already holds duplicate accounts     -> review
+  9  weak_signal       only VAT/DBID/host/email-domain/fuzzy point at one -> review
+  10 no_match          nothing                                            -> create_new
 
 `skip` is terminal: no accepted LF match means the lead can't be identified, so it is
 excluded from account AND contact matching and never converts (Stage 2 drops it even if
@@ -162,8 +166,10 @@ RULE_DECISIONS = {
     "name_address": "link",
     "name_vat": "link",
     "kununu_agree": "link",
+    "name_corroborated": "link",
     "kununu_conflict": "review",
     "name_only": "review",
+    "duplicate": "review",
     "weak_signal": "review",
     "no_match": "create_new",
 }
@@ -276,6 +282,18 @@ def _fire(enriched: EnrichedLead, existing: ExistingRecords, settings,
                 else "kununu_conflict")
         return rule, AccountMatch(acct["Id"], None, rule)
     if name_accts:
+        # Name equality plus an independent weak signal (VAT/DBID/host/email-domain/fuzzy)
+        # pointing at the SAME account is two axes → link. When corroboration singles out
+        # exactly one account it also disambiguates a multi-candidate name collision.
+        weak_ids = {acct["Id"] for _sig, acct in weak}
+        corroborated = [a for a in name_accts if a["Id"] in weak_ids]
+        if len(corroborated) == 1:
+            return "name_corroborated", AccountMatch(
+                corroborated[0]["Id"], None, "name_corroborated")
+        if len(name_accts) > 1:
+            # Several existing accounts share the normalized name and nothing singles one
+            # out: the org already holds duplicate accounts — a human must resolve them.
+            return "duplicate", AccountMatch(name_accts[0]["Id"], None, "duplicate")
         return "name_only", AccountMatch(name_accts[0]["Id"], None, "name_only")
     if weak:
         return "weak_signal", AccountMatch(weak[0][1]["Id"], None, "weak_signal")
@@ -295,7 +313,12 @@ def evaluate_account_rules(
     evidence = [f"{sig}→{acct['Id']}" for sig, acct in weak]
     if kununu and rule not in ("kununu_agree", "kununu_conflict"):
         evidence.insert(0, f"{kununu[1]}→{kununu[0]['Id']}")
-    if name_accts and rule not in ("name_address", "name_vat", "name_only"):
+    if rule == "duplicate":
+        # surface EVERY same-name candidate so the reviewer can resolve the duplicates
+        evidence.insert(0, "name→" + ",".join(a["Id"] for a in name_accts))
+    elif name_accts and rule not in (
+        "name_address", "name_vat", "name_only", "name_corroborated"
+    ):
         evidence.insert(0, f"name→{name_accts[0]['Id']}")
     return rule, account, evidence
 

@@ -217,6 +217,39 @@ def test_rule_name_only_reviews():
     assert r.account.account_id == "001A"
 
 
+def test_rule_name_corroborated_links():
+    # Name equality + an independent weak signal (DBID) on the SAME account = two axes → link.
+    # (VAT/address would fire the stronger rules 2/3 first, so corroborate via DBID.)
+    ex = ExistingRecords.from_records([_acct("001A", Name="Acme GmbH", KN_DBID__c="HRB123")], [])
+    enr = _lf_enriched(company={"Register_Id": "HRB123"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "name_corroborated" and r.decision == "link"
+    assert r.account.account_id == "001A"
+    assert "dbid→001A" in r.evidence
+
+
+def test_rule_name_corroborated_disambiguates_collision():
+    # Two accounts share the name; a weak signal singles out ONE → link to that one, not review.
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme GmbH"),
+         _acct("001B", Name="Acme GmbH", KN_DBID__c="HRB123")], [])
+    enr = _lf_enriched(company={"Register_Id": "HRB123"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "name_corroborated" and r.decision == "link"
+    assert r.account.account_id == "001B"
+
+
+def test_rule_duplicate_reviews_multiple_same_name_accounts():
+    # Two existing accounts share the normalized name and nothing singles one out:
+    # the org already holds duplicate accounts → review, surfacing EVERY candidate.
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme GmbH"), _acct("001B", Name="Acme GmbH")], [])
+    r = match_lead(_lf_enriched(), ex, SETTINGS)
+    assert r.rule == "duplicate" and r.decision == "review"
+    assert r.account.account_id == "001A"  # first candidate is the placeholder link target
+    assert "name→001A,001B" in r.evidence
+
+
 def test_rule_weak_signal_reviews_with_evidence():
     ex = ExistingRecords.from_records([_acct("001A", KN_VATNumber__c="DE123")], [])
     enr = _lf_enriched(matched_name="Zeta AG", company={"VAT_Id": "DE123"})
@@ -235,8 +268,8 @@ def test_rule_no_match_creates():
 
 def test_rule_decisions_cover_all_rules():
     assert set(RULE_DECISIONS) == {
-        "no_lf_match", "name_address", "name_vat", "kununu_agree",
-        "kununu_conflict", "name_only", "weak_signal", "no_match",
+        "no_lf_match", "name_address", "name_vat", "kununu_agree", "name_corroborated",
+        "kununu_conflict", "name_only", "duplicate", "weak_signal", "no_match",
     }
     assert set(RULE_DECISIONS.values()) == {"link", "review", "create_new", "skip"}
     assert RULE_DECISIONS["no_lf_match"] == "skip"
