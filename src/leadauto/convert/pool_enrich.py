@@ -14,7 +14,9 @@ from ..textnorm import normalize_url
 
 # (lead_field, account_field) — overwrite the Account field when the lead value differs.
 # Account names verified via describe on headless 2026-07-06 (KN_EmployeeCategory__c, and
-# KN_KununuProfileClaimedat__c with a lowercase 'at').
+# KN_KununuProfileClaimedat__c with a lowercase 'at'). No label map needed:
+# Account.KN_EmployeeCategory__c is a restricted picklist whose 14 values are identical to the
+# Lead's KN_Employee__c bins (writeback._EMPLOYEE_BINS), verified via describe 2026-07-07.
 _OVERWRITE_MAP = [
     ("KN_KununuProfileName__c", "KN_KununuProfileName__c"),
     ("KN_Region__c", "KN_Region__c"),
