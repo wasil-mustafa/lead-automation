@@ -34,7 +34,7 @@ Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artif
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 308 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 340 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -51,7 +51,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 308 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 340 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
@@ -64,8 +64,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 - **Write-back fills conversion requirements** (NoOwnDBID tick, address via CountryCode, employee
   fallback, FirstName, Phone — fill-only-blank); **Stage 2 preflights** approved leads and
   skips+reports rule violations (preflight_failures.csv).
+- **Stage 2 pool-account enrichment + same-company dedup** (PR #18): `resolve_pool_links`
+  overwrite-enriches `Rohdaten Pool`-owned linked Accounts behind a kununu identity gate, and
+  `convert_leads` clusters create-new leads by `lf_company_id` into one Account + N Contacts. See
+  `src/leadauto/convert/CLAUDE.md`.
 
 ## Conventions & gotchas (verified against org `headless`)
+
+### Salesforce org, secrets & write-back
 
 - **Org alias is `headless`** (production, kununu.my.salesforce.com, API v66.0). NOT `myOrg`.
 - **Secrets via env / GitHub Secrets only.** CI auth secret is **`SFDX_AUTH_URL`** (regenerate:
@@ -82,6 +88,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `_EMPLOYEE_BINS` — wrong labels are rejected rows.
 - **No Salesforce metadata changes.** Watermark = committed `state/watermark.json`; review gate =
   QA-artifact `Approve?` column; write-back only to *existing* `KN_*` fields.
+
+### Salesforce data model, scope & SOQL
+
 - **Task `Subject` is the task-type router** (`config/config.yaml` `task_types`). In scope:
   `Inbound Sales Task: {New Claimed Profile | EBP Trial | Eventteilnahme | Whitepaper Download |
   Video Download}`. Out: `Kontaktanfrage` (stays human), `Marketing Touchpoint: Ecom`.
@@ -95,6 +104,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   closing those tasks, so shadow evidence comes mostly from the non-No-Demand minority. The few
   pool-user-owned leads (contact-attached tasks) are out of scope for now. Config `owner_id` =
   Wasil (deliberate, 2026-07-05 — converted records are assigned to him).
+- **Own-company emails are out of scope.** Stage 1 extraction AND shadow scoring skip any lead
+  whose lead/contact email second-level domain ∈ `excluded_email_domains` (`kununu`, `xing`,
+  `onlyfy`) — internal colleagues doing profile-claim/trial tests, not sales leads. Matched on the
+  SLD so any TLD counts (`kununu.com`/`.at`); helper `textnorm.is_internal_email`.
 - **Real Lead fields:** `Email`, `KN_CompanyEmail__c` (there is NO `KN_Email__c`),
   `KN_KununuProfileName__c`, `KN_KununuUserUUID__c`, `KN_KununuLinkProfile__c`, `KN_Region__c`,
   `KN_VATNumber__c`, plus `KN_DB*` firmographics. Account match: `KN_KununuProfileUuid__c`,
@@ -112,11 +125,17 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   and nulls as `''` — coerce with an `_is_true`-style helper (see `extract/parsers.py`,
   `convert/preflight.py`, `shadow_compare.py`); live-proven 2026-07-06 when 299 pending
   predictions all "resolved" as misses.
+
+### CI & scheduling
+
 - **CI Salesforce login is flaky** (`sf org login sfdx-url` hangs intermittently — CLI issue, not a
   bad credential, which prints `invalid_grant`). Both workflows retry login 3× and pin
   `@salesforce/cli@2.140.6`; job-level `SF_AUTOUPDATE_DISABLE`/`SF_DISABLE_TELEMETRY`.
 - **GitHub cron delivers this repo's scheduled runs hours late and drops most firings** — NEVER
   gate on execution wall-clock hour (the old Vienna-hour check silently skipped every run).
+
+### LeadFeeder & kununu feed
+
 - **LeadFeeder API** (`api.leadfeeder.com/v1`, `X-Api-Key`): 100 req/min per account;
   `POST /companies/match` ≤200 companies/call, `GET /companies|/contacts?ids=` ≤100 ids; match +
   contact-search are FREE, retrieves cost 1 credit/new record (free re-access for 12 months);
@@ -136,6 +155,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `profile_uuid` with URL-slug fallback; degrades to no-alt behavior without `KUNUNU_API_TOKEN`
   (`--no-kununu-feed` to disable). Also planned input for a future live-lead duplicate-detection
   feature — the `kununu-data` MCP server is the same file, no per-lead API.
+
+### Matching, rule engine & shadow backtest
+
 - **Dublettencheck rule engine** (`match.py`): ordered 8 rules, first hit wins —
   `no_lf_match`→review, `name_address`→link, `name_vat`→link, `kununu_agree`→link,
   `kununu_conflict`→review, `name_only`→review, `weak_signal`→review, `no_match`→create_new.
@@ -152,6 +174,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (`PostalCode`/`City`/`CountryCode` vs the converted account's Billing address,
   `FirstName`/`Phone` vs the converted Contact, `KN_Employee__c` vs the lead); legacy
   `KN_DB*` payload keys still score in-flight pre-KN_DB-removal predictions.
+
+### Repo layout
+
 - **`scripts/` == legacy `Scripts/` on case-insensitive Windows** (same physical dir).
   `.gitignore` ignores `scripts/*` and tracks ONLY `leadfeeder_probe.py` +
   `control_check_alt_names.py`. The untracked `Convert Leads/` folder is the legacy manual
@@ -179,7 +204,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 ## Git
 
 Remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
-scheduler runs** — fixes must land there; no active feature branch. PR history (#1–#12: LF
+scheduler runs** — fixes must land there; no active feature branch. PR history (#1–#18: LF
 throttle/batching, Bulk-API 431 fix, CI login hardening, name-agreement gate, alt-names gate,
 country-drop, employee bins, LF null-crash fix, queue scope + schedule, rule engine + shadow,
-Task-status freshness, scheduled-gate fix) lives in git log/GitHub — don't re-document it here.
+Task-status freshness, scheduled-gate fix, write-back gaps + Stage 2 preflight, own-company email
+exclusion, Stage 2 conversion hardening, pool-account enrichment + same-company dedup) lives in
+git log/GitHub — don't re-document it here.
