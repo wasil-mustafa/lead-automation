@@ -20,13 +20,9 @@ on:
         description: "Use LeadFeeder enrichment (uncheck to skip credits)"
         type: boolean
         default: true
-  schedule:
-    # Twice daily: ~08:00 and ~17:00 Vienna in summer (~09:00/18:00 in winter —
-    # DST drift is accepted). GitHub cron is UTC, best-effort only: firings run
-    # late and some are dropped entirely, especially on low-activity repos.
-    # If GitHub still under-delivers, the fix is an external
-    # scheduler hitting workflow_dispatch, not more cron entries.
-    - cron: "22 8,17 * * *"
+  # Scheduling is EXTERNAL: cron-job.org hits this workflow's workflow_dispatch
+  # (GitHub's own cron delivered these runs hours late and dropped most firings).
+  # The external job POSTs {"ref":"master"} with no inputs, so runs stay dry.
 
 # Never let two enrich runs overlap (they share the watermark file).
 concurrency:
@@ -38,16 +34,11 @@ permissions:
 
 jobs:
   gate:
-    # Decides the effective dry-run mode. Scheduled runs are FORCED dry-run for
-    # now — flip here at go-live. This also fixes the old footgun where a
-    # schedule event's empty `inputs.dry_run` fell into --no-dry-run.
-    #
-    # We deliberately do NOT gate on the Vienna wall-clock hour anymore. GitHub
-    # delivers these scheduled runs hours late and drops most firings, so the
-    # old exact-hour check (`HOUR == 9 || HOUR == 18`, evaluated at *execution*
-    # time) was essentially never true and skipped `enrich` on every scheduled
-    # run. The cron still targets ~09:00/18:00 Vienna; every delivered firing now
-    # runs. Overlap is prevented by the `concurrency` group above.
+    # Decides the effective dry-run mode. Runs are triggered by workflow_dispatch
+    # (external cron-job.org schedule or a manual run), so the flag comes from
+    # `inputs.dry_run`, which defaults to true. The external scheduler omits
+    # inputs, so its runs stay DRY; go live by dispatching with dry_run unchecked.
+    # The `if schedule` branch below is a harmless guard if a cron is ever re-added.
     runs-on: ubuntu-latest
     outputs:
       dry_run: ${{ steps.decide.outputs.dry_run }}
