@@ -205,7 +205,7 @@ def contacts_by_signals(
 # --- shadow comparison (score dry-run predictions vs human conversions) ------
 
 _LEAD_SHADOW_FIELDS = (
-    "Id, IsConverted, ConvertedDate, ConvertedAccountId, ConvertedContactId, "
+    "Id, Email, IsConverted, ConvertedDate, ConvertedAccountId, ConvertedContactId, "
     "KN_Employee__c"
 )
 _ACCOUNT_SHADOW_FIELDS = ("Id, Name, CreatedDate, Website, BillingPostalCode, "

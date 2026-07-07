@@ -111,7 +111,7 @@ def test_account_match_fields_include_billing():
 def test_leads_shadow_status():
     q = leads_shadow_status(["00Q1", "00Q2"])
     assert q.startswith("SELECT ")
-    for f in ("IsConverted", "ConvertedDate", "ConvertedAccountId",
+    for f in ("Email", "IsConverted", "ConvertedDate", "ConvertedAccountId",
               "ConvertedContactId", "KN_Employee__c"):
         assert f in q
     # KN_DB* fields are D&B-owned, no longer written back, and no longer compared.

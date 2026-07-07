@@ -40,12 +40,13 @@ def test_stage1_help_lists_flags():
 def test_shadow_compare_command(monkeypatch):
     import leadauto.cli as cli
     monkeypatch.setattr(cli, "_build_sf_client", lambda s, log: object())
-    monkeypatch.setattr(cli, "run_shadow_compare", lambda sf, logger: {
+    monkeypatch.setattr(cli, "run_shadow_compare", lambda sf, excluded_domains, logger: {
         "checked": 3, "resolved": 2, "hits": 1, "misses": 1, "observed": 0,
-        "expired": 0, "pending": 1, "xlsx": "shadow_comparison.xlsx"})
+        "expired": 0, "excluded": 1, "pending": 1, "xlsx": "shadow_comparison.xlsx"})
     result = CliRunner().invoke(cli.app, ["shadow-compare"])
     assert result.exit_code == 0
     assert "resolved=2" in result.output and "hits=1" in result.output
+    assert "excluded=1" in result.output
 
 
 def test_stage2_cli_reports_preflight_skips(monkeypatch, tmp_path):

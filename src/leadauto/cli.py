@@ -142,11 +142,12 @@ def shadow_compare(
     log = get_logger("cli.shadow")
     settings = Settings.load(config)
     sf = _build_sf_client(settings, log)
-    res = run_shadow_compare(sf, logger=log)
+    res = run_shadow_compare(sf, excluded_domains=settings.excluded_email_domains, logger=log)
     typer.echo(
         f"Shadow compare done: checked={res['checked']} resolved={res['resolved']} "
         f"hits={res['hits']} misses={res['misses']} observed={res['observed']} "
-        f"expired={res['expired']} pending={res['pending']} | xlsx={res['xlsx']}"
+        f"expired={res['expired']} excluded={res['excluded']} pending={res['pending']} "
+        f"| xlsx={res['xlsx']}"
     )
 
 

@@ -97,6 +97,32 @@ def test_bulk_export_string_booleans(tmp_path):
     assert res["pending"] == 1 and res["hits"] == 1
 
 
+def test_internal_lead_excluded_not_scored(tmp_path):
+    # Own-company lead (colleague test) -> marked excluded, never scored; others still resolve.
+    preds = [_pred("00Q1", account_id="001A"), _pred("00Q2", account_id="001A")]
+    client = FakeClient(
+        leads=[_lead("00Q1", "001A", Email="tester@kununu.com"),
+               _lead("00Q2", "001A", Email="buyer@acme.de")],
+        accounts=[_account("001A")])
+    ppath, rpath, xpath = (tmp_path / "p.jsonl", tmp_path / "r.jsonl", tmp_path / "s.xlsx")
+    save_predictions(preds, ppath)
+    res = run_shadow_compare(client, predictions_path=ppath, results_path=rpath,
+                             xlsx_path=xpath, now=NOW,
+                             excluded_domains={"kununu", "xing", "onlyfy"})
+    assert res["excluded"] == 1 and res["hits"] == 1 and res["resolved"] == 1
+    statuses = {p.lead_id: p.status for p in load_predictions(ppath)}
+    assert statuses == {"00Q1": "excluded", "00Q2": "resolved"}
+
+
+def test_no_excluded_domains_scores_everything(tmp_path):
+    # Default (no excluded_domains passed) leaves internal-looking leads scored as before.
+    preds = [_pred("00Q1", account_id="001A")]
+    client = FakeClient(leads=[_lead("00Q1", "001A", Email="tester@kununu.com")],
+                        accounts=[_account("001A")])
+    res, ppath, *_ = _run(tmp_path, preds, client)
+    assert res["excluded"] == 0 and res["hits"] == 1
+
+
 def test_unconverted_stays_pending_and_old_expires(tmp_path):
     preds = [_pred("00Q1", predicted_at="2026-07-02T09:00:00+00:00"),
              _pred("00Q2", predicted_at="2026-01-01T09:00:00+00:00")]  # > 90 days
