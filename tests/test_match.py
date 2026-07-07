@@ -136,14 +136,20 @@ def _lf_enriched(company=None, extracted=None, **kw):
     return _enriched(extracted=extracted, company=company or {}, **base)
 
 
-def test_rule_no_lf_match_always_reviews():
-    # Even a perfect kununu UUID hit must NOT link without an accepted LF match.
-    ex = ExistingRecords.from_records([_acct("001A", KN_KununuProfileUuid__c="puid-1")], [])
-    enr = _enriched(extracted=_extracted(kununu_profile_uuid="puid-1"))
+def test_rule_no_lf_match_skips_account_and_contact_matching():
+    # No accepted LF match ⇒ the lead is excluded from account AND contact matching
+    # entirely (even a perfect kununu UUID / email hit surfaces nothing) and is a
+    # terminal skip, NOT a review — there is nothing for a human to adjudicate.
+    ex = ExistingRecords.from_records(
+        [_acct("001A", KN_KununuProfileUuid__c="puid-1")],
+        [_contact("003C", "001A", KN_KununuUserUUID__c="uuid-1", Email="max@acme.de")])
+    enr = _enriched(extracted=_extracted(
+        kununu_profile_uuid="puid-1", kununu_user_uuid="uuid-1", contact_email="max@acme.de"))
     r = match_lead(enr, ex, SETTINGS)
-    assert r.rule == "no_lf_match" and r.decision == "review"
+    assert r.rule == "no_lf_match" and r.decision == "skip"
     assert r.account is None
-    assert "kununu_profile_uuid→001A" in r.evidence
+    assert r.contact is None
+    assert r.evidence == []
 
 
 def test_rule_name_address_links():
@@ -232,7 +238,8 @@ def test_rule_decisions_cover_all_rules():
         "no_lf_match", "name_address", "name_vat", "kununu_agree",
         "kununu_conflict", "name_only", "weak_signal", "no_match",
     }
-    assert set(RULE_DECISIONS.values()) == {"link", "review", "create_new"}
+    assert set(RULE_DECISIONS.values()) == {"link", "review", "create_new", "skip"}
+    assert RULE_DECISIONS["no_lf_match"] == "skip"
 
 
 # --- contact matching --------------------------------------------------------

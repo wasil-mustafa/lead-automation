@@ -52,6 +52,8 @@ def _convert_blockers(result) -> str:
     overlay IS the post-run state). No proposed account match -> strictest create-new
     assumption. Empty string = would pass preflight today.
     """
+    if result.decision == "skip":
+        return ""  # terminal skip never converts — a preflight preview would be noise
     e = result.enriched.extracted
     # This key set pairs with soql._LEAD_FIELDS / check_lead's reads by convention —
     # extend both when adding a check.
@@ -164,6 +166,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         ["decision_link", decisions.count("link")],
         ["decision_review", decisions.count("review")],
         ["decision_create_new", decisions.count("create_new")],
+        ["decision_skip", decisions.count("skip")],
         ["skipped", len(skipped)],
     ]
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)

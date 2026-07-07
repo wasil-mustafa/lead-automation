@@ -118,6 +118,12 @@ def classify_decision(pred, lead: dict, account: dict | None) -> tuple[str, str]
         if _is_new_account(account, lead.get("ConvertedDate")):
             return "hit", "human also created a new account"
         return "miss", f"human linked pre-existing {converted_account}"
+    if pred.decision == "skip":
+        # Terminal skip (no LF match). The human converting it is a coverage gap the
+        # pipeline would have dropped — a miss, distinct from a wrong-account miss.
+        kind = "new account" if _is_new_account(account, lead.get("ConvertedDate")) \
+            else f"existing account {converted_account}"
+        return "miss", f"human converted ({kind}); pipeline skipped (no LF match)"
     kind = "new account" if _is_new_account(account, lead.get("ConvertedDate")) \
         else f"existing account {converted_account}"
     return "observed", f"review case; human resolved to {kind}"

@@ -83,6 +83,15 @@ def test_review_is_observed_not_scored(tmp_path):
     assert res["observed"] == 1 and res["hits"] == 0 and res["misses"] == 0
 
 
+def test_skip_that_human_converted_is_a_miss(tmp_path):
+    # Terminal skip (no LF match): the pipeline would convert nothing. A human converting
+    # it anyway is a coverage-gap miss, not an observed/neutral review case.
+    preds = [_pred("00Q1", decision="skip", rule="no_lf_match", account_id=None)]
+    client = FakeClient(leads=[_lead()], accounts=[_account()])
+    res, *_ = _run(tmp_path, preds, client)
+    assert res["misses"] == 1 and res["observed"] == 0 and res["hits"] == 0
+
+
 def test_bulk_export_string_booleans(tmp_path):
     # >2000-char SOQL routes through Bulk API export, which returns booleans as
     # 'true'/'false' STRINGS — a truthy 'false' must not resolve an unconverted lead.

@@ -3,7 +3,7 @@
 Ordered rules mirror the business decision tree (spec: docs/superpowers/specs/
 2026-07-03-dublettencheck-rules-and-shadow-compare-design.md); first hit wins:
 
-  1 no_lf_match      no accepted LF company                             -> review
+  1 no_lf_match      no accepted LF company                             -> skip
   2 name_address     normalized name equal + postal code + city equal   -> link
   3 name_vat         normalized name equal + VAT equal                  -> link
   4 kununu_agree     profile UUID/URL on an Account + name agreement    -> link
@@ -11,6 +11,11 @@ Ordered rules mirror the business decision tree (spec: docs/superpowers/specs/
   6 name_only        normalized name equal, nothing else                -> review
   7 weak_signal      only VAT/DBID/host/email-domain/fuzzy point at one -> review
   8 no_match         nothing                                            -> create_new
+
+`skip` is terminal: no accepted LF match means the lead can't be identified, so it is
+excluded from account AND contact matching and never converts (Stage 2 drops it even if
+approved). `review` is reserved for cases where a candidate account IS surfaced and a
+human must adjudicate.
 
 Contact matching keeps its identifier signals (kununu user UUID / email); numeric
 scores survive only as contact-side display metadata.
@@ -153,7 +158,7 @@ class ExistingRecords:
 # --- rule engine ---------------------------------------------------------------
 
 RULE_DECISIONS = {
-    "no_lf_match": "review",
+    "no_lf_match": "skip",
     "name_address": "link",
     "name_vat": "link",
     "kununu_agree": "link",
@@ -325,6 +330,12 @@ def match_contact(
 
 
 def match_lead(enriched: EnrichedLead, existing: ExistingRecords, settings) -> MatchResult:
+    # No accepted LeadFeeder company match ⇒ exclude the lead from account AND contact
+    # dedup entirely (don't even surface candidate evidence). Terminal skip, not review:
+    # there is no candidate for a human to adjudicate, and it never converts.
+    if not enriched.matched:
+        return MatchResult(enriched=enriched, account=None, contact=None,
+                           decision=RULE_DECISIONS["no_lf_match"], rule="no_lf_match")
     rule, account, evidence = evaluate_account_rules(enriched, existing, settings)
     account_id = account.account_id if account else None
     contact = match_contact(enriched, existing, account_id, settings)

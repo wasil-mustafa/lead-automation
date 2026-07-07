@@ -101,11 +101,11 @@ def test_stage1_matches_links_and_advances_watermark(tmp_path):
     # company match; rule 1 (no_lf_match) always reviews, even though the account carries
     # the same kununu profile UUID the task's Description parses out (see brief invariant).
     assert r.rule == "no_lf_match"
-    assert r.decision == "review"
+    assert r.decision == "skip"  # terminal skip, not review — nothing to adjudicate
     assert r.account is None
-    # Contact matching is independent of the account rule: the kununu user UUID identifier
-    # signal still resolves the existing Contact.
-    assert r.contact.contact_id == "003C"
+    # No accepted LF match excludes the lead from BOTH account and contact matching — the
+    # kununu user UUID identifier signal is NOT resolved to the existing Contact.
+    assert r.contact is None
     # watermark advanced to the task's CreatedDate
     assert res.new_state.last_task_created == "2026-06-19T10:00:00.000+0000"
     assert "T1" in res.new_state.processed_task_ids
@@ -175,6 +175,18 @@ def test_targets_from_approved_skips_unapproved():
     ]
     targets = targets_from_approved(rows, SETTINGS)
     assert targets == [ConversionTarget(LEAD3, account_id=None, contact_id=None)]
+
+
+def test_targets_from_approved_drops_approved_skip_rows():
+    # A terminal skip (no LF match) never converts, even if a reviewer ticked Approve?.
+    rows = [
+        {"Approve?": "yes", "lead_id": LEAD1, "account_match_id": "", "contact_match_id": "",
+         "decision": "skip"},
+        {"Approve?": "yes", "lead_id": LEAD2, "account_match_id": "", "contact_match_id": "",
+         "decision": "create_new"},
+    ]
+    targets = targets_from_approved(rows, SETTINGS)
+    assert targets == [ConversionTarget(LEAD2, account_id=None, contact_id=None)]
 
 
 def test_targets_from_approved_rejects_malformed_id():
