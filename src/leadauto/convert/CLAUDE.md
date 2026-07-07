@@ -15,18 +15,33 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
      (identifier signals). Weaker reasons (`contact_email_global`, `linkedin`) deliberately
      create a fresh Contact under the linked Account.
    - Blanking `account_match_id`/`contact_match_id` in the CSV forces create-new.
+   - Two new CSV columns (`lf_company_id`, `kununu_profile_uuid`) are captured for clustering
+     and pool-account enrichment; `kununu_url` is also read for conflict detection.
 3. run_preflight (convert/preflight.py) re-queries the approved leads' current state and drops
    any lead failing the "Conversion requirements" below — failures land in preflight_failures.csv
    (uploaded with the stage-2 log) and Stage2Result.preflight_failures; --no-preflight bypasses.
-4. `convert_leads` runs anonymous Apex per batch (default **10**, `--batch-size`; kept small
-   because each conversion cascades Account/Contact triggers, flows and validation/duplicate
-   rules synchronously in one transaction — 50/tx risks governor limits):
-   bulk `Database.convertLead(list, allOrNone=false)`, per-lead `setAccountId`/`setContactId`,
-   `setDoNotCreateOpportunity(true)`, `setOwnerId(config owner_id)`. Converted status is
-   resolved dynamically in Apex: the configured label if the org has it, else the org's first
-   converted `LeadStatus` by `SortOrder`. The whole body is wrapped in try/catch — any uncaught
-   exception reports every not-yet-reported lead as failed, so a batch can never vanish silently.
-5. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob (emitted at
+4. `resolve_pool_links` (convert/pool_enrich.py) enriches linked Accounts owned by the pool
+   (`Owner.Name='Rohdaten Pool'`, keyed by config `salesforce.rohdaten_pool_owner_id`): for each
+   approved lead linking an Account, reads the Account's current `KN_KununuProfileLink__c` and
+   compares it to the lead's `kununu_profile_uuid` from the CSV. Kununu identity gate: blank →
+   fill, equal → no-op, present-and-different → conflict (route to review, skip+report like
+   preflight). Same for `KN_KununuProfileUrl__c`/`kununu_url` (normalized). Live runs overwrite
+   the Account's address/employee/region/VAT fields from the lead's enrichment where they differ
+   (fill-only-blank semantics); dry runs pass. Targets failing the identity gate are dropped
+   from conversion.
+5. `convert_leads` (convert/converter.py) clusters create-new leads by `lf_company_id`: groups
+   of leads with the same company ID are deduplicated into one primary (the first in sort order)
+   that creates a new Account, and secondaries that link to the primary's new Account. If a
+   primary fails conversion, its secondaries are reported as failed orphans (not converted).
+   Conversion runs anonymous Apex per batch (default **10**, `--batch-size`; kept small because
+   each conversion cascades Account/Contact triggers, flows and validation/duplicate rules
+   synchronously in one transaction — 50/tx risks governor limits): bulk `Database.convertLead
+   (list, allOrNone=false)`, per-lead `setAccountId`/`setContactId`, `setDoNotCreateOpportunity
+   (true)`, `setOwnerId(config owner_id)`. Converted status is resolved dynamically in Apex: the
+   configured label if the org has it, else the org's first converted `LeadStatus` by `SortOrder`.
+   The whole body is wrapped in try/catch — any uncaught exception reports every not-yet-reported
+   lead as failed, so a batch can never vanish silently.
+6. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob (emitted at
    `LoggingLevel.ERROR` so no debug-log filter drops it) decoded by `parse_results` — never
    regex-scrape debug lines. `convert_leads` reconciles the returned leadIds against its input:
    leads already converted before the run get an explicit `alreadyConverted` result row (so a

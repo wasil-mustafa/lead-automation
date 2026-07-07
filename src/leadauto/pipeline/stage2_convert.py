@@ -5,8 +5,9 @@ This stage reads those rows, turns each into a `ConversionTarget` — linking th
 Account when present and the matched Contact only when its match reason is an identifier
 signal — and runs the match-aware, idempotent bulk conversion. `dry_run` performs no
 conversion. A read-only preflight (convert/preflight.py) re-checks each approved lead's
-current field state against the org's conversion rules and skips+reports failures before
-any Apex runs.
+current field state against the org's conversion rules and skips+reports failures. Pool-owned
+linked Accounts are enriched and kununu profile-identity conflicts are routed to review before
+any Apex runs (convert/pool_enrich.py).
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..convert import ConversionTarget, convert_leads
+from ..convert.pool_enrich import resolve_pool_links
 from ..convert.preflight import run_preflight, write_failures_csv
 from ..logging import get_logger
 
@@ -84,7 +86,12 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
                         "account link alongside a contact link; converting create-new instead",
                         line, lead_id, contact_id)
             contact_id = None
-        targets.append(ConversionTarget(lead_id, account_id=account_id, contact_id=contact_id))
+        targets.append(ConversionTarget(
+            lead_id, account_id=account_id, contact_id=contact_id,
+            lf_company_id=(row.get("lf_company_id") or "").strip() or None,
+            kununu_profile_uuid=(row.get("kununu_profile_uuid") or "").strip() or None,
+            kununu_url=(row.get("kununu_url") or "").strip() or None,
+        ))
     if bad_ids:
         raise ValueError(
             "Malformed Salesforce Id(s) in the approved CSV — fix the file and re-run: "
@@ -112,6 +119,17 @@ def run_stage2(
         if pf_failures:
             log.warning("Preflight skipped %d lead(s); details -> %s",
                         len({f['lead_id'] for f in pf_failures}), path)
+    # Pool-account enrichment + kununu conflict gate (link targets only). Writes only on
+    # live runs; kununu conflicts are dropped from conversion and reported like preflight.
+    link_targets = [t for t in targets if t.account_id]
+    other_targets = [t for t in targets if not t.account_id]
+    kept_links, review_failures = resolve_pool_links(
+        sf_client, link_targets, settings, dry_run=dry_run, logger=log)
+    targets = kept_links + other_targets
+    if review_failures:
+        pf_failures.extend(review_failures)
+        write_failures_csv(pf_failures, failures_csv)
+        log.warning("Routed %d lead(s) to review (kununu conflict)", len(review_failures))
     log.info("Stage 2: %d approved row(s) -> %d conversion target(s) (dry_run=%s)",
              len(rows), len(targets), dry_run)
     result = convert_leads(sf_client, targets, settings,

@@ -193,11 +193,27 @@ def test_contact_link_dropped_without_account_link():
     assert targets == [ConversionTarget(LEAD1, account_id=None, contact_id=None)]
 
 
+def test_targets_from_approved_carries_pool_and_cluster_keys():
+    rows = [{"Approve?": "yes", "lead_id": LEAD1, "account_match_id": ACCT1,
+             "contact_reason": "kununu_user_uuid", "contact_match_id": "",
+             "lf_company_id": "LF-1", "kununu_profile_uuid": "puid-1",
+             "kununu_url": "https://www.kununu.com/de/acme"}]
+    t = targets_from_approved(rows, SETTINGS)[0]
+    assert t.lf_company_id == "LF-1"
+    assert t.kununu_profile_uuid == "puid-1"
+    assert t.kununu_url == "https://www.kununu.com/de/acme"
+
+
 # --- Stage 2 orchestration ---------------------------------------------------
 
 class FakeApexClient:
     def __init__(self):
         self.apex_calls = []
+
+    def query(self, soql, bulk=False):
+        # No pool-owned accounts/leads in these orchestration fixtures: resolve_pool_links
+        # finds nothing to enrich and every link target passes through unchanged.
+        return []
 
     def apex_run(self, apex):
         self.apex_calls.append(apex)
@@ -288,6 +304,7 @@ class _PreflightSettings:
     dry_run = False
     owner_id = "005X"
     converted_status = "Qualified"
+    rohdaten_pool_owner_id = None  # no pool owner configured -> resolve_pool_links passes through
 
 
 def _approved_csv(tmp_path, rows, name="approved_x.csv"):
@@ -345,3 +362,24 @@ def test_stage2_preflight_writes_csv_even_with_zero_targets(tmp_path):
     assert not client.apex_calls
     assert (tmp_path / "pf.csv").exists()
     assert (tmp_path / "pf.csv").read_text(encoding="utf-8").strip() == "lead_id,check,value,detail"
+
+
+# --- Stage 2: pool-account enrichment + conflict gate ------------------------
+
+def test_run_stage2_routes_kununu_conflict_to_failures(tmp_path, monkeypatch):
+    from leadauto.pipeline import stage2_convert
+
+    def fake_resolve(client, link_targets, settings, *, dry_run=False, logger=None):
+        # simulate: the single link is a kununu conflict -> dropped + reported
+        return [], [{"lead_id": LEAD1, "check": "kununu_uuid_conflict",
+                     "value": ACCT1, "detail": "conflict"}]
+
+    monkeypatch.setattr(stage2_convert, "resolve_pool_links", fake_resolve)
+    p = tmp_path / "approved.csv"
+    _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
+                         "contact_score": "1.0", "Approve?": "yes"}])
+    client = FakeApexClient()
+    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False,
+                     failures_csv=tmp_path / "preflight_failures.csv")
+    assert client.apex_calls == []                 # conflicted lead never converted
+    assert any(f["check"] == "kununu_uuid_conflict" for f in res.preflight_failures)

@@ -104,6 +104,34 @@ _CONTACT_MATCH_FIELDS = (
 )
 
 
+# --- Stage 2 pool-account enrichment ----------------------------------------
+_ACCOUNT_POOL_FIELDS = (
+    "Id, OwnerId, KN_KununuLinkProfile__c, KN_KununuProfileUuid__c, "
+    "KN_KununuProfileName__c, KN_Region__c, KN_VATNumber__c, KN_EmployeeCategory__c, "
+    "KN_KununuProfileClaimed__c, KN_KununuProfileClaimedat__c, "
+    "BillingStreet, BillingCity, BillingPostalCode, BillingCountryCode"
+)
+_LEAD_POOL_FIELDS = (
+    "Id, KN_KununuProfileName__c, KN_Region__c, KN_VATNumber__c, KN_Employee__c, "
+    "KN_KununuProfileClaimed__c, KN_KununuProfileClaimedAt__c, "
+    "Street, City, PostalCode, CountryCode"
+)
+
+
+def accounts_pool_fields(ids: Sequence[str]) -> str:
+    """Owner + kununu identity + mapped enrichment fields for candidate linked Accounts."""
+    if not ids:
+        raise ValueError("accounts_pool_fields requires at least one Id")
+    return f"SELECT {_ACCOUNT_POOL_FIELDS} FROM Account WHERE Id IN ({_in_list(ids)})"
+
+
+def leads_pool_enrich(ids: Sequence[str]) -> str:
+    """Lead fields used to build the pool-Account overwrite payload."""
+    if not ids:
+        raise ValueError("leads_pool_enrich requires at least one Id")
+    return f"SELECT {_LEAD_POOL_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
+
+
 def _like_escape(needle: str) -> str:
     """Strip characters unsafe inside a single-quoted SOQL LIKE pattern.
 

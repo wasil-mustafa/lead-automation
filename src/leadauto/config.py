@@ -64,6 +64,12 @@ class Settings:
         return self.raw["salesforce"].get("owner_id")
 
     @property
+    def rohdaten_pool_owner_id(self) -> str | None:
+        """OwnerId of the 'Rohdaten Pool' user; linked Accounts with this owner are
+        the only ones the Stage 2 pool-enrichment step may update."""
+        return self.raw["salesforce"].get("rohdaten_pool_owner_id")
+
+    @property
     def campaign_id(self) -> str | None:
         return self.raw["salesforce"].get("campaign_id")
 

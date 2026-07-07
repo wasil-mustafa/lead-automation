@@ -224,3 +224,22 @@ def test_convert_blockers_empty_when_payload_fills_gaps():
     header = [c.value for c in ws[1]]
     blockers = ws.cell(row=2, column=header.index("convert_blockers") + 1).value
     assert not blockers  # write-back payload satisfies employee/dbid/address checks
+
+
+def test_review_sheet_carries_cluster_and_conflict_keys():
+    from leadauto.extract.models import ExtractedLead
+    from leadauto.leadfeeder.enrich import EnrichedLead
+    from leadauto.match import MatchResult
+    from leadauto.qa_artifact import REVIEW_COLUMNS, build_workbook
+
+    assert "lf_company_id" in REVIEW_COLUMNS and "kununu_profile_uuid" in REVIEW_COLUMNS
+    e = ExtractedLead(lead_id="00Q1", task_id="00T1", task_type="claimer",
+                      company_name="Acme GmbH", kununu_profile_uuid="puid-123")
+    enr = EnrichedLead(extracted=e, matched=True, lf_company_id="LF-999")
+    res = MatchResult(enriched=enr, account=None, contact=None, decision="create_new")
+    ws = build_workbook([res], [], meta={})["Review"]
+    headers = [c.value for c in next(ws.iter_rows(max_row=1))]
+    idx = {h: i for i, h in enumerate(headers)}
+    row = list(ws.iter_rows(min_row=2, values_only=True))[0]
+    assert row[idx["lf_company_id"]] == "LF-999"
+    assert row[idx["kununu_profile_uuid"]] == "puid-123"

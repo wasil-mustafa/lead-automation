@@ -198,3 +198,65 @@ def test_convert_leads_no_sentinel_marks_whole_batch_missing():
     assert res["converted"] == 0
     assert res["missing"] == 2
     assert set(res["missing_ids"]) == {"00Q1", "00Q2"}
+
+
+# --- two-phase same-company clustering ---------------------------------------
+
+class _ClusterApexClient:
+    """Per-primary account ids so secondaries can link; records each phase's apex."""
+    def __init__(self):
+        self.calls = []
+
+    def apex_run(self, apex: str) -> str:
+        self.calls.append(apex)
+        head = apex.split("Map<Id,Id>", 1)[0]
+        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
+        out = []
+        for i in ids:
+            # a lead already linked (appears in acctByLead map) echoes that account;
+            # otherwise it "creates" account 001<lead>.
+            out.append({"leadId": i, "success": True, "accountId": f"001{i}"})
+        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+
+
+def test_convert_leads_clusters_same_company_create_new():
+    client = _ClusterApexClient()
+    targets = [ConversionTarget("00Q1", lf_company_id="LF-1"),
+               ConversionTarget("00Q2", lf_company_id="LF-1"),
+               ConversionTarget("00Q3", lf_company_id="LF-2")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
+    assert res["converted"] == 3 and res["failed"] == 0 and res["missing"] == 0
+    # Phase 2 ran and linked 00Q2 to the account 00Q1 created (00100Q1).
+    phase2 = client.calls[-1]
+    assert "00Q2" in phase2 and "'00Q2' => '00100Q1'" in phase2
+
+
+def test_convert_leads_blank_company_not_clustered():
+    client = _ClusterApexClient()
+    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]  # both blank lf_company_id
+    res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
+    assert res["converted"] == 2
+    # single phase only (no secondaries) -> exactly one apex call
+    assert len(client.calls) == 1
+
+
+def test_convert_leads_orphan_secondary_when_primary_fails():
+    class _PrimaryFailsClient:
+        def __init__(self):
+            self.calls = []
+
+        def apex_run(self, apex):
+            self.calls.append(apex)
+            head = apex.split("Map<Id,Id>", 1)[0]
+            ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
+            out = [{"leadId": i, "success": False, "errors": ["DUPLICATE"]} for i in ids]
+            return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+
+    client = _PrimaryFailsClient()
+    targets = [ConversionTarget("00Q1", lf_company_id="LF-1"),
+               ConversionTarget("00Q2", lf_company_id="LF-1")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
+    assert res["converted"] == 0
+    assert res["failed"] == 2          # primary failed + secondary reported failed
+    assert res["missing"] == 0
+    assert len(client.calls) == 1      # no phase 2 (primary produced no account)

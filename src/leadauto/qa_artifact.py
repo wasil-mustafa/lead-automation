@@ -20,10 +20,10 @@ from .writeback import lead_field_payload
 
 REVIEW_COLUMNS = [
     "lead_id", "task_id", "task_type", "subject",
-    "company", "kununu_url", "region",
+    "company", "kununu_url", "kununu_profile_uuid", "region",
     "contact_name", "contact_email",
     "lf_matched", "lf_matched_name", "lf_match_score", "lf_name_agreement", "lf_agreed_via",
-    "lf_city", "lf_employees", "lf_industry", "lf_website",
+    "lf_city", "lf_employees", "lf_industry", "lf_website", "lf_company_id",
     "match_rule", "match_evidence",
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
@@ -86,6 +86,8 @@ def _review_row(result) -> dict:
         "lf_agreed_via": enr.agreed_via,
         "lf_city": company.get("City"), "lf_employees": company.get("Employee_Count"),
         "lf_industry": company.get("Industry"), "lf_website": company.get("Website"),
+        "lf_company_id": enr.lf_company_id,
+        "kununu_profile_uuid": e.kununu_profile_uuid,
         "match_rule": result.rule,
         "match_evidence": "; ".join(result.evidence),
         "account_match_id": acct.account_id if acct else None,
