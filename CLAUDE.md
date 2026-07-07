@@ -162,14 +162,20 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ### Matching, rule engine & shadow backtest
 
-- **Dublettencheck rule engine** (`match.py`): ordered 8 rules, first hit wins —
+- **Dublettencheck rule engine** (`match.py`): ordered 10 rules, first hit wins —
   `no_lf_match`→**skip**, `name_address`→link, `name_vat`→link, `kununu_agree`→link,
-  `kununu_conflict`→review, `name_only`→review, `weak_signal`→review, `no_match`→create_new.
+  `kununu_conflict`→review, `name_corroborated`→link, `name_only`→review, `duplicate`→review,
+  `weak_signal`→review, `no_match`→create_new.
   **Invariant: no accepted LF match ⇒ terminal `skip`** — the lead is excluded from BOTH account
   and contact matching (`match_lead` short-circuits: no account, no contact, no evidence), and
-  Stage 2 drops an approved `skip` row rather than converting it. `review` is reserved for cases
-  where a candidate account IS surfaced and a human must adjudicate (kununu_conflict / name_only /
-  weak_signal). Decisions: `link | review | create_new | skip`. In shadow-compare a `skip` lead a
+  Stage 2 drops an approved `skip` row rather than converting it. **`name_corroborated`** = normalized
+  name equal AND an independent weak signal (VAT/DBID/host/email-domain/fuzzy) on the SAME account
+  (two axes ⇒ auto-link; if the corroborator singles out one account it also disambiguates a name
+  collision). **`name_only`** = name equal on exactly one account, nothing else. **`duplicate`** =
+  name equal on 2+ accounts, none singled out (the org already holds duplicate accounts) — evidence
+  surfaces EVERY candidate (`name→001A,001B`) instead of silently linking the first. `review` is
+  reserved for cases where a candidate account IS surfaced and a human must adjudicate (kununu_conflict
+  / name_only / duplicate / weak_signal). Decisions: `link | review | create_new | skip`. In shadow-compare a `skip` lead a
   human later converted scores as a coverage-gap **miss**. No score thresholds; `MatchResult`
   carries `rule` + `evidence`
   (demoted VAT/DBID/host/email-domain/fuzzy hits are review evidence only). `name_address` =
@@ -213,9 +219,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 ## Git
 
 Remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
-scheduler runs** — fixes must land there; no active feature branch. PR history (#1–#18: LF
+scheduler runs** — fixes must land there; no active feature branch. PR history (#1–#22: LF
 throttle/batching, Bulk-API 431 fix, CI login hardening, name-agreement gate, alt-names gate,
 country-drop, employee bins, LF null-crash fix, queue scope + schedule, rule engine + shadow,
 Task-status freshness, scheduled-gate fix, write-back gaps + Stage 2 preflight, own-company email
-exclusion, Stage 2 conversion hardening, pool-account enrichment + same-company dedup) lives in
-git log/GitHub — don't re-document it here.
+exclusion, Stage 2 conversion hardening, pool-account enrichment + same-company dedup, terminal
+no_lf_match skip, name_corroborated + duplicate rules) lives in git log/GitHub — don't re-document
+it here.
