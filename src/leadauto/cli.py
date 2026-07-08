@@ -134,6 +134,32 @@ def stage2(
         raise typer.Exit(code=1)
 
 
+@app.command("backtest-skipped")
+def backtest_skipped(
+    leadfeeder: bool = typer.Option(True, "--leadfeeder/--no-leadfeeder",
+                                    help="Disable to skip LeadFeeder (all cases become no_lf_match)."),
+    kununu_feed: bool = typer.Option(True, "--kununu-feed/--no-kununu-feed",
+                                     help="Disable the kununu profile feed (assigned-company alt names)."),
+    xlsx: Path = typer.Option(REPO_ROOT / "backtest_skipped.xlsx", "--xlsx",
+                              help="Report output path."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
+) -> None:
+    """Backtest skipped tasks (converted leads / contact-attached) against the rule engine."""
+    from .backtest_skipped import run_backtest
+
+    log = get_logger("cli.backtest")
+    settings = Settings.load(config)
+    sf = _build_sf_client(settings, log)
+    lf = None
+    if leadfeeder and settings.leadfeeder_api_key:
+        lf = _build_lf_client(settings, log)
+    elif leadfeeder:
+        log.warning("LEADFEEDER_API_KEY not set; running without enrichment")
+    res = run_backtest(sf, lf, settings, xlsx_path=xlsx, kununu_feed=kununu_feed, logger=log)
+    typer.echo(f"Backtest done: counts={res['counts']} tally={res.get('tally')} "
+               f"| xlsx={res.get('xlsx')}")
+
+
 @app.command("shadow-compare")
 def shadow_compare(
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),

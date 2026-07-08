@@ -1,0 +1,88 @@
+name: Lead Automation — Backtest skipped tasks
+
+# One-off analysis job: rebuild the tasks Stage 1 skips ("lead not found or already
+# converted" — mostly tasks re-parented onto Contacts at Lead conversion), run them
+# through LeadFeeder + the Dublettencheck rule engine, and score the engine's account
+# pick against the account the human actually chose. Read-only against Salesforce;
+# spends LeadFeeder company-retrieve credits only. Dispatch-only, commits nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      leadfeeder:
+        description: "Use LeadFeeder enrichment (uncheck to skip credits — all cases become no_lf_match)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    env:
+      SF_AUTOUPDATE_DISABLE: "true"
+      SF_DISABLE_TELEMETRY: "true"
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global @salesforce/cli@2.140.6
+          sf --version
+
+      - name: Compute feed cache key
+        id: feedkey
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache kununu profile feed
+        uses: actions/cache@v4
+        with:
+          path: kununu_profiles.jsonl
+          key: kununu-feed-${{ steps.feedkey.outputs.date }}
+          restore-keys: kununu-feed-
+
+      - name: Authenticate to Salesforce
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+        run: |
+          for attempt in 1 2 3; do
+            printf '%s' "$SFDX_AUTH_URL" > auth.txt
+            if sf org login sfdx-url --sfdx-url-file auth.txt --alias headless --set-default; then
+              rm -f auth.txt
+              echo "Authenticated on attempt $attempt."
+              exit 0
+            fi
+            rm -f auth.txt
+            echo "Auth attempt $attempt failed; retrying in 10s..." >&2
+            sleep 10
+          done
+          echo "Salesforce authentication failed after 3 attempts." >&2
+          exit 1
+
+      - name: Run backtest
+        env:
+          PYTHONPATH: src
+          LEADFEEDER_API_KEY: ${{ secrets.LEADFEEDER_API_KEY }}
+          KUNUNU_API_TOKEN: ${{ secrets.KUNUNU_API_TOKEN }}
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.leadfeeder }}" = "false" ]; then FLAGS="--no-leadfeeder"; fi
+          python -m leadauto backtest-skipped $FLAGS
+
+      - name: Upload backtest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-automation-backtest-${{ github.run_id }}
+          path: backtest_skipped.xlsx
+          if-no-files-found: warn

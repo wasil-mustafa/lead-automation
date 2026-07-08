@@ -45,7 +45,8 @@ def _contact_name(e: ExtractedLead) -> str | None:
 
 
 def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
-                 profiles=None, use_kununu_feed: bool = True) -> list[EnrichedLead]:
+                 profiles=None, use_kununu_feed: bool = True,
+                 include_contacts: bool = True) -> list[EnrichedLead]:
     log = logger or get_logger("leadfeeder.enrich")
     if not extracteds:
         return []
@@ -111,8 +112,10 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
             r.company = flatten_company(enriched.get(r.lf_company_id, {}))
 
     # Phase 3 — contact search cascade (free), then ONE batched detail retrieve (1 credit each).
+    # `include_contacts=False` skips the whole phase (backtests that only need the
+    # company side of enrichment shouldn't spend contact credits).
     search_hits: list[tuple[EnrichedLead, dict]] = []
-    for r in matched:
+    for r in matched if include_contacts else []:
         name = _contact_name(r.extracted)
         if not name:
             continue
