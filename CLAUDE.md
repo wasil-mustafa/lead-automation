@@ -34,13 +34,16 @@ Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artif
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 340 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 356 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
 $env:PYTHONPATH = "src"; python -m leadauto stage1 --dry-run --no-leadfeeder
 $env:PYTHONPATH = "src"; python -m leadauto stage2 --dry-run
 $env:PYTHONPATH = "src"; python -m leadauto shadow-compare
+# Backtest skipped (contact-reparented) tasks; LF needs Actions (key only in GH Secrets):
+#   gh workflow run backtest-skipped.yml   — locally only the no-credit plumbing check works:
+$env:PYTHONPATH = "src"; python -m leadauto backtest-skipped --no-leadfeeder
 
 # Read-only org inspection (alias `headless`); aggregates need --json, NOT csv
 sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --result-format json
@@ -62,7 +65,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   was removed. Shadow files committed every run; watermark only on non-dry. Stage 2 is dispatch-only.
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `dry_run: true`.
 - **NOT yet live:** Salesforce write-back and LeadConvert — no live write has ever run.
-  The Dublettencheck rule distribution has only been smoke-tested WITHOUT LeadFeeder.
+  The Dublettencheck rules were validated WITH LeadFeeder by the 2026-07-08 skipped-task
+  backtest (87% correct account on 283 cases — see Matching section); the create_new path
+  is still only shadow-scored.
 - **Write-back fills conversion requirements** (NoOwnDBID tick, address via CountryCode, employee
   fallback, FirstName, Phone — fill-only-blank); **Stage 2 preflights** approved leads and
   skips+reports rule violations (preflight_failures.csv).
@@ -181,6 +186,24 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (demoted VAT/DBID/host/email-domain/fuzzy hits are review evidence only). `name_address` =
   normalized name + `BillingPostalCode` + `BillingCity`; `kununu_agree` splits on
   `matching.dedupe_name_agree_min` (85). QA Review sheet: `match_rule`/`match_evidence`.
+- **Skipped-task backtest (2026-07-08, Actions run 28937405531):** Salesforce **re-parents a
+  converted Lead's open Tasks onto the new Contact**, so Stage-1 "lead not found or already
+  converted" skips are contact-WhoId (`003…`) tasks — of 283: 47 traced to converted Leads
+  (`Lead.ConvertedContactId`, truth = `ConvertedAccountId`), 236 logged directly on existing
+  Contacts (no Lead ever; truth = `Contact.AccountId`). `python -m leadauto backtest-skipped`
+  (+ dispatch-only `backtest-skipped.yml`) replays them through the real enrich→match path,
+  spending LF **company** credits only (`enrich_leads(include_contacts=False)`). Results:
+  LF match 269/283 (95%); correct account 245/283 (87%: 235 link + 10 review-surfaced);
+  contact re-found 236/283. Of 24 misses: **14 = rule order** (truth sat in evidence as
+  `kununu_profile_uuid→…` but `name_address`/`name_vat` fired first on an org-duplicate;
+  humans follow the profile-UUID account — candidate fix: kununu-identity disagreement with
+  the name-rule target ⇒ review), 4 = engine linked the profile-carrying account while the
+  human chose another duplicate (defensible), 1 = **candidate-recall gap**:
+  `accounts_by_signals` matches `Name IN (…)` exactly, so normalized-equal spelling variants
+  ("GmbH & Co.KG." vs "Gmbh & Co. Kg") never enter the pool. Caveat: population is
+  link-biased (accounts existed — that's why they were skipped); validates dedupe, NOT
+  create_new. Gotcha: ~280 leads in one match batch blow the **100k-char SOQL limit** in
+  `accounts_by_signals` — the backtest chunks `load_existing_records` in batches of 40.
 - **Shadow backtest:** every DRY stage-1 run appends predictions to committed
   `state/predictions.jsonl`; `python -m leadauto shadow-compare` (in the scheduled workflow,
   read-only) scores them against real human conversions into `state/shadow_results.jsonl` +
@@ -205,8 +228,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    does not exist yet).
 2. **Task-type rollout:** `claimer` + `ebp_trial` are enabled; add `event`, then `content`,
    calibrating from the review sheet's false-match rate.
-3. **Validate the rule engine WITH LeadFeeder:** read the `match_rule`/Summary breakdown of the
-   next scheduled dry-run QA artifact; calibrate `dedupe_name_agree_min` if needed.
+3. **Validate the rule engine WITH LeadFeeder:** largely answered by the 2026-07-08 skipped-task
+   backtest (87% correct on 283 link-biased cases — see Matching section). Follow-ups from its
+   misses: (a) demote to review when the kununu-identity account disagrees with the
+   name_address/name_vat target (14/24 misses), (b) fix the `accounts_by_signals` exact-`Name IN`
+   recall gap (query/normalize name variants). Still read the scheduled dry-run QA artifacts for
+   the create_new side, which the backtest cannot validate.
 4. **Review shadow accuracy after a few days:** `shadow_comparison.xlsx` (Decisions = per-lead
    hit/miss vs the human-chosen account; Fields = enrichment agreement) — the go-live evidence.
 5. **Write-back idempotency (live-validation task):** confirm the real `sf data update bulk --json`
