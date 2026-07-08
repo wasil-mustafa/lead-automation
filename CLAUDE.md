@@ -167,10 +167,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ### Matching, rule engine & shadow backtest
 
-- **Dublettencheck rule engine** (`match.py`): ordered 10 rules, first hit wins —
-  `no_lf_match`→**skip**, `name_address`→link, `name_vat`→link, `kununu_agree`→link,
-  `kununu_conflict`→review, `name_corroborated`→link, `name_only`→review, `duplicate`→review,
-  `weak_signal`→review, `no_match`→create_new.
+- **Dublettencheck rule engine** (`match.py`): ordered 11 rules, first hit wins —
+  `no_lf_match`→**skip**, `name_address`→link, `name_vat`→link, `kununu_over_name`→link,
+  `kununu_agree`→link, `kununu_conflict`→review, `name_corroborated`→link, `name_only`→review,
+  `duplicate`→review, `weak_signal`→review, `no_match`→create_new.
   **Invariant: no accepted LF match ⇒ terminal `skip`** — the lead is excluded from BOTH account
   and contact matching (`match_lead` short-circuits: no account, no contact, no evidence), and
   Stage 2 drops an approved `skip` row rather than converting it. **`name_corroborated`** = normalized
@@ -180,7 +180,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   name equal on 2+ accounts, none singled out (the org already holds duplicate accounts) — evidence
   surfaces EVERY candidate (`name→001A,001B`) instead of silently linking the first. `review` is
   reserved for cases where a candidate account IS surfaced and a human must adjudicate (kununu_conflict
-  / name_only / duplicate / weak_signal). Decisions: `link | review | create_new | skip`. In shadow-compare a `skip` lead a
+  / name_only / duplicate / weak_signal). **`kununu_over_name`** = a profile-UUID/URL account exists
+  but `name_address`/`name_vat` fired on a *different* (org-duplicate) account → link the kununu
+  account, not the name/address duplicate (humans followed the profile account 14/14 in the
+  2026-07-08 backtest); evidence surfaces both (`name→<dup>` + `kununu_profile_uuid→<won>`). Only the
+  cross-account conflict triggers it — same-account name_address/name_vat keep their own rule.
+  Decisions: `link | review | create_new | skip`. In shadow-compare a `skip` lead a
   human later converted scores as a coverage-gap **miss**. No score thresholds; `MatchResult`
   carries `rule` + `evidence`
   (demoted VAT/DBID/host/email-domain/fuzzy hits are review evidence only). `name_address` =
@@ -230,8 +235,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    calibrating from the review sheet's false-match rate.
 3. **Validate the rule engine WITH LeadFeeder:** largely answered by the 2026-07-08 skipped-task
    backtest (87% correct on 283 link-biased cases — see Matching section). Follow-ups from its
-   misses: (a) demote to review when the kununu-identity account disagrees with the
-   name_address/name_vat target (14/24 misses), (b) fix the `accounts_by_signals` exact-`Name IN`
+   misses: (a) **DONE (2026-07-08): `kununu_over_name` rule shipped** — the kununu-identity account
+   (profile-UUID/URL hit) now wins over a `name_address`/`name_vat` hit on a *different* account,
+   linking the kununu account (humans followed it 14/14 in the misses) rather than demoting to
+   review. Standalone `kununu_conflict` review is unchanged; `name_corroborated`/`name_only`/
+   `duplicate` were already unreachable when a kununu account exists. (b) STILL OPEN — fix the
+   `accounts_by_signals` exact-`Name IN`
    recall gap (query/normalize name variants). Still read the scheduled dry-run QA artifacts for
    the create_new side, which the backtest cannot validate.
 4. **Review shadow accuracy after a few days:** `shadow_comparison.xlsx` (Decisions = per-lead

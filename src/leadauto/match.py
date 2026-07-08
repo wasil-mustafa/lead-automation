@@ -6,15 +6,19 @@ Ordered rules mirror the business decision tree (spec: docs/superpowers/specs/
   1  no_lf_match       no accepted LF company                             -> skip
   2  name_address      normalized name equal + postal code + city equal   -> link
   3  name_vat          normalized name equal + VAT equal                  -> link
-  4  kununu_agree      profile UUID/URL on an Account + name agreement    -> link
-  5  kununu_conflict   profile UUID/URL hit, name disagrees               -> review
-  6  name_corroborated normalized name equal + a weak signal on the SAME
+  4  kununu_over_name  a profile UUID/URL Account exists but name_address/
+                       name_vat pointed at a DIFFERENT account — the
+                       kununu-identity account wins (link IT, not the
+                       name/address duplicate)                            -> link
+  5  kununu_agree      profile UUID/URL on an Account + name agreement    -> link
+  6  kununu_conflict   profile UUID/URL hit, name disagrees               -> review
+  7  name_corroborated normalized name equal + a weak signal on the SAME
                        account (two independent axes)                     -> link
-  7  name_only         normalized name equal on one account, nothing else -> review
-  8  duplicate         normalized name equal on 2+ accounts, none singled
+  8  name_only         normalized name equal on one account, nothing else -> review
+  9  duplicate         normalized name equal on 2+ accounts, none singled
                        out — the org already holds duplicate accounts     -> review
-  9  weak_signal       only VAT/DBID/host/email-domain/fuzzy point at one -> review
-  10 no_match          nothing                                            -> create_new
+  10 weak_signal       only VAT/DBID/host/email-domain/fuzzy point at one -> review
+  11 no_match          nothing                                            -> create_new
 
 `skip` is terminal: no accepted LF match means the lead can't be identified, so it is
 excluded from account AND contact matching and never converts (Stage 2 drops it even if
@@ -165,6 +169,7 @@ RULE_DECISIONS = {
     "no_lf_match": "skip",
     "name_address": "link",
     "name_vat": "link",
+    "kununu_over_name": "link",
     "kununu_agree": "link",
     "name_corroborated": "link",
     "kununu_conflict": "review",
@@ -267,13 +272,21 @@ def _fire(enriched: EnrichedLead, existing: ExistingRecords, settings,
     if not enriched.matched:
         return "no_lf_match", None
     company = enriched.company or {}
+    # A profile-UUID/URL account is an exact kununu-identity hit. When name_address/
+    # name_vat would fire on a DIFFERENT account (an org-duplicate), the kununu account
+    # wins — humans follow the profile account (skipped-task backtest 2026-07-08, 14/14).
+    kununu_id = kununu[0]["Id"] if kununu else None
     for acct in name_accts:
         if _address_equal(acct, company):
+            if kununu_id and kununu_id != acct["Id"]:
+                return "kununu_over_name", AccountMatch(kununu_id, None, "kununu_over_name")
             return "name_address", AccountMatch(acct["Id"], None, "name_address")
     vat = _norm_vat(company.get("VAT_Id") or enriched.extracted.vat_number)
     if vat:
         for acct in name_accts:
             if _norm_vat(acct.get("KN_VATNumber__c")) == vat:
+                if kununu_id and kununu_id != acct["Id"]:
+                    return "kununu_over_name", AccountMatch(kununu_id, None, "kununu_over_name")
                 return "name_vat", AccountMatch(acct["Id"], None, "name_vat")
     if kununu:
         acct, _sig = kununu

@@ -210,6 +210,48 @@ def test_rule_kununu_beats_name_only():
     assert r.account.account_id == "001B"
 
 
+def test_rule_kununu_over_name_beats_name_address():
+    # A kununu-identity account (profile UUID/URL) wins over a name+address hit on a
+    # DIFFERENT (org-duplicate) account — humans follow the profile account (backtest
+    # 2026-07-08, 14/14). Links the kununu account, surfacing the overridden one.
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme GmbH", BillingPostalCode="10115", BillingCity="Berlin"),
+         _acct("001B", Name="Acme GmbH",
+               KN_KununuProfileUuid__c="puid-1")], [])
+    enr = _lf_enriched(extracted=_extracted(kununu_profile_uuid="puid-1"),
+                       company={"Postal_Code": "10115", "City": "Berlin"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "kununu_over_name" and r.decision == "link"
+    assert r.account.account_id == "001B"          # the kununu account wins
+    assert "name→001A" in r.evidence               # overridden name+address account surfaced
+    assert "kununu_profile_uuid→001B" in r.evidence
+
+
+def test_rule_kununu_over_name_beats_name_vat():
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme GmbH", KN_VATNumber__c="DE123"),
+         _acct("001B", Name="Acme GmbH",
+               KN_KununuLinkProfile__c="https://www.kununu.com/de/acme")], [])
+    enr = _lf_enriched(extracted=_extracted(kununu_url="kununu.com/de/acme"),
+                       company={"VAT_Id": "DE123"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "kununu_over_name" and r.decision == "link"
+    assert r.account.account_id == "001B"
+
+
+def test_rule_name_address_on_kununu_account_stays_name_address():
+    # When name+address and the kununu identity point at the SAME account there is no
+    # conflict — the stronger name_address rule fires as before (same link target).
+    ex = ExistingRecords.from_records(
+        [_acct("001A", Name="Acme GmbH", BillingPostalCode="10115", BillingCity="Berlin",
+               KN_KununuProfileUuid__c="puid-1")], [])
+    enr = _lf_enriched(extracted=_extracted(kununu_profile_uuid="puid-1"),
+                       company={"Postal_Code": "10115", "City": "Berlin"})
+    r = match_lead(enr, ex, SETTINGS)
+    assert r.rule == "name_address" and r.decision == "link"
+    assert r.account.account_id == "001A"
+
+
 def test_rule_name_only_reviews():
     ex = ExistingRecords.from_records([_acct("001A", Name="Acme GmbH")], [])
     r = match_lead(_lf_enriched(), ex, SETTINGS)
@@ -268,8 +310,9 @@ def test_rule_no_match_creates():
 
 def test_rule_decisions_cover_all_rules():
     assert set(RULE_DECISIONS) == {
-        "no_lf_match", "name_address", "name_vat", "kununu_agree", "name_corroborated",
-        "kununu_conflict", "name_only", "duplicate", "weak_signal", "no_match",
+        "no_lf_match", "name_address", "name_vat", "kununu_over_name", "kununu_agree",
+        "name_corroborated", "kununu_conflict", "name_only", "duplicate", "weak_signal",
+        "no_match",
     }
     assert set(RULE_DECISIONS.values()) == {"link", "review", "create_new", "skip"}
     assert RULE_DECISIONS["no_lf_match"] == "skip"
