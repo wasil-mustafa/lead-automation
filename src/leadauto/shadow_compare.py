@@ -54,25 +54,30 @@ def _norm_name(v):
     return str(v).strip().casefold() or None
 
 
-# (label, payload keys — first present wins, source record, org field, normalizer).
-# Payload keys mirror what write-back actually writes; the legacy KN_DB* second
-# keys keep scoring in-flight predictions recorded before write-back stopped
-# writing the D&B-owned fields.
+# (label, payload keys — first present wins, source record, org field, normalizer,
+#  lead prefill keys). Payload keys mirror what write-back actually writes; the legacy
+# KN_DB* second keys keep scoring in-flight predictions recorded before write-back
+# stopped writing the D&B-owned fields. Prefill keys are the Lead fields whose
+# presence makes fill-only-blank write-back deliberately omit the payload key —
+# scored "prefilled", not "lf_empty".
 _FIELD_CHECKS = [
     ("postal_code", ("PostalCode", "KN_DBPostalCode__c"),
-     "account", "BillingPostalCode", normalize_postal),
-    ("city", ("City", "KN_DBCity__c"), "account", "BillingCity", normalize_city),
-    ("country", ("CountryCode",), "account", "BillingCountryCode", _norm_country),
-    ("employee_bin", ("KN_Employee__c",), "lead", "KN_Employee__c", _norm_text),
-    ("first_name", ("FirstName",), "contact", "FirstName", _norm_name),
-    ("phone", ("Phone",), "contact", "Phone", normalize_phone),
+     "account", "BillingPostalCode", normalize_postal, ("PostalCode",)),
+    ("city", ("City", "KN_DBCity__c"), "account", "BillingCity", normalize_city,
+     ("City",)),
+    ("country", ("CountryCode",), "account", "BillingCountryCode", _norm_country,
+     ("Country", "CountryCode")),
+    ("employee_bin", ("KN_Employee__c",), "lead", "KN_Employee__c", _norm_text,
+     ("KN_Employee__c",)),
+    ("first_name", ("FirstName",), "contact", "FirstName", _norm_name, ("FirstName",)),
+    ("phone", ("Phone",), "contact", "Phone", normalize_phone, ("Phone",)),
 ]
 
 
-def _verdict(ours_raw, theirs_raw, norm) -> dict:
+def _verdict(ours_raw, theirs_raw, norm, prefilled: bool = False) -> dict:
     ours, theirs = norm(ours_raw), norm(theirs_raw)
     if ours is None:
-        status = "lf_empty"
+        status = "prefilled" if prefilled else "lf_empty"
     elif theirs is None:
         status = "human_empty"
     else:
@@ -84,9 +89,11 @@ def compare_fields(pred, lead: dict, account: dict | None,
                    contact: dict | None = None) -> dict:
     recs = {"lead": lead or {}, "account": account or {}, "contact": contact or {}}
     out = {}
-    for label, pkeys, source, okey, norm in _FIELD_CHECKS:
+    for label, pkeys, source, okey, norm, lkeys in _FIELD_CHECKS:
         ours = next((pred.payload[k] for k in pkeys if pred.payload.get(k) is not None), None)
-        out[label] = _verdict(ours, recs[source].get(okey), norm)
+        # bulk-export nulls arrive as '' — strip before deciding "the lead had it"
+        prefilled = any(str(recs["lead"].get(k) or "").strip() for k in lkeys)
+        out[label] = _verdict(ours, recs[source].get(okey), norm, prefilled=prefilled)
     out["website"] = _verdict(pred.lf_website, recs["account"].get("Website"), normalize_host)
     return out
 
@@ -243,7 +250,9 @@ def _write_xlsx(new_results, rpath, stats, now, xpath) -> None:
         b[r["result"]] += 1
         for label, f in r.get("fields", {}).items():
             fa = field_agg.setdefault(label, {"agree": 0, "differ": 0,
-                                              "human_empty": 0, "lf_empty": 0})
+                                              "human_empty": 0, "lf_empty": 0,
+                                              "prefilled": 0})
+            fa.setdefault(f["status"], 0)
             fa[f["status"]] += 1
     for rule, b in sorted(by_rule.items()):
         scored = b["hit"] + b["miss"]
@@ -255,7 +264,8 @@ def _write_xlsx(new_results, rpath, stats, now, xpath) -> None:
         rate = f"{fa['agree'] / comparable:.0%}" if comparable else "n/a"
         summary.append([f"field_{label}", f"agree={fa['agree']} differ={fa['differ']} "
                                           f"human_empty={fa['human_empty']} "
-                                          f"lf_empty={fa['lf_empty']} rate={rate}"])
+                                          f"lf_empty={fa['lf_empty']} "
+                                          f"prefilled={fa['prefilled']} rate={rate}"])
     _add_sheet(wb, "Summary", ["metric", "value"], summary)
     xpath.parent.mkdir(parents=True, exist_ok=True)
     wb.save(xpath)

@@ -169,6 +169,41 @@ def test_field_agreement(tmp_path):
     assert "revenue_millions" not in f  # KN_DB* no longer written back
 
 
+def test_prefilled_lead_fields_score_prefilled_not_lf_empty(tmp_path):
+    # Write-back is fill-only-blank: when the Lead already carried FirstName/Phone/City,
+    # the payload omits them deliberately. That must score as "prefilled" (nothing for
+    # LF to contribute), not "lf_empty" (LF had no data) — live-observed 2026-07-09 on
+    # 00QMz00000mByJlMAK, where lf_empty misread as an enrichment gap.
+    preds = [_pred("00Q1", payload={"KN_Employee__c": "51-100"})]
+    client = FakeClient(
+        leads=[_lead(FirstName="Sven", Phone="+41415665555", City="Luzern",
+                     ConvertedContactId="003C")],
+        accounts=[_account(BillingCity="Luzern")],
+        contacts=[{"Id": "003C", "AccountId": "001A",
+                   "FirstName": "Sven", "Phone": "+41415665555"}])
+    _, _, rpath, _ = _run(tmp_path, preds, client)
+    import json
+    f = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])["fields"]
+    assert f["first_name"]["status"] == "prefilled"
+    assert f["phone"]["status"] == "prefilled"
+    assert f["city"]["status"] == "prefilled"
+    # nothing on the lead AND nothing in the payload is still a real LF gap
+    assert f["country"]["status"] == "lf_empty"
+    assert f["postal_code"]["status"] == "lf_empty"
+
+
+def test_prefilled_empty_string_from_bulk_export_is_not_prefilled(tmp_path):
+    # Bulk-export nulls arrive as '' — an empty-string lead field must not count
+    # as prefilled.
+    preds = [_pred("00Q1", payload={})]
+    client = FakeClient(leads=[_lead(FirstName="", Phone="")], accounts=[_account()])
+    _, _, rpath, _ = _run(tmp_path, preds, client)
+    import json
+    f = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])["fields"]
+    assert f["first_name"]["status"] == "lf_empty"
+    assert f["phone"]["status"] == "lf_empty"
+
+
 def test_field_agreement_legacy_payload_keys(tmp_path):
     # In-flight predictions recorded before write-back stopped writing the
     # D&B-owned KN_DB* fields must still score postal/city via the legacy keys.
