@@ -160,6 +160,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Agreement is the max across profile name / feed alt names / email-domain root; `agreed_via` and
   `name_agreement` flow into the QA Review sheet. Normalizers live in `textnorm.py` — do NOT import
   `match.py` from the LF client (import cycle via `enrich`).
+- **Post-retrieve match sanity gate** (`enrich._match_sanity_reason`, 2026-07-09, from the live
+  "SNG"→France miss): after the phase-2 company retrieve (match responses carry no country/domain),
+  an accepted match is degraded to unmatched (→ terminal skip; reason in `EnrichedLead.lf_rejected`
+  + QA `lf_rejected` column) when (a) the company's country contradicts the lead's
+  (`textnorm.country_iso2`, fails open on unmapped names) or (b) the lead name is acronym-like
+  (single token ≤3 chars, or 4-char uppercase) and neither lead-email-domain ↔ company
+  website/email domain nor VAT equality corroborates — acronym name agreement is tautological
+  since LF searched on the acronym we sent.
 - **kununu profile feed** (`kununu_feed.py`): daily-cached DWH bulk file (551 MB;
   `assigned_companies` = list of `{company_uuid, company_name}`) supplies alt names; joins on
   `profile_uuid` with URL-slug fallback; degrades to no-alt behavior without `KUNUNU_API_TOKEN`
