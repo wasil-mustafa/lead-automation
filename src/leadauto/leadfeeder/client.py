@@ -360,12 +360,27 @@ class LeadfeederClient:
         if not contacts and len(parts) > 1:
             contacts = _post(parts)
 
-        # Attempt 3: last name only, then verify first name locally
+        # A hyphenated name part also counts as matched via one of its segments:
+        # the lead may carry "Kothe-Spies" while LF stores just "Kothe" (or vice versa).
+        def _segments(part):
+            if "-" not in part:
+                return []
+            return [s for s in part.split("-") if len(s) >= 2]
+
+        def _part_in(part, full):
+            p = part.lower()
+            return p in full or any(s.lower() in full for s in _segments(part))
+
+        def _first_name_ok(c):
+            full = (c.get("attributes", {}).get("full_name", "") or "").lower()
+            return parts[0].lower() in full
+
+        # Attempt 3: last name only (then its hyphen segments), verify first name locally
         if not contacts and len(parts) > 1:
-            candidates = _post([parts[-1]])
-            filtered = [c for c in candidates
-                        if parts[0].lower() in (c.get("attributes", {}).get("full_name", "") or "").lower()]
-            contacts = filtered
+            for term in [parts[-1]] + _segments(parts[-1]):
+                contacts = [c for c in _post([term]) if _first_name_ok(c)]
+                if contacts:
+                    break
 
         # Attempt 4: browse the company's contacts, match all parts locally
         if not contacts:
@@ -374,7 +389,7 @@ class LeadfeederClient:
                                      params={"account_id": account_id, "page[size]": 50})
                 for c in resp.get("data", []):
                     full = (c.get("attributes", {}).get("full_name", "") or "").lower()
-                    if all(p.lower() in full for p in parts):
+                    if all(_part_in(p, full) for p in parts):
                         contacts = [c]
                         break
             except requests.exceptions.HTTPError:

@@ -316,6 +316,41 @@ def test_search_contact_returns_none_when_all_attempts_empty():
     assert client.search_contact("Jane Doe", "c1") is None
 
 
+def test_search_contact_tries_hyphen_segments_of_surname():
+    # Live miss 2026-07-09: task name "Susann Kothe-Spies", LF stores "Susann Kothe" —
+    # searching the unsplit surname can never hit. Segment searches must be tried.
+    def handler(params, body):
+        if body.get("search_terms") == ["Kothe"]:
+            return {"data": [{"id": "k7", "attributes": {"full_name": "Susann Kothe"}}]}
+        return {"data": []}
+    client = _client({("POST", "/contacts/search"): handler})
+    result = client.search_contact("Susann Kothe-Spies", "c1")
+    assert result == {"contact_id": "k7", "full_name": "Susann Kothe"}
+
+
+def test_search_contact_browse_filter_accepts_hyphen_segment():
+    # Same scenario when only the browse fallback (no search_terms) returns her:
+    # the local all-parts filter must accept "Kothe-Spies" via its segment "Kothe".
+    def handler(params, body):
+        if "search_terms" not in body:
+            return {"data": [{"id": "k8", "attributes": {"full_name": "Susann Kothe"}}]}
+        return {"data": []}
+    client = _client({("POST", "/contacts/search"): handler})
+    result = client.search_contact("Susann Kothe-Spies", "c1")
+    assert result == {"contact_id": "k8", "full_name": "Susann Kothe"}
+
+
+def test_search_contact_hyphen_segments_still_require_first_name():
+    # Segment matching must not loosen the first-name check: a different person
+    # sharing one surname segment is not a match.
+    def handler(params, body):
+        if body.get("search_terms") == ["Kothe"] or "search_terms" not in body:
+            return {"data": [{"id": "k9", "attributes": {"full_name": "Susann Kothe"}}]}
+        return {"data": []}
+    client = _client({("POST", "/contacts/search"): handler})
+    assert client.search_contact("Anna Kothe-Spies", "c1") is None
+
+
 # --- get_account_id ----------------------------------------------------------
 
 def test_get_account_id_caches():
