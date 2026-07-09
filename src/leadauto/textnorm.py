@@ -108,6 +108,40 @@ def domain_root(value: str | None) -> str | None:
     return root if len(root) >= 5 else None
 
 
+# Common English/German (+ a few local) country names for our lead population.
+# Deliberately small: country_iso2 fails open (None) on anything unmapped, so an
+# unknown spelling can never create a false country conflict.
+_COUNTRY_TO_ISO2 = {
+    "germany": "DE", "deutschland": "DE",
+    "austria": "AT", "österreich": "AT", "oesterreich": "AT",
+    "switzerland": "CH", "schweiz": "CH", "suisse": "CH", "svizzera": "CH",
+    "liechtenstein": "LI", "luxembourg": "LU", "luxemburg": "LU",
+    "france": "FR", "frankreich": "FR", "italy": "IT", "italien": "IT", "italia": "IT",
+    "netherlands": "NL", "niederlande": "NL", "nederland": "NL",
+    "belgium": "BE", "belgien": "BE", "poland": "PL", "polen": "PL", "polska": "PL",
+    "czech republic": "CZ", "czechia": "CZ", "tschechien": "CZ",
+    "slovakia": "SK", "slowakei": "SK", "slovenia": "SI", "slowenien": "SI",
+    "hungary": "HU", "ungarn": "HU", "croatia": "HR", "kroatien": "HR",
+    "denmark": "DK", "dänemark": "DK", "sweden": "SE", "schweden": "SE",
+    "norway": "NO", "norwegen": "NO", "finland": "FI", "finnland": "FI",
+    "spain": "ES", "spanien": "ES", "españa": "ES", "portugal": "PT",
+    "united kingdom": "GB", "great britain": "GB", "großbritannien": "GB",
+    "ireland": "IE", "irland": "IE", "greece": "GR", "griechenland": "GR",
+    "romania": "RO", "rumänien": "RO", "bulgaria": "BG", "bulgarien": "BG",
+    "turkey": "TR", "türkei": "TR", "united states": "US", "usa": "US",
+}
+
+
+def country_iso2(value) -> str | None:
+    """ISO2 for a 2-letter code or a common English/German country name; None if unknown."""
+    if not value:
+        return None
+    v = str(value).strip()
+    if len(v) == 2 and v.isalpha():
+        return v.upper()
+    return _COUNTRY_TO_ISO2.get(v.casefold())
+
+
 def normalize_postal(value: str | None) -> str | None:
     """Postal code with ALL whitespace removed (LF and org store it inconsistently)."""
     if not value:

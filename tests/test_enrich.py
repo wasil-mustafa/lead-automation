@@ -355,3 +355,97 @@ def test_alt_names_default_empty():
     """EnrichedLead.alt_names defaults to empty list."""
     r = EnrichedLead(extracted=_extracted())
     assert r.alt_names == []
+
+
+# --- post-retrieve match sanity gate (country conflict + acronym guard) -------
+# Live miss 2026-07-07 (00QMz00000mBy5FMAS): lead Company "SNG" (sng.ch, CH) was
+# LF-matched to a company named "Sng" in Gabarret, FRANCE — the acronym made name
+# agreement tautological, and the French firmographics (VAT FR..., address) were
+# staged for write-back. company_summary carries no country/domain, so the gate
+# runs after the phase-2 retrieve.
+
+def _sng(company="SNG", email="andreas@sng.ch", cc="CH"):
+    return _extracted(company=company, contact_name=None, contact_email=email,
+                      region="Switzerland", cc=cc)
+
+
+def test_country_conflict_rejects_match():
+    fc = FakeClient()
+    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "Sng"}}
+    fc.company_attrs = {"c1": {"url": "https://www.sng.ch",
+                               "address": {"country": "France"}}}
+    [r] = enrich_leads(fc, [_sng()], SETTINGS)
+    assert r.matched is False
+    assert r.company == {}
+    assert r.lf_rejected.startswith("country_conflict")
+    assert not any(c[0] == "search" for c in fc.calls)  # no contact credit spent
+
+
+def test_country_agreement_by_name_mapping_survives():
+    # LF returns country names, the lead carries ISO2 — "Switzerland" must map to CH.
+    fc = FakeClient()
+    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "Sng"}}
+    fc.company_attrs = {"c1": {"url": "https://www.sng.ch",
+                               "address": {"country": "Switzerland"}}}
+    [r] = enrich_leads(fc, [_sng()], SETTINGS)
+    assert r.matched is True
+    assert r.lf_rejected is None
+
+
+def test_acronym_match_without_corroboration_rejected():
+    # Same country, but nothing ties LF's "Sng" to the lead's sng.ch — acronym-only
+    # name agreement is tautological (we searched on "SNG") and must not be trusted.
+    fc = FakeClient()
+    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "Sng"}}
+    fc.company_attrs = {"c1": {"url": "https://elsewhere.ch",
+                               "address": {"country": "CH"}}}
+    [r] = enrich_leads(fc, [_sng()], SETTINGS)
+    assert r.matched is False
+    assert r.lf_rejected == "acronym_uncorroborated"
+
+
+def test_acronym_match_corroborated_by_domain_survives():
+    fc = FakeClient()
+    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "SNG AG"}}
+    fc.company_attrs = {"c1": {"url": "https://www.sng.ch/en",
+                               "address": {"country": "CH"}}}
+    [r] = enrich_leads(fc, [_sng()], SETTINGS)
+    assert r.matched is True
+    assert r.lf_rejected is None
+
+
+def test_acronym_match_corroborated_by_vat_survives():
+    fc = FakeClient()
+    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "SNG AG"}}
+    fc.company_attrs = {"c1": {"url": "https://elsewhere.ch", "vat_id": "CHE-165.603.061",
+                               "address": {"country": "CH"}}}
+    e = _sng(email="andreas@gmail.com")  # freemail: domain can't corroborate
+    e.vat_number = "CHE165603061"
+    [r] = enrich_leads(fc, [e], SETTINGS)
+    assert r.matched is True
+
+
+def test_four_letter_uppercase_acronym_guarded_but_not_ordinary_names():
+    fc = FakeClient()
+    fc.match_by_name = {
+        "ADAC": {"company_id": "c1", "match_score": 0.9, "matched_name": "Adac"},
+        "Acme GmbH": {"company_id": "c2", "match_score": 0.9, "matched_name": "Acme GmbH"},
+    }
+    fc.company_attrs = {"c1": {"url": "https://other.de", "address": {"country": "DE"}},
+                        "c2": {"url": "https://unrelated.de", "address": {"country": "DE"}}}
+    e1 = _extracted(company="ADAC", contact_name=None, contact_email="x@adac.de")
+    e2 = _extracted(company="Acme GmbH", contact_name=None, lead_id="00Q2", task_id="T2")
+    r1, r2 = enrich_leads(fc, [e1, e2], SETTINGS)
+    assert r1.matched is False            # uppercase 4-letter acronym, uncorroborated
+    assert r2.matched is True             # "Acme" is a name, not an acronym
+
+
+def test_no_countries_no_rejection():
+    # Fail open: without a country on either side the conflict check must not fire.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    e = _extracted(contact_name=None, cc=None, region=None)
+    [r] = enrich_leads(fc, [e], SETTINGS)
+    assert r.matched is True

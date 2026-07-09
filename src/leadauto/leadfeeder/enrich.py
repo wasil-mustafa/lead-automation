@@ -17,7 +17,7 @@ import requests
 from ..extract.models import ExtractedLead
 from ..kununu_feed import base_slug, load_profiles_for_leads
 from ..logging import get_logger
-from ..textnorm import normalize_name
+from ..textnorm import alnum, country_iso2, email_domain, normalize_host, normalize_name
 from .client import flatten_company, flatten_contact_details
 
 
@@ -26,6 +26,7 @@ class EnrichedLead:
     """An ExtractedLead plus whatever LeadFeeder returned. Feeds Module 3 (match/write-back)."""
     extracted: ExtractedLead
     matched: bool = False
+    lf_rejected: str | None = None  # post-retrieve sanity gate's rejection reason, or None
     lf_company_id: str | None = None
     matched_name: str | None = None
     match_score: float | None = None
@@ -35,6 +36,58 @@ class EnrichedLead:
     company: dict = field(default_factory=dict)   # flatten_company output (or {})
     contact_found: bool = False
     contact: dict = field(default_factory=dict)   # flattened details + contact_id/full_name
+
+
+def _domains_agree(a: str | None, b: str | None) -> bool:
+    """True when two hosts/domains identify the same site (subdomain-tolerant)."""
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def _is_acronymish(raw_name: str | None, norm_name: str | None) -> bool:
+    """Single-token names too short to identify a company: ≤3 chars always ('SNG'),
+    4 chars only when written as an uppercase acronym ('ADAC' yes, 'Acme' no)."""
+    if not norm_name or " " in norm_name:
+        return False
+    if len(norm_name) <= 3:
+        return True
+    return (len(norm_name) == 4
+            and any(t.isupper() and len(t) == 4 for t in (raw_name or "").split()))
+
+
+def _match_sanity_reason(e: ExtractedLead, company: dict) -> str | None:
+    """Post-retrieve sanity gate on an accepted LF match; a reason string rejects it.
+
+    Live miss 2026-07-07 (00QMz00000mBy5FMAS): lead "SNG" (sng.ch, CH) matched a
+    company named "Sng" in France, staging a stranger's VAT/address for write-back.
+    The match response (company_summary) carries no country or domain, so this must
+    run after the phase-2 company retrieve. Both checks fail open on missing data.
+
+    - country_conflict: the retrieved company's country contradicts the lead's.
+    - acronym_uncorroborated: acronym-like names make name agreement tautological
+      (LF searched on the acronym we sent), so the match must be corroborated by
+      the lead's email domain matching the company's website/email domain, or by
+      VAT equality against the task-extracted VAT.
+    """
+    lead_cc = next((cc for cc in (country_iso2(e.lead_country_code),
+                                  country_iso2(e.country_code),
+                                  country_iso2(e.lead_country)) if cc), None)
+    comp_cc = country_iso2(company.get("Country"))
+    if lead_cc and comp_cc and lead_cc != comp_cc:
+        return f"country_conflict:{comp_cc}!={lead_cc}"
+
+    if _is_acronymish(e.best_company, normalize_name(e.best_company)):
+        lead_dom = email_domain(e.contact_email or e.lead_email)
+        comp_doms = (normalize_host(company.get("Website")),
+                     email_domain(company.get("Company_Email")))
+        if any(_domains_agree(lead_dom, d) for d in comp_doms):
+            return None
+        lead_vat, comp_vat = alnum(e.vat_number), alnum(company.get("VAT_Id"))
+        if lead_vat and lead_vat == comp_vat:
+            return None
+        return "acronym_uncorroborated"
+    return None
 
 
 def _contact_name(e: ExtractedLead) -> str | None:
@@ -105,11 +158,22 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
 
     matched = [r for r in results if r.matched]
 
-    # Phase 2 — batch-retrieve firmographics for all matched companies (1 credit each).
+    # Phase 2 — batch-retrieve firmographics for all matched companies (1 credit each),
+    # then the sanity gate: a rejected match degrades to unmatched (-> terminal skip)
+    # so a wrong company's firmographics are never staged for write-back.
     if matched:
         enriched = client.retrieve_companies([r.lf_company_id for r in matched])
         for r in matched:
             r.company = flatten_company(enriched.get(r.lf_company_id, {}))
+            reason = _match_sanity_reason(r.extracted, r.company)
+            if reason:
+                log.warning("LF match rejected for %r (lf %s, matched %r): %s",
+                            r.extracted.best_company, r.lf_company_id,
+                            r.matched_name, reason)
+                r.lf_rejected = reason
+                r.matched = False
+                r.company = {}
+        matched = [r for r in matched if r.matched]
 
     # Phase 3 — contact search cascade (free), then ONE batched detail retrieve (1 credit each).
     # `include_contacts=False` skips the whole phase (backtests that only need the
