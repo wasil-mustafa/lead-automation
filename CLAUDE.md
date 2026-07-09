@@ -69,7 +69,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   backtest (87% correct account on 283 cases — see Matching section); the create_new path
   is still only shadow-scored.
 - **Write-back fills conversion requirements** (NoOwnDBID tick, address via CountryCode, employee
-  fallback, FirstName, Phone — fill-only-blank); **Stage 2 preflights** approved leads and
+  fallback — fill-only-blank) plus nice-to-haves (FirstName, Phone — Wasil's preference, NOT
+  conversion requirements); **Stage 2 preflights** approved leads and
   skips+reports rule violations (preflight_failures.csv).
 - **Stage 2 pool-account enrichment + same-company dedup** (PR #18): `resolve_pool_links`
   overwrite-enriches `Rohdaten Pool`-owned linked Accounts behind a kununu identity gate, and
