@@ -212,6 +212,30 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
         except requests.exceptions.RequestException as err:
             log.warning("add_contact_to_list failed for %s: %s", cid, err)
 
+    # Phase 3b — contacts without a direct dial (mobile never counts) go through LF's
+    # async 'Find contact details' external-provider lookup (1 credit only per contact
+    # that actually gains data), then ONE re-retrieve refreshes their details.
+    if search_hits and settings.lf_find_contact_data:
+        needy = [r for r, _ in search_hits
+                 if not (r.contact.get("phone_direct") or r.contact.get("phone_office"))]
+        if needy:
+            ids = [r.contact["contact_id"] for r in needy]
+            try:
+                done = client.find_contact_data(
+                    ids, timeout=settings.lf_find_details_timeout,
+                    poll_interval=settings.lf_find_details_poll)
+            except requests.exceptions.RequestException as err:
+                log.warning("find_contact_data failed for %d contact(s): %s", len(ids), err)
+                done = False
+            if done:
+                refreshed = client.retrieve_contacts(ids)
+                for r in needy:
+                    cid = r.contact["contact_id"]
+                    if cid in refreshed:
+                        r.contact = {**flatten_contact_details(refreshed[cid]),
+                                     "contact_id": cid,
+                                     "full_name": r.contact.get("full_name", "")}
+
     log.info("LeadFeeder: %d/%d matched, %d contact(s) found",
              len(matched), len(results), sum(1 for r in results if r.contact_found))
     return results

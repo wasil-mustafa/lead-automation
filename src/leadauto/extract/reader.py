@@ -57,8 +57,11 @@ def newest_task_per_who(tasks: list[dict]) -> list[dict]:
 
 
 def is_already_enriched(lead: dict) -> bool:
-    """KN_KununuProfileName__c doubles as the 'already processed' marker."""
-    return bool((lead.get("KN_KununuProfileName__c") or "").strip())
+    """KN_KununuLinkProfile__c doubles as the 'already processed' marker (it is always
+    part of the write-back). KN_KununuProfileName__c still counts: it was the previous
+    marker and a human-enriched lead carrying it needs no automation either way."""
+    return bool((lead.get("KN_KununuLinkProfile__c") or "").strip()
+                or (lead.get("KN_KununuProfileName__c") or "").strip())
 
 
 def read_extracted_leads(
@@ -109,7 +112,7 @@ def read_extracted_leads(
             continue
         if is_already_enriched(lead):
             result.skipped.append(Skipped(tid, who, subject,
-                                          "lead already enriched (KN_KununuProfileName__c set)"))
+                                          "lead already enriched (kununu marker field set)"))
             continue
         extracted = extract_lead(task, lead, settings)
         if extracted is None:

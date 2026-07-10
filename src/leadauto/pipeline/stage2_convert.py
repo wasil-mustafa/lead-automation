@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..convert import ConversionTarget, convert_leads
+from ..convert import ConversionTarget, convert_leads, enrich_contact_email2
 from ..convert.pool_enrich import resolve_pool_links
 from ..convert.preflight import run_preflight, write_failures_csv
 from ..logging import get_logger
@@ -97,6 +97,7 @@ def targets_from_approved(rows: list[dict], settings) -> list[ConversionTarget]:
             lf_company_id=(row.get("lf_company_id") or "").strip() or None,
             kununu_profile_uuid=(row.get("kununu_profile_uuid") or "").strip() or None,
             kununu_url=(row.get("kununu_url") or "").strip() or None,
+            lf_contact_email=(row.get("lf_contact_email") or "").strip() or None,
         ))
     if bad_ids:
         raise ValueError(
@@ -140,5 +141,9 @@ def run_stage2(
              len(rows), len(targets), dry_run)
     result = convert_leads(sf_client, targets, settings,
                            dry_run=dry_run, batch_size=batch_size, logger=log)
+    # Post-convert: LF contact email -> KN_Email2__c on NEW Contacts when it differs from
+    # the primary (task) email. No-op under dry_run (convert_leads returns no results).
+    result["email2"] = enrich_contact_email2(
+        sf_client, targets, result.get("results", []), logger=log)
     return Stage2Result(targets=targets, result=result, dry_run=dry_run,
                         preflight_failures=pf_failures)

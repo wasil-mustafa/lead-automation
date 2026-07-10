@@ -53,6 +53,13 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    re-run is a true no-op — counted `already_converted`, never `missing`), while any input lead
    with NO result row at all (dead run, lost sentinel) is counted `missing`. Only `failed`/
    `missing` fail the job; `already_converted` does not.
+7. **Post-convert email enrichment** (`converter.enrich_contact_email2`, called by `run_stage2`):
+   leads converted in this run into a NEW Contact (no contact link — linked existing Contacts
+   are never touched) whose Review-sheet row carried an `lf_contact_email` get that LF email
+   written to Contact `KN_Email2__c` ("Email 2", org-verified 2026-07-10) — only when it differs
+   from the Contact's primary Email (the task email mapped from the Lead) and `KN_Email2__c` is
+   still blank. Best-effort: a failure logs but never fails the conversion run; counts land in
+   `result["email2"]`. No-op under dry_run (there are no conversion results to enrich).
 
 ## Commands
 

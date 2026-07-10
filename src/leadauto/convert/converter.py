@@ -56,13 +56,15 @@ class ConversionTarget:
     """One Lead to convert; account_id/contact_id link to existing records when present.
 
     lf_company_id clusters same-company create-new leads; kununu_url/kununu_profile_uuid
-    feed the Stage 2 pool-account conflict gate (see convert/pool_enrich.py)."""
+    feed the Stage 2 pool-account conflict gate (see convert/pool_enrich.py);
+    lf_contact_email feeds the post-convert KN_Email2__c enrichment on NEW Contacts."""
     lead_id: str
     account_id: str | None = None
     contact_id: str | None = None
     lf_company_id: str | None = None
     kununu_profile_uuid: str | None = None
     kununu_url: str | None = None
+    lf_contact_email: str | None = None
 
 
 def _id_set(targets: list[ConversionTarget]) -> str:
@@ -184,6 +186,59 @@ def parse_results(output: str, sentinel: str = SENTINEL) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return data if isinstance(data, list) else []
+
+
+def _norm_email(value) -> str:
+    return (value or "").strip().lower()
+
+
+def enrich_contact_email2(client, targets: list[ConversionTarget], results: list[dict],
+                          *, logger=None) -> dict:
+    """Post-convert: stage the LF contact email as KN_Email2__c on NEW Contacts.
+
+    Applies only to leads converted in THIS run into a fresh Contact (the target carried
+    no contact link — an existing Contact is never touched) whose enrichment found a
+    LeadFeeder contact email. The LF email lands in KN_Email2__c only when it differs from
+    the Contact's primary Email (the task email, mapped from the Lead at conversion) and
+    KN_Email2__c is still blank. Best-effort: a failure logs and never fails the run.
+    """
+    log = logger or get_logger("convert")
+    lf_by_lead = {_short_id(t.lead_id): t.lf_contact_email
+                  for t in targets if t.lf_contact_email and not t.contact_id}
+    lf_by_contact: dict[str, str] = {}
+    for r in results:
+        if not r.get("success") or r.get("alreadyConverted"):
+            continue
+        cid = str(r.get("contactId") or "")
+        lf_email = lf_by_lead.get(_short_id(str(r.get("leadId") or "")))
+        if cid and lf_email:
+            lf_by_contact[_short_id(cid)] = lf_email
+    if not lf_by_contact:
+        return {"processed": 0, "failed": 0}
+
+    id_list = ", ".join(f"'{_apex_id(c)}'" for c in sorted(lf_by_contact))
+    updates: list[dict] = []
+    try:
+        contacts = client.query(
+            f"SELECT Id, Email, KN_Email2__c FROM Contact WHERE Id IN ({id_list})")
+        for c in contacts:
+            lf_email = lf_by_contact.get(_short_id(str(c.get("Id") or "")))
+            if not lf_email:
+                continue
+            if _norm_email(lf_email) == _norm_email(c.get("Email")):
+                continue                       # same person/email — nothing to add
+            if _norm_email(c.get("KN_Email2__c")):
+                continue                       # fill-only-blank
+            updates.append({"Id": c["Id"], "KN_Email2__c": lf_email})
+        if not updates:
+            return {"processed": 0, "failed": 0}
+        res = client.update_bulk("Contact", updates)
+        log.info("KN_Email2__c enrichment: %d contact(s) updated, %d failed",
+                 res.get("processed", 0), res.get("failed", 0))
+        return {"processed": res.get("processed", 0), "failed": res.get("failed", 0)}
+    except Exception as exc:  # best-effort; must never fail a completed conversion run
+        log.error("KN_Email2__c enrichment failed (conversions unaffected): %s", exc)
+        return {"processed": 0, "failed": len(updates) or len(lf_by_contact)}
 
 
 def _cluster_by_company(targets: list[ConversionTarget]) -> list[list[ConversionTarget]]:

@@ -68,10 +68,27 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   The Dublettencheck rules were validated WITH LeadFeeder by the 2026-07-08 skipped-task
   backtest (87% correct account on 283 cases — see Matching section); the create_new path
   is still only shadow-scored.
-- **Write-back fills conversion requirements** (NoOwnDBID tick, address via CountryCode, employee
-  fallback — fill-only-blank) plus nice-to-haves (FirstName, Phone — Wasil's preference, NOT
-  conversion requirements); **Stage 2 preflights** approved leads and
-  skips+reports rule violations (preflight_failures.csv).
+- **Write-back field spec (Wasil, 2026-07-10, `writeback.py`):** from the Task ONLY kununu URL
+  (= the processed marker, replacing `KN_KununuProfileName__c` — reader accepts either), Region
+  (derived from the URL's country slug: `/de/`→Germany, `/at/`→Austria, `/ch/`→Switzerland) and
+  contact email → standard `Email` (**overwrites** a differing Lead email — the claimer/trial
+  person is fresher). `KN_KununuUserUUID__c` is NOT written: the DWH auto-enriches it once the
+  kununu URL is set. Everything else from LeadFeeder: `KN_VATNumber__c` ← LF `VAT_Id` (task VAT
+  never written), `KN_Employee__c` ← LF headcount ONLY (the task's Unternehmensgröße line —
+  ~90% empty, only `small`/`large` — is never used; overwrite deliberate), address always LF —
+  EXCEPT country: `CountryCode` gets the slug-derived country with the same overwrite logic as
+  `KN_Region__c` (LF company country only fills a fully blank country when there is no slug);
+  shadow-compare scores `CountryCode` vs the converted Account's `BillingCountryCode`.
+  From the LF *contact*: `Title` ← position, `KN_LinkedInProfileLink__c` ← contact LinkedIn
+  (company LinkedIn/email never), `Phone` = direct-dial-typed number first (LF types phones;
+  `direct` > `office`/`landline`; NEVER mobile) → LF company phone; a found contact without a
+  direct dial triggers the async **find-contact-data job** (`client.find_contact_data`, 1 credit
+  only when data is actually found; tunables `leadfeeder.find_*`). Plus NoOwnDBID tick +
+  FirstName (nice-to-have). **Post-convert (Stage 2, `convert.enrich_contact_email2`):** on NEW
+  Contacts only, the LF contact email lands in Contact `KN_Email2__c` when it differs from the
+  primary Email (fill-only-blank, best-effort; carried via the Review sheet's `lf_contact_email`
+  column). **Stage 2 preflights** approved leads and skips+reports rule violations
+  (preflight_failures.csv).
 - **Stage 2 pool-account enrichment + same-company dedup** (PR #18): `resolve_pool_links`
   overwrite-enriches `Rohdaten Pool`-owned linked Accounts behind a kununu identity gate, and
   `convert_leads` clusters create-new leads by `lf_company_id` into one Account + N Contacts. See

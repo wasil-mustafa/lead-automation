@@ -421,6 +421,50 @@ class LeadfeederClient:
         attrs = self.retrieve_contacts([contact_id]).get(contact_id, {})
         return flatten_contact_details(attrs)
 
+    def find_contact_data(self, contact_ids: list[str], timeout: float = 180.0,
+                          poll_interval: float = 10.0) -> bool:
+        """Trigger LF's 'Find contact details' enrichment and wait for it to finish.
+
+        POST /contacts/find-contact-data-jobs starts an async external-provider lookup
+        (≤100 ids per job; 1 credit per contact that actually gains data, free
+        otherwise); the job status is then polled until completed/failed or `timeout`.
+        Returns True when every job completed — the caller should re-retrieve the
+        contacts to pick up new phones/emails. False on failure or timeout: callers
+        degrade to the data they already have.
+        """
+        if not contact_ids:
+            return False
+        account_id = self.get_account_id()
+        job_ids: list[str] = []
+        for i in range(0, len(contact_ids), 100):
+            resp = self.api_post("/contacts/find-contact-data-jobs", payload={
+                "data": {"type": "find_contact_data_job",
+                         "attributes": {"contact_ids": contact_ids[i:i + 100],
+                                        "enrichment_type": "full"}},
+            }, params={"account_id": account_id})
+            job_ids.append(resp["data"]["id"])
+        deadline = self._clock() + timeout
+        pending = set(job_ids)
+        failed = False
+        while pending:
+            for jid in sorted(pending):
+                resp = self.api_get(f"/contacts/find-contact-data-jobs/{jid}",
+                                    params={"account_id": account_id})
+                status = ((resp.get("data") or {}).get("attributes") or {}).get("status", "")
+                if status in ("completed", "failed"):
+                    pending.discard(jid)
+                    if status == "failed":
+                        failed = True
+                        self.log.warning("Find-contact-data job %s failed", jid)
+            if not pending:
+                break
+            if self._clock() >= deadline:
+                self.log.warning("Find-contact-data job(s) timed out after %.0fs: %s",
+                                 timeout, sorted(pending))
+                return False
+            self._sleep_fn(poll_interval)
+        return not failed
+
     def add_contact_to_list(self, contact_id: str, list_id: str) -> None:
         self.api_post(f"/contacts/{contact_id}/lists",
                       payload={"data": [{"type": "list", "id": list_id}]},

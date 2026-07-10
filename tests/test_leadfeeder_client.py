@@ -495,3 +495,58 @@ def test_get_contact_details_flattens_single_contact():
     handler = lambda p, b: {"data": [{"id": "k1", "attributes": {"position": {"title": "CEO"}}}]}
     client = _client({("GET", "/contacts"): handler})
     assert client.get_contact_details("k1")["position"] == "CEO"
+
+
+# --- find contact data (async external-provider enrichment) -------------------
+
+def test_find_contact_data_creates_job_and_polls_to_completed():
+    routes = {
+        ("POST", "/contacts/find-contact-data-jobs"): {"data": {"id": "job1", "attributes": {"status": "running"}}},
+        ("GET", "/contacts/find-contact-data-jobs/job1"): [
+            {"data": {"id": "job1", "attributes": {"status": "running"}}},
+            {"data": {"id": "job1", "attributes": {"status": "completed"}}},
+        ],
+    }
+    client = _client(routes)
+    assert client.find_contact_data(["k1", "k2"], timeout=60, poll_interval=0) is True
+    post = next(c for c in client.session.calls if c[0] == "POST")
+    assert post[3]["data"]["attributes"]["contact_ids"] == ["k1", "k2"]
+    assert post[3]["data"]["attributes"]["enrichment_type"] == "full"
+
+
+def test_find_contact_data_chunks_over_100_ids():
+    routes = {
+        ("POST", "/contacts/find-contact-data-jobs"): lambda p, b: {
+            "data": {"id": f"job{len(b['data']['attributes']['contact_ids'])}",
+                     "attributes": {"status": "running"}}},
+        ("GET", "/contacts/find-contact-data-jobs/"): {
+            "data": {"attributes": {"status": "completed"}}},
+    }
+    client = _client(routes)
+    assert client.find_contact_data([f"k{i}" for i in range(150)], poll_interval=0) is True
+    posts = [c for c in client.session.calls if c[0] == "POST"]
+    assert [len(c[3]["data"]["attributes"]["contact_ids"]) for c in posts] == [100, 50]
+
+
+def test_find_contact_data_failed_job_returns_false():
+    routes = {
+        ("POST", "/contacts/find-contact-data-jobs"): {"data": {"id": "job1", "attributes": {"status": "running"}}},
+        ("GET", "/contacts/find-contact-data-jobs/job1"): {"data": {"attributes": {"status": "failed"}}},
+    }
+    assert _client(routes).find_contact_data(["k1"]) is False
+
+
+def test_find_contact_data_timeout_returns_false():
+    routes = {
+        ("POST", "/contacts/find-contact-data-jobs"): {"data": {"id": "job1", "attributes": {"status": "running"}}},
+        ("GET", "/contacts/find-contact-data-jobs/job1"): {"data": {"attributes": {"status": "running"}}},
+    }
+    t = iter(range(0, 1000, 100))  # each clock() call advances 100s
+    client = _client(routes, clock=lambda: next(t))
+    assert client.find_contact_data(["k1"], timeout=150, poll_interval=0) is False
+
+
+def test_find_contact_data_empty_input_no_calls():
+    client = _client({})
+    assert client.find_contact_data([]) is False
+    assert client.session.calls == []

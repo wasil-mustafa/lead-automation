@@ -214,12 +214,18 @@ def test_convert_blockers_column_lists_failed_checks():
 
 
 def test_convert_blockers_empty_when_payload_fills_gaps():
+    # Address comes from the LF company now (tasks carry none) — the payload can only
+    # satisfy the address checks when the enrichment did.
     e = ExtractedLead(lead_id="00Q1", task_id="00T1", task_type="claimer",
                       lead_last_name="Muster", lead_language="German",
-                      lead_source="Web", street="Weg 1", city="HH",
-                      postal_code="20095", country_code="DE",
-                      company_size="11-50")
-    wb = build_workbook([_blockers_result(e)], skipped=[])
+                      lead_source="Web", country_code="DE")
+    # Employee band comes only from the LF headcount now (task size is never used).
+    enr = EnrichedLead(extracted=e, company={"Street": "Weg 1", "City": "HH",
+                                             "Postal_Code": "20095", "Country": "DE",
+                                             "Employee_Count": 40})
+    result = MatchResult(enriched=enr, account=None, contact=None,
+                         decision="review", rule="no_lf_match", evidence=[])
+    wb = build_workbook([result], skipped=[])
     ws = wb["Review"]
     header = [c.value for c in ws[1]]
     blockers = ws.cell(row=2, column=header.index("convert_blockers") + 1).value

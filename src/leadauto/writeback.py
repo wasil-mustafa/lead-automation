@@ -5,7 +5,7 @@ only the fields we actually have a value for (empty values are omitted so a part
 enrichment never blanks an existing field). `write_back` then pushes them via the Bulk API
 in one declarative, partial-success call — short-circuited entirely under `dry_run`.
 
-`KN_KununuProfileName__c` doubles as the "already processed" marker (see reader).
+`KN_KununuLinkProfile__c` doubles as the "already processed" marker (see reader).
 
 Org-verified 2026-07-03 (read-only describe + data sampling on `headless`):
   * `KN_Employee__c` is a RESTRICTED picklist; `_EMPLOYEE_BINS` mirrors its 14 labels
@@ -19,7 +19,6 @@ Org-verified 2026-07-03 (read-only describe + data sampling on `headless`):
 from __future__ import annotations
 
 import re
-from datetime import date
 
 from .leadfeeder.enrich import EnrichedLead
 from .logging import get_logger
@@ -33,10 +32,6 @@ _EMPLOYEE_BINS: list[tuple[int, str]] = [
     (2500, "1.001-2.500"), (5000, "2.501-5.000"), (10000, "5.001-10.000"),
     (30000, "10.001-30.000"), (100000, "30.001-100.000"),
 ]
-
-# All valid KN_Employee__c labels (the bins plus the open-ended top band).
-_EMPLOYEE_LABELS: frozenset[str] = frozenset(label for _, label in _EMPLOYEE_BINS) | {"> 100.000"}
-
 
 def employee_bin(count) -> str | None:
     """Map an employee headcount onto the KN_Employee__c picklist band. None if absent."""
@@ -84,28 +79,6 @@ def split_first_name(source_name, last_name) -> str | None:
     return first or None
 
 
-def employee_bin_from_size(size) -> str | None:
-    """Map a parsed kununu company-size string onto the KN_Employee__c picklist.
-
-    Exact label match first; otherwise the range's upper bound (German dot separators
-    stripped) goes through employee_bin(). Used only as a fill-blank fallback when
-    LeadFeeder has no Employee_Count.
-    """
-    if not size:
-        return None
-    s = str(size).strip()
-    if s in _EMPLOYEE_LABELS:
-        return s
-    nums = re.findall(r"\d[\d.]*", s)
-    if not nums:
-        return None
-    try:
-        upper = int(nums[-1].replace(".", ""))
-    except ValueError:
-        return None
-    return employee_bin(upper)
-
-
 def _iso2(value) -> str | None:
     if not value:
         return None
@@ -135,54 +108,77 @@ def _fill(payload: dict, field: str, current, value) -> None:
         _put(payload, field, value)
 
 
+def dialable_phone(contact: dict, company: dict) -> str | None:
+    """The phone we are allowed to write: contact direct dial > company phone.
+
+    LF types each contact number; a 'direct'-typed number is the true direct dial and
+    wins, with the office/landline number as the next-best fixed line. Mobile numbers
+    are NEVER used (Wasil, 2026-07-10). Falls back to the LF company's main phone when
+    the contact has neither.
+    """
+    return ((contact or {}).get("phone_direct")
+            or (contact or {}).get("phone_office")
+            or (company or {}).get("Company_Phone")
+            or None)
+
+
 def lead_field_payload(enriched: EnrichedLead) -> dict:
-    """Build the Id-keyed write-back dict for one enriched Lead (only populated fields)."""
+    """Build the Id-keyed write-back dict for one enriched Lead (only populated fields).
+
+    Field spec (Wasil, 2026-07-10): from the Task only the kununu URL, Region and the
+    contact email (-> standard Email, overwriting a differing Lead email); everything
+    else comes from LeadFeeder — VAT from LF VAT_Id, employee band from LF headcount
+    (the task's Unternehmensgröße line is never used). LinkedIn/Title/Phone come from
+    the LF contact; company LinkedIn is never used and mobile numbers are never written.
+    """
     e = enriched.extracted
     company = enriched.company or {}
+    contact = enriched.contact or {}
     payload: dict = {"Id": e.lead_id}
 
-    # kununu signals (from the parsed Task)
-    _put(payload, "KN_KununuProfileName__c", e.company_name)  # processed marker
+    # from the Task: kununu URL (doubles as the processed marker — see reader), region,
+    # and the claimer/trial user's email onto the standard Email field. The task email
+    # OVERWRITES a differing Lead email (Wasil, 2026-07-10): it is the person who
+    # actually claimed/trialed, i.e. fresher than whatever the Lead was created with.
+    # (KN_KununuUserUUID__c is NOT written — the DWH fills it once the URL is set.)
     _put(payload, "KN_KununuLinkProfile__c", e.kununu_url)
-    _put(payload, "KN_KununuUserUUID__c", e.kununu_user_uuid)
     _put(payload, "KN_Region__c", e.region)
-    if e.profile_type:
-        _put(payload, "KN_KununuProfileClaimed__c",
-             "true" if e.profile_type.strip().lower() == "claimed" else "false")
-    if isinstance(e.claimed_at, date):
-        _put(payload, "KN_KununuProfileClaimedAt__c", e.claimed_at.isoformat())
+    _put(payload, "Email", e.contact_email)
 
-    # firmographics (LeadFeeder) — KN_DB* fields are D&B-integration-owned, never written
-    emp = employee_bin(company.get("Employee_Count"))
-    if emp:
-        # Deliberate exception to the fill-only-blank rule below: LF headcount is fresher
-        # than a stale manual pick, so this overwrites unconditionally (pre-existing behavior).
-        _put(payload, "KN_Employee__c", emp)
-    else:
-        _fill(payload, "KN_Employee__c", e.lead_employee_category,
-              employee_bin_from_size(e.company_size))
-    _put(payload, "KN_VATNumber__c", company.get("VAT_Id") or e.vat_number)
-    _put(payload, "KN_LinkedInProfileLink__c", company.get("Company_LinkedIn"))
-    _put(payload, "KN_CompanyEmail__c", company.get("Company_Email"))
+    # firmographics (LeadFeeder): VAT and employee band always from LF (the task's
+    # Unternehmensgröße line is ~90% empty and only ever 'small'/'large' — unusable).
+    # KN_Employee__c overwrites: fresh LF headcount beats a stale manual pick.
+    _put(payload, "KN_VATNumber__c", company.get("VAT_Id"))
+    _put(payload, "KN_Employee__c", employee_bin(company.get("Employee_Count")))
+
+    # from the LF contact: LinkedIn, Title (position) — left empty when no contact found
+    _put(payload, "KN_LinkedInProfileLink__c", contact.get("contact_linkedin"))
+    _fill(payload, "Title", e.lead_title, contact.get("position"))
 
     # conversion requirements (org validation rules; all fill-only-blank)
     if _blank(e.lead_dbid) and not e.lead_no_own_dbid:
         payload["KN_NoOwnDBID__c"] = "true"  # KN_DbIdValidation XOR
-    contact = enriched.contact or {}
-    street = e.street or company.get("Street")
-    _fill(payload, "Street", e.lead_street, (street or "")[:100] or None)
-    _fill(payload, "City", e.lead_city, e.city or company.get("City"))
-    country = (e.country_code or _iso2(company.get("Country")) or "").upper()
-    if _blank(e.lead_country):
-        _fill(payload, "CountryCode", e.lead_country_code, country or None)
-    postal = e.postal_code or company.get("Postal_Code")
-    effective_cc = ((e.lead_country_code or country) or "").upper()
+    # address: always LeadFeeder (tasks carry no address)
+    _fill(payload, "Street", e.lead_street, (company.get("Street") or "")[:100] or None)
+    _fill(payload, "City", e.lead_city, company.get("City"))
+    # country: kununu-URL-derived, the same slug logic as KN_Region__c (Wasil, 2026-07-10)
+    # — it OVERWRITES the Lead's often-defaulted country, mirroring the region write.
+    # Without a kununu slug, the LF company country fills only a fully blank country.
+    # (CountryCode is the writable API form; the org's picklist derives Country from it.)
+    slug_cc = (e.country_code or "").upper() or None
+    lf_cc = (_iso2(company.get("Country")) or "").upper() or None
+    if slug_cc:
+        _put(payload, "CountryCode", slug_cc)
+    elif _blank(e.lead_country):
+        _fill(payload, "CountryCode", e.lead_country_code, lf_cc)
+    postal = company.get("Postal_Code")
+    effective_cc = (slug_cc or e.lead_country_code or lf_cc or "").upper()
     expected_len = _POSTAL_LEN_BY_CC.get(effective_cc)
     if postal and (expected_len is None or len(str(postal).strip()) == expected_len):
         _fill(payload, "PostalCode", e.lead_postal_code, str(postal).strip())
     _fill(payload, "FirstName", e.lead_first_name,
           split_first_name(e.contact_name or contact.get("full_name"), e.lead_last_name))
-    _fill(payload, "Phone", e.lead_phone, normalize_phone(contact.get("best_contact_phone")))
+    _fill(payload, "Phone", e.lead_phone, normalize_phone(dialable_phone(contact, company)))
 
     return payload
 

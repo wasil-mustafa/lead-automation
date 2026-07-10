@@ -30,6 +30,7 @@ class ExtractedLead:
     lead_country_code: str | None = None
     lead_country: str | None = None
     lead_phone: str | None = None
+    lead_title: str | None = None
     lead_source: str | None = None
     lead_opted_out_email: bool = False
     lead_dbid: str | None = None

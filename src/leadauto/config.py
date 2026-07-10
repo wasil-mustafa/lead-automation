@@ -102,6 +102,18 @@ class Settings:
     def lf_match_batch(self) -> int:
         return int(self.raw["leadfeeder"].get("match_batch", 200))
 
+    @property
+    def lf_find_contact_data(self) -> bool:
+        return bool(self.raw["leadfeeder"].get("find_contact_data", True))
+
+    @property
+    def lf_find_details_timeout(self) -> float:
+        return float(self.raw["leadfeeder"].get("find_details_timeout", 180))
+
+    @property
+    def lf_find_details_poll(self) -> float:
+        return float(self.raw["leadfeeder"].get("find_details_poll", 10))
+
     # --- kununu profile feed ---
     @property
     def kununu_feed_enabled(self) -> bool:

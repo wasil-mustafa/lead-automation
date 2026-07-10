@@ -25,6 +25,7 @@ REVIEW_COLUMNS = [
     "lf_matched", "lf_matched_name", "lf_match_score", "lf_name_agreement", "lf_agreed_via",
     "lf_rejected",
     "lf_city", "lf_employees", "lf_industry", "lf_website", "lf_company_id",
+    "lf_contact_email",
     "match_rule", "match_evidence",
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
@@ -91,6 +92,9 @@ def _review_row(result) -> dict:
         "lf_city": company.get("City"), "lf_employees": company.get("Employee_Count"),
         "lf_industry": company.get("Industry"), "lf_website": company.get("Website"),
         "lf_company_id": enr.lf_company_id,
+        # first LF contact email — Stage 2 writes it to the converted Contact's
+        # KN_Email2__c when it differs from the Contact's primary Email
+        "lf_contact_email": ((enr.contact or {}).get("contact_emails") or "").split(";")[0].strip() or None,
         "kununu_profile_uuid": e.kununu_profile_uuid,
         "match_rule": result.rule,
         "match_evidence": "; ".join(result.evidence),

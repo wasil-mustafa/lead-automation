@@ -19,6 +19,7 @@ class FakeClient:
         self.company_attrs: dict = {}     # lf_company_id -> raw attrs
         self.contact_by_name: dict = {}   # name -> {contact_id, full_name} | None
         self.contact_attrs: dict = {}     # contact_id -> raw LF attributes
+        self.find_details_attrs: dict = {}  # attrs revealed by find_contact_data
         self.calls: list = []
 
     def get_account_id(self):
@@ -52,6 +53,15 @@ class FakeClient:
 
     def add_contact_to_list(self, contact_id, list_id):
         self.calls.append(("add_contact", contact_id, list_id))
+
+    def find_contact_data(self, contact_ids, timeout=180.0, poll_interval=10.0):
+        self.calls.append(("find_contact_data", tuple(contact_ids)))
+        # Simulates the async external-provider job: when attrs are staged in
+        # find_details_attrs, they become visible to the next retrieve_contacts.
+        if self.find_details_attrs:
+            self.contact_attrs.update(self.find_details_attrs)
+            return True
+        return False
 
 
 def _extracted(company="Acme GmbH", contact_name="Jane Doe", region="Germany", cc="DE",
@@ -501,6 +511,51 @@ def test_lead_countrycode_still_used_without_url_country():
     [r] = enrich_leads(fc, [e], SETTINGS)
     assert r.matched is False
     assert r.lf_rejected == "country_conflict:FR!=DE"
+
+
+def test_find_contact_data_triggered_without_direct_dial():
+    # Contact retrieved with only a mobile number -> phase 3b runs LF's async
+    # 'Find contact details' and the re-retrieve picks up the revealed landline.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
+    fc.contact_attrs = {"k1": {"phones": [{"number": "+49 170 111", "type": "mobile"}]}}
+    fc.find_details_attrs = {"k1": {"phones": [
+        {"number": "+49 170 111", "type": "mobile"},
+        {"number": "+49 40 419131", "type": "landline"},
+    ]}}
+    [r] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert ("find_contact_data", ("k1",)) in fc.calls
+    assert r.contact["phone_office"] == "+49 40 419131"
+    assert r.contact["contact_id"] == "k1"
+    assert r.contact["full_name"] == "Jane Doe"
+
+
+def test_find_contact_data_skipped_when_direct_dial_present():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
+    fc.contact_attrs = {"k1": {"phones": [{"number": "+49 40 419131", "type": "landline"}]}}
+    [r] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert not any(c[0] == "find_contact_data" for c in fc.calls)
+
+
+def test_find_contact_data_failure_degrades_gracefully():
+    # Job returns False (nothing found / failed / timed out): keep what we had.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
+    fc.contact_attrs = {"k1": {"position": {"title": "CEO"}}}
+    [r] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert ("find_contact_data", ("k1",)) in fc.calls
+    assert r.contact_found is True
+    assert r.contact["position"] == "CEO"
 
 
 def test_no_countries_no_rejection():

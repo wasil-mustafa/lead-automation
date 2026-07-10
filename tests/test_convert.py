@@ -16,6 +16,7 @@ from leadauto.convert import (
     ConversionTarget,
     build_convert_apex,
     convert_leads,
+    enrich_contact_email2,
     parse_results,
 )
 
@@ -238,6 +239,84 @@ def test_convert_leads_blank_company_not_clustered():
     assert res["converted"] == 2
     # single phase only (no secondaries) -> exactly one apex call
     assert len(client.calls) == 1
+
+
+# --- post-convert KN_Email2__c enrichment on NEW Contacts ---------------------
+
+class _Email2Client:
+    """query() answers the Contact SOQL; update_bulk records what would be written."""
+    def __init__(self, contacts):
+        self.contacts = contacts
+        self.queries: list[str] = []
+        self.updates: list[tuple] = []
+
+    def query(self, soql, bulk=False):
+        self.queries.append(soql)
+        return [dict(c) for c in self.contacts]
+
+    def update_bulk(self, sobject, records):
+        self.updates.append((sobject, records))
+        return {"processed": len(records), "failed": 0}
+
+
+def test_email2_written_when_lf_email_differs():
+    client = _Email2Client([{"Id": "003NEW", "Email": "task@acme.de", "KN_Email2__c": ""}])
+    targets = [ConversionTarget("00Q1", lf_contact_email="lf.contact@acme.de")]
+    results = [{"leadId": "00Q1", "success": True,
+                "accountId": "001NEW", "contactId": "003NEW"}]
+    out = enrich_contact_email2(client, targets, results)
+    assert out == {"processed": 1, "failed": 0}
+    sobject, records = client.updates[0]
+    assert sobject == "Contact"
+    assert records == [{"Id": "003NEW", "KN_Email2__c": "lf.contact@acme.de"}]
+
+
+def test_email2_skipped_when_emails_equal_or_already_set():
+    client = _Email2Client([
+        {"Id": "003AAA", "Email": "Same@acme.de", "KN_Email2__c": ""},       # equal (case-insensitive)
+        {"Id": "003BBB", "Email": "task@acme.de", "KN_Email2__c": "old@x.de"},  # fill-only-blank
+    ])
+    targets = [ConversionTarget("00Q1", lf_contact_email="same@acme.de"),
+               ConversionTarget("00Q2", lf_contact_email="lf@acme.de")]
+    results = [{"leadId": "00Q1", "success": True, "contactId": "003AAA"},
+               {"leadId": "00Q2", "success": True, "contactId": "003BBB"}]
+    out = enrich_contact_email2(client, targets, results)
+    assert out == {"processed": 0, "failed": 0}
+    assert client.updates == []
+
+
+def test_email2_never_touches_linked_existing_contacts():
+    # A target that linked an existing Contact (contact_id set) is out of scope even if
+    # the enrichment carried an LF email; without any candidate, no SOQL runs at all.
+    client = _Email2Client([])
+    targets = [ConversionTarget("00Q1", account_id="001A", contact_id="003OLD",
+                                lf_contact_email="lf@acme.de")]
+    results = [{"leadId": "00Q1", "success": True, "contactId": "003OLD"}]
+    out = enrich_contact_email2(client, targets, results)
+    assert out == {"processed": 0, "failed": 0}
+    assert client.queries == [] and client.updates == []
+
+
+def test_email2_ignores_failed_and_already_converted_rows():
+    client = _Email2Client([])
+    targets = [ConversionTarget("00Q1", lf_contact_email="lf@acme.de"),
+               ConversionTarget("00Q2", lf_contact_email="lf2@acme.de")]
+    results = [{"leadId": "00Q1", "success": False, "errors": ["DUPLICATE"]},
+               {"leadId": "00Q2", "success": True, "alreadyConverted": True}]
+    out = enrich_contact_email2(client, targets, results)
+    assert out == {"processed": 0, "failed": 0}
+    assert client.queries == []
+
+
+def test_email2_failure_never_raises():
+    class _Boom:
+        def query(self, soql, bulk=False):
+            raise RuntimeError("org down")
+
+    targets = [ConversionTarget("00Q1", lf_contact_email="lf@acme.de")]
+    results = [{"leadId": "00Q1", "success": True, "contactId": "003NEW"}]
+    out = enrich_contact_email2(_Boom(), targets, results)
+    assert out["processed"] == 0 and out["failed"] == 1
 
 
 def test_convert_leads_orphan_secondary_when_primary_fails():

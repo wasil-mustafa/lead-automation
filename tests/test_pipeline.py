@@ -136,7 +136,7 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path):
     sobject, records = sf.updates[0]
     assert sobject == "Lead"
     assert records[0]["Id"] == "00Q1"
-    assert records[0]["KN_KununuProfileName__c"] == "Hufeland Klinikum GmbH"
+    assert records[0]["KN_KununuLinkProfile__c"] == "https://www.kununu.com/de/hufeland-klinikum"
     assert state_path.exists()
     assert load_state(state_path).last_task_created == "2026-06-19T10:00:00.000+0000"
 
@@ -209,11 +209,13 @@ def test_targets_from_approved_carries_pool_and_cluster_keys():
     rows = [{"Approve?": "yes", "lead_id": LEAD1, "account_match_id": ACCT1,
              "contact_reason": "kununu_user_uuid", "contact_match_id": "",
              "lf_company_id": "LF-1", "kununu_profile_uuid": "puid-1",
-             "kununu_url": "https://www.kununu.com/de/acme"}]
+             "kununu_url": "https://www.kununu.com/de/acme",
+             "lf_contact_email": "lf.contact@acme.de"}]
     t = targets_from_approved(rows, SETTINGS)[0]
     assert t.lf_company_id == "LF-1"
     assert t.kununu_profile_uuid == "puid-1"
     assert t.kununu_url == "https://www.kununu.com/de/acme"
+    assert t.lf_contact_email == "lf.contact@acme.de"
 
 
 # --- Stage 2 orchestration ---------------------------------------------------
@@ -240,7 +242,7 @@ class FakeApexClient:
 
 def _write_approved(path, rows):
     cols = ["lead_id", "account_match_id", "contact_match_id", "contact_score",
-            "decision", "Approve?"]
+            "decision", "lf_contact_email", "Approve?"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
@@ -277,6 +279,51 @@ def test_run_stage2_live_converts_approved(tmp_path):
     assert len(client.apex_calls) == 1
     assert res.result["converted"] == 1   # only the approved lead
     assert res.result["missing"] == 0     # the converted lead was reconciled in the results
+
+
+def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
+    """Create-new conversion + LF contact email differing from the task email ->
+    one Contact update setting KN_Email2__c."""
+    class _Email2ApexClient(FakeApexClient):
+        def __init__(self):
+            super().__init__()
+            self.updates = []
+
+        def query(self, soql, bulk=False):
+            if "FROM Contact" in soql:
+                return [{"Id": "003NEW", "Email": "task@acme.de", "KN_Email2__c": ""}]
+            return []
+
+        def apex_run(self, apex):
+            self.apex_calls.append(apex)
+            from leadauto.convert import SENTINEL
+            import json
+            out = [{"leadId": LEAD1, "success": True,
+                    "accountId": "001NEW", "contactId": "003NEW"}]
+            return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+
+        def update_bulk(self, sobject, records):
+            self.updates.append((sobject, records))
+            return {"processed": len(records), "failed": 0}
+
+    p = tmp_path / "approved.csv"
+    _write_approved(p, [{"lead_id": LEAD1, "decision": "create_new",
+                         "lf_contact_email": "lf.contact@acme.de", "Approve?": "yes"}])
+    client = _Email2ApexClient()
+    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
+    assert res.result["converted"] == 1
+    assert res.result["email2"] == {"processed": 1, "failed": 0}
+    assert client.updates == [("Contact", [{"Id": "003NEW",
+                                            "KN_Email2__c": "lf.contact@acme.de"}])]
+
+
+def test_run_stage2_dry_run_email2_is_noop(tmp_path):
+    p = tmp_path / "approved.csv"
+    _write_approved(p, [{"lead_id": LEAD1, "decision": "create_new",
+                         "lf_contact_email": "lf@acme.de", "Approve?": "yes"}])
+    client = FakeApexClient()
+    res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
+    assert res.result["email2"] == {"processed": 0, "failed": 0}
 
 
 # --- Stage 2: preflight gate --------------------------------------------------

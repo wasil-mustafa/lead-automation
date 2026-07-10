@@ -16,7 +16,7 @@ from typing import Sequence
 _TASK_FIELDS = "Id, WhoId, Who.Name, Subject, Description, CreatedDate"
 _LEAD_FIELDS = (
     "Id, FirstName, LastName, Company, Email, Website, Status, IsConverted, LeadSource, "
-    "HasOptedOutOfEmail, Phone, Street, City, PostalCode, Country, CountryCode, "
+    "HasOptedOutOfEmail, Phone, Title, Street, City, PostalCode, Country, CountryCode, "
     "KN_DBID__c, KN_NoOwnDBID__c, KN_Employee__c, KN_Language__c, "
     "KN_KununuProfileName__c, KN_KununuUserUUID__c, KN_KununuLinkProfile__c"
 )

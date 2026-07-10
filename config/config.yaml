@@ -21,6 +21,11 @@ leadfeeder:
   max_retries: 4             # retries on 429/5xx before surfacing HTTPError
   retrieve_batch: 100        # GET /companies & /contacts (API max 100)
   match_batch: 200           # POST /companies/match (API max 200)
+  # 'Find contact details' (async external-provider lookup) for found contacts that
+  # have no direct-dial number. 1 credit per contact that actually gains data.
+  find_contact_data: true
+  find_details_timeout: 180  # seconds to wait for the async job before degrading
+  find_details_poll: 10      # job-status poll interval (seconds)
 
 # kununu DWH profile feed: resolves a lead's profile to its assigned-company names,
 # which widen the LF name-agreement gate's evidence. Harmless without credentials
