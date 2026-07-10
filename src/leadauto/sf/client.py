@@ -206,6 +206,11 @@ class SfClient:
         data = json.loads(self._run(cmd).stdout)
         result = data.get("result") or {}
         token, url = result.get("accessToken"), result.get("instanceUrl")
+        if token and token.startswith("[REDACTED"):
+            # sf CLI >= ~2.141 masks accessToken in `org display`; fetch the real one.
+            cmd = f"sf org auth show-access-token --target-org {self.alias} --json"
+            tok_data = json.loads(self._run(cmd).stdout)
+            token = (tok_data.get("result") or {}).get("accessToken")
         if not token or not url:
             raise SfError("sf org display returned no accessToken/instanceUrl:\n"
                           f"{json.dumps(result)[:500]}")

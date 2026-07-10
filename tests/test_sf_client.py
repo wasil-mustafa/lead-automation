@@ -189,6 +189,9 @@ def test_apex_run_gives_up_after_three_unparseable_attempts(monkeypatch):
 def _fake_org_display(capture, token="TOK1", url="https://kununu.my.salesforce.com"):
     def run(cmd, check=True):
         capture.append(cmd)
+        if "show-access-token" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+                {"result": {"accessToken": "UNMASKED_" + token}}), stderr="")
         return types.SimpleNamespace(returncode=0, stdout=json.dumps(
             {"result": {"accessToken": token, "instanceUrl": url}}), stderr="")
     return run
@@ -204,6 +207,21 @@ def test_auth_info_parses_and_caches_org_display(monkeypatch):
     assert client.auth_info() is info          # cached: no second CLI call
     assert len(cmds) == 1
     assert "org display" in cmds[0] and "--json" in cmds[0]
+
+
+def test_auth_info_unmasks_redacted_token_via_show_access_token(monkeypatch):
+    # sf CLI >= ~2.141 REDACTS accessToken in `org display` output; the real token
+    # must then come from `sf org auth show-access-token` (live-hit 2026-07-10:
+    # SOAP got the literal placeholder string as its session id -> INVALID_SESSION_ID).
+    client = SfClient("headless")
+    cmds: list[str] = []
+    monkeypatch.setattr(client, "_run", _fake_org_display(
+        cmds, token="[REDACTED] Use 'sf org auth show-access-token' to view"))
+    info = client.auth_info()
+    assert info["access_token"].startswith("UNMASKED_")
+    assert info["instance_url"] == "https://kununu.my.salesforce.com"
+    assert len(cmds) == 2
+    assert "show-access-token" in cmds[1]
 
 
 def test_auth_info_raises_when_fields_missing(monkeypatch):
