@@ -4,9 +4,10 @@ Automates the processing of new Salesforce sales leads at kununu.
 
 ## The goal
 
-When someone claims a kununu company profile or starts an EBP trial, a task lands in a Salesforce
-queue. Someone then has to figure out: *Who is this company? Do we already know them? Which of our
-existing accounts do they belong to — or are they brand new?* Then they enrich the lead with
+When someone claims a kununu company profile or starts an EBP trial, a task lands in a lead queue or to
+a contact on an account. We will only be looking at automating tasks which land in a lead queue. 
+Someone then has to figure out: *Who is this company? Do we already know them? 
+Which of our existing accounts do they belong to — or are they brand new?* Then they enrich the lead with
 company data, fill in the required fields, and convert it into an account and contact.
 
 This project does all of that automatically, on a schedule, with a human review step before
@@ -23,16 +24,16 @@ The pipeline runs in two stages:
 
 Runs four times a day. It:
 
-1. **Picks up new leads** from the Salesforce queue that have a fresh, unhandled task
+1. **Picks up new leads** that have an open task and are in a leadpool queue
    (currently: profile claims and EBP trials).
-2. **Identifies the company** behind the lead using LeadFeeder: the lead's company name and email
-   are sent to LeadFeeder's matching API, which returns the most likely real-world company along
-   with firmographic data like industry, size, revenue, and address. Because a wrong company is
-   worse than no company, matches are only accepted when the returned name actually agrees with
+2. **Identifies the company** behind the lead using LeadFeeder: the lead's company name (kununu profile name) 
+   and email are sent to LeadFeeder's matching API, which returns the most likely real-world company along
+   with firmographic data like size, address, website, phone and VAT. Because a wrong company is worse than no company,
+   matches are only accepted when the returned name actually agrees with
    the lead's, and are rejected again if the company's country contradicts the lead or a short
    acronym name has nothing else backing it up. Where possible, LeadFeeder also supplies contact
-   details (name, phone) for the person behind the lead.
-3. **Checks for duplicates** against what already exists in Salesforce, on two levels:
+   details (position, phone) for the person behind the lead.
+4. **Checks for duplicates** against what already exists in Salesforce, on two levels:
    - **kununu profile level** — the strongest signal. If an existing account already carries the
      same kununu profile (via its profile ID or profile URL), that's the same company, and it wins
      even over a convincing name-and-address match on a different account.
@@ -44,8 +45,8 @@ Runs four times a day. It:
    Ordered rules turn this into one of three outcomes: link the lead to an existing account,
    create a new one, or flag it for a human to decide. (The matching contact is found the same
    way, via email or kununu user ID.)
-4. **Fills in the lead** with the enriched data and everything Salesforce requires for conversion.
-5. **Produces a review sheet** (an Excel file) listing every lead, what the pipeline found, what it
+5. **Fills in the lead** with the enriched data and everything Salesforce requires for conversion.
+6. **Produces a review sheet** (an Excel file) listing every lead, what the pipeline found, what it
    decided, and why — with an **Approve?** column.
 
 ### Stage 2 — Convert
@@ -81,6 +82,6 @@ reviewed.
 
 ## For developers
 
-The code lives under `src/leadauto/` and runs via GitHub Actions. Technical details, commands,
+The code lives under `src/leadauto/` and runs via GitHub Actions through cron-jobs. Technical details, commands,
 and conventions are documented in [`CLAUDE.md`](CLAUDE.md) and
 [`src/leadauto/convert/CLAUDE.md`](src/leadauto/convert/CLAUDE.md).
