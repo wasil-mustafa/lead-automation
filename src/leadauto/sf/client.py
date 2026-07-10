@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 # FORCE_COLOR=0: an inherited FORCE_COLOR (e.g. from a harness/CI terminal) makes the
@@ -25,6 +26,15 @@ _ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true",
 # raw length (URL-encoding inflates it) and stays well under the ~8 KB header budget, so
 # small everyday queries keep using the faster synchronous REST path.
 _BULK_QUERY_THRESHOLD = 2000
+
+# The sf CLI intermittently dies with a non-zero exit and NO output at all (the same
+# Node-level flake both workflows retry the login for) — seen live 2026-07-10 on the
+# first Stage-2 conversion dispatch: `sf apex run --json` exit 1, empty stdout.
+# apex_run retries only that no-output case; a parseable failure is real and never
+# re-run. Retrying conversion Apex is safe: it only converts IsConverted=false leads
+# and callers reconcile alreadyConverted rows.
+_APEX_RUN_ATTEMPTS = 3
+_APEX_RETRY_DELAY_S = 10
 
 
 class SfError(RuntimeError):
@@ -192,17 +202,29 @@ class SfClient:
             cmd = f'sf apex run --file "{tmp}" --target-org {self.alias} --json'
             # --json reports failures inside the payload (with a non-zero exit code), so
             # run uncheck-ed and diagnose from the structured result, not the exit code.
-            res = self._run(cmd, check=False)
+            data = None
+            for attempt in range(1, _APEX_RUN_ATTEMPTS + 1):
+                res = self._run(cmd, check=False)
+                try:
+                    data = json.loads(res.stdout)
+                    break
+                except (json.JSONDecodeError, TypeError):
+                    if self.log:
+                        self.log.warning(
+                            "sf apex run attempt %d/%d produced no parseable --json "
+                            "output (exit %s): %s", attempt, _APEX_RUN_ATTEMPTS,
+                            res.returncode, (res.stderr or res.stdout or "")[:500])
+                    if attempt < _APEX_RUN_ATTEMPTS:
+                        time.sleep(_APEX_RETRY_DELAY_S)
+            if data is None:
+                raise SfError(f"sf apex run produced no parseable --json output after "
+                              f"{_APEX_RUN_ATTEMPTS} attempts "
+                              f"(exit {res.returncode}):\n{res.stderr or res.stdout}")
         finally:
             try:
                 tmp.unlink()
             except OSError:
                 pass
-        try:
-            data = json.loads(res.stdout)
-        except (json.JSONDecodeError, TypeError):
-            raise SfError(f"sf apex run produced no parseable --json output "
-                          f"(exit {res.returncode}):\n{res.stderr or res.stdout}")
         result = data.get("result") if isinstance(data, dict) else None
         if not isinstance(result, dict):
             raise SfError(f"Unexpected sf apex run --json shape (exit {res.returncode}):\n"
