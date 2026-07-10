@@ -442,3 +442,82 @@ def test_run_stage2_routes_kununu_conflict_to_failures(tmp_path, monkeypatch):
                      failures_csv=tmp_path / "preflight_failures.csv")
     assert client.apex_calls == []                 # conflicted lead never converted
     assert any(f["check"] == "kununu_uuid_conflict" for f in res.preflight_failures)
+
+
+# --- Stage 1: auto-approved CSV (review_gate: false, 2026-07-10) ---------------
+
+def _no_gate_settings():
+    s = Settings.load()
+    s.raw["pipeline"] = dict(s.raw["pipeline"], review_gate=False)
+    return s
+
+
+def _matched_enrich(monkeypatch):
+    """Make enrich_leads return an accepted LF match so the decision is create_new."""
+    from leadauto.leadfeeder.enrich import EnrichedLead
+
+    def fake_enrich(lf, extracteds, settings, logger=None, **kw):
+        return [EnrichedLead(extracted=e, matched=True, lf_company_id="123",
+                             matched_name=e.best_company, company={})
+                for e in extracteds]
+
+    monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)
+
+
+def test_stage1_live_no_gate_emits_auto_approved_csv(tmp_path, monkeypatch):
+    _matched_enrich(monkeypatch)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")])
+    review_dir = tmp_path / "review"
+    res = run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
+                     since="2026-05-01T00:00:00Z", dry_run=False,
+                     qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                     review_dir=review_dir, predictions_path=None)
+    assert res.results[0].decision == "create_new"
+    files = list(review_dir.glob("approved_*auto*.csv"))
+    assert len(files) == 1
+    rows = read_approved(files[0])
+    assert rows[0]["lead_id"] == "00Q000000000001" and rows[0]["Approve?"] == "yes"
+
+
+def test_stage1_dry_run_never_emits_auto_csv(tmp_path, monkeypatch):
+    _matched_enrich(monkeypatch)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")])
+    review_dir = tmp_path / "review"
+    run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
+               since="2026-05-01T00:00:00Z", dry_run=True,
+               qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+               review_dir=review_dir, predictions_path=None)
+    assert not review_dir.exists() or not list(review_dir.iterdir())
+
+
+def test_stage1_review_gate_on_never_emits_auto_csv(tmp_path, monkeypatch):
+    _matched_enrich(monkeypatch)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")])
+    review_dir = tmp_path / "review"
+    run_stage1(sf, object(), SETTINGS, state=State(None, []),   # review_gate stays true
+               since="2026-05-01T00:00:00Z", dry_run=False,
+               qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+               review_dir=review_dir, predictions_path=None)
+    assert not review_dir.exists() or not list(review_dir.iterdir())
+
+
+def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
+    _matched_enrich(monkeypatch)
+
+    class FailingSf(FakeSfClient):
+        def update_bulk(self, sobject, records):
+            super().update_bulk(sobject, records)
+            return {"processed": 0, "failed": len(records),
+                    "failures": [{"id": r["Id"], "error": "boom"} for r in records]}
+
+    sf = FailingSf(tasks=[_task(who="00Q000000000001")],
+                   leads=[_lead("00Q000000000001")])
+    review_dir = tmp_path / "review"
+    run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
+               since="2026-05-01T00:00:00Z", dry_run=False,
+               qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+               review_dir=review_dir, predictions_path=None)
+    assert not review_dir.exists() or not list(review_dir.iterdir())

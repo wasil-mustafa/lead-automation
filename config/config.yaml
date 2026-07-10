@@ -75,7 +75,10 @@ matching:
   dedupe_name_agree_min: 85  # rule-4 floor: account name vs LF/profile/assigned-company names
 
 pipeline:
-  review_gate: true          # master toggle; false => auto-convert
+  # false => live Stage-1 runs emit review/approved_<ts>_auto.csv with every
+  # link/create_new row pre-approved (skip/review never; write-back failures held
+  # back), so Stage 2 converts without a human filling Approve? (Wasil 2026-07-10).
+  review_gate: true
   dry_run: true              # true => no SF writes/conversions (kept ON while validating vs control file)
   batch_limit: 0             # 0 = unlimited; >0 = LIMIT-scoped
   task_lookback_days: 35     # overlap window around the watermark

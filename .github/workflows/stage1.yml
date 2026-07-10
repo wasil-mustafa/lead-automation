@@ -158,6 +158,8 @@ jobs:
           done
           if [ "${{ needs.gate.outputs.dry_run }}" != "true" ]; then
             git add state/watermark.json
+            # auto-approved conversion CSVs (review_gate: false) feed the Stage 2 dispatch
+            { ls review/approved_*_auto.csv >/dev/null 2>&1 && git add review/approved_*_auto.csv; } || true
           fi
           if git diff --cached --quiet; then
             echo "No state changes to commit."

@@ -80,3 +80,28 @@ def test_normalize_city_casefolds_and_collapses():
     assert normalize_city("MÜNCHEN") == "münchen"
     assert normalize_city("") is None
     assert normalize_city(None) is None
+
+
+# --- name_like_pattern (account-recall widening, 2026-07-10) ------------------
+
+def test_name_like_pattern_builds_prefix_anchored_wildcards():
+    from leadauto.textnorm import name_like_pattern
+    # suffix + punctuation variants collapse to the same normalized base
+    assert name_like_pattern("Kaufland Dienstleistung GmbH & Co.KG.") == "kaufland%dienstleistung%"
+    assert name_like_pattern("Kaufland Dienstleistung Gmbh & Co. Kg") == "kaufland%dienstleistung%"
+
+
+def test_name_like_pattern_skips_short_or_empty_bases():
+    from leadauto.textnorm import name_like_pattern
+    assert name_like_pattern("AZS") is None          # acronym-ish: too little signal
+    assert name_like_pattern("SNG GmbH") is None     # base 'sng' < 4 chars
+    assert name_like_pattern("GmbH") is None         # suffix-only -> empty base
+    assert name_like_pattern("") is None
+    assert name_like_pattern(None) is None
+
+
+def test_name_like_pattern_never_emits_quotes_or_backslashes():
+    from leadauto.textnorm import name_like_pattern
+    p = name_like_pattern("O'Brien & Söhne\ GmbH")
+    assert p is not None
+    assert "'" not in p and "\\" not in p

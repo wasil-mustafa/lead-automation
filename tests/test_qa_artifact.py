@@ -249,3 +249,59 @@ def test_review_sheet_carries_cluster_and_conflict_keys():
     row = list(ws.iter_rows(min_row=2, values_only=True))[0]
     assert row[idx["lf_company_id"]] == "LF-999"
     assert row[idx["kununu_profile_uuid"]] == "puid-123"
+
+
+# --- auto-approved CSV (review_gate: false, 2026-07-10) ------------------------
+
+def _auto_results():
+    from leadauto.match import AccountMatch
+    return [
+        _result("00Q000000000001", decision="link",
+                account=AccountMatch(account_id="001000000000001", score=None,
+                                     reason="name_address")),
+        _result("00Q000000000002", decision="create_new"),
+        _result("00Q000000000003", decision="review"),
+        _result("00Q000000000004", decision="skip"),
+    ]
+
+
+def test_auto_approved_csv_holds_link_and_create_new_only(tmp_path):
+    import csv
+    from leadauto.qa_artifact import write_auto_approved_csv
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review")
+    assert path is not None and path.name.startswith("approved_") and "auto" in path.name
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["lead_id"] for r in rows] == ["00Q000000000001", "00Q000000000002"]
+    assert all(r["Approve?"] == "yes" for r in rows)
+    assert rows[0]["account_match_id"] == "001000000000001"
+    assert rows[1]["decision"] == "create_new"
+
+
+def test_auto_approved_csv_excludes_writeback_failures(tmp_path):
+    import csv
+    from leadauto.qa_artifact import write_auto_approved_csv
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review",
+                                   exclude_lead_ids={"00Q000000000001"})
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["lead_id"] for r in rows] == ["00Q000000000002"]
+
+
+def test_auto_approved_csv_skipped_when_nothing_qualifies(tmp_path):
+    from leadauto.qa_artifact import write_auto_approved_csv
+    only_skips = [_result("00Q000000000004", decision="skip"),
+                  _result("00Q000000000003", decision="review")]
+    assert write_auto_approved_csv(only_skips, tmp_path / "review") is None
+    assert not (tmp_path / "review").exists() or not list((tmp_path / "review").iterdir())
+
+
+def test_auto_approved_csv_roundtrips_through_stage2(tmp_path):
+    from leadauto.config import Settings
+    from leadauto.pipeline.stage2_convert import read_approved, targets_from_approved
+    from leadauto.qa_artifact import write_auto_approved_csv
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review")
+    targets = targets_from_approved(read_approved(path), Settings.load())
+    assert [t.lead_id for t in targets] == ["00Q000000000001", "00Q000000000002"]
+    assert targets[0].account_id == "001000000000001"
+    assert targets[1].account_id is None       # create_new stays create-new

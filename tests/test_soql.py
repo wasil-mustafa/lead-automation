@@ -177,3 +177,24 @@ def test_pool_builders_reject_empty():
         soql.accounts_pool_fields([])
     with pytest.raises(ValueError):
         soql.leads_pool_enrich([])
+
+
+# --- accounts_by_signals: name-recall LIKE patterns (2026-07-10) ---------------
+
+def test_accounts_by_signals_adds_name_like_clauses():
+    q = soql.accounts_by_signals(names=["Kaufland Dienstleistung GmbH & Co.KG."],
+                                 name_patterns=["kaufland%dienstleistung%"])
+    assert "Name IN (" in q                     # exact clause kept (indexed, free)
+    assert "Name LIKE 'kaufland%dienstleistung%'" in q
+
+
+def test_accounts_by_signals_name_patterns_alone_suffice():
+    q = soql.accounts_by_signals(name_patterns=["acme corp%"])
+    assert q is not None and "Name LIKE 'acme corp%'" in q
+
+
+def test_accounts_by_signals_sanitizes_patterns():
+    # a quote or backslash smuggled into a pattern must not break the SOQL literal
+    q = soql.accounts_by_signals(name_patterns=["o'brien%", "a\cme%"])
+    assert "'o'brien" not in q and "\\" not in q
+    assert "obrien%" in q and "acme%" in q

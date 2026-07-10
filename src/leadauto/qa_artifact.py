@@ -8,6 +8,8 @@ summary. Pure data in, a `Workbook` out (write to disk via `write_workbook`).
 """
 from __future__ import annotations
 
+import csv
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -179,6 +181,34 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     _add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     return wb
+
+
+def write_auto_approved_csv(results: list, review_dir: str | Path,
+                            exclude_lead_ids: set | frozenset = frozenset(),
+                            now: datetime | None = None) -> Path | None:
+    """Auto-approved conversion CSV (`review_gate: false`, Wasil 2026-07-10).
+
+    Emits `review/approved_<UTCts>_auto.csv` holding exactly the Review rows with decision
+    `link` or `create_new`, `Approve?` pre-set — the same columns `targets_from_approved`
+    reads, so Stage 2 (preflight, clustering, pool gate) runs unchanged. `review`/`skip`
+    rows never qualify; leads in `exclude_lead_ids` (write-back failures — their fields
+    would fail conversion validation anyway) are held back for the next run. Returns None
+    without touching disk when nothing qualifies.
+    """
+    rows = [_review_row(r) for r in results
+            if r.decision in ("link", "create_new")
+            and r.enriched.extracted.lead_id not in exclude_lead_ids]
+    if not rows:
+        return None
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(review_dir) / f"approved_{stamp}_auto.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=REVIEW_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({**row, "Approve?": "yes"})
+    return path
 
 
 def write_workbook(results: list, skipped: list, meta: dict | None = None,

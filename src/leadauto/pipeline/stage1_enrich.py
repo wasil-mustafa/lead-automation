@@ -16,8 +16,8 @@ from ..leadfeeder.enrich import EnrichedLead, enrich_leads
 from ..logging import get_logger
 from ..match import MatchResult, load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
-from ..qa_artifact import write_workbook
-from ..state import State, advance, compute_since, load_state, save_state
+from ..qa_artifact import write_auto_approved_csv, write_workbook
+from ..state import REPO_ROOT, State, advance, compute_since, load_state, save_state
 from ..writeback import write_back
 
 
@@ -43,6 +43,7 @@ def run_stage1(
     state_path: str | Path | None = None,
     kununu_feed: bool = True,
     predictions_path: str | Path | None = DEFAULT_PREDICTIONS_PATH,
+    review_dir: str | Path = REPO_ROOT / "review",
     logger=None,
 ) -> Stage1Result:
     log = logger or get_logger("pipeline.stage1")
@@ -90,6 +91,15 @@ def run_stage1(
         }
         qa_out = write_workbook(results, extraction.skipped, meta, qa_path, failures=failures)
         log.info("Wrote QA artifact -> %s", qa_out)
+
+    # Auto-approve (review_gate: false): live runs stage the link/create_new rows for
+    # Stage 2 without a human touching Approve?. Write-back failures are held back —
+    # their lead fields would fail the conversion validation rules anyway.
+    if not dry_run and not settings.review_gate:
+        failed_ids = {f.get("lead_id") for f in failures}
+        auto_csv = write_auto_approved_csv(results, review_dir, exclude_lead_ids=failed_ids)
+        if auto_csv:
+            log.info("Auto-approved conversion CSV -> %s", auto_csv)
 
     if not dry_run and state_path is not None:
         save_state(new_state, state_path)

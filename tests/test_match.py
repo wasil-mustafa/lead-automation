@@ -450,3 +450,23 @@ def test_load_existing_records_no_signals_skips_queries():
     ex = load_existing_records(client, [enr], SETTINGS)
     assert isinstance(ex, ExistingRecords)
     assert client.queries == []
+
+
+def test_load_existing_records_widens_names_with_like_patterns():
+    # The 2026-07-08 backtest recall gap: an org account spelled "Kaufland Dienstleistung
+    # Gmbh & Co. Kg" never matched `Name IN ('Kaufland Dienstleistung GmbH & Co.KG.')`.
+    # The account query must now also carry a normalized prefix-anchored LIKE.
+    enr = _enriched(_extracted(company_name="Kaufland Dienstleistung GmbH & Co.KG."))
+    client = FakeClient()
+    load_existing_records(client, [enr], SETTINGS)
+    acct_q = next(q for q in client.queries if "FROM Account" in q)
+    assert "Name LIKE 'kaufland%dienstleistung%'" in acct_q
+
+
+def test_load_existing_records_no_like_for_acronymish_names():
+    enr = _enriched(_extracted(company_name="AZS"))
+    client = FakeClient()
+    load_existing_records(client, [enr], SETTINGS)
+    acct_q = next(q for q in client.queries if "FROM Account" in q)
+    assert "LIKE 'azs" not in acct_q          # too broad; exact IN still applies
+    assert "Name IN ('AZS')" in acct_q

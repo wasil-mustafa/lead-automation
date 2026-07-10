@@ -90,6 +90,28 @@ def normalize_name(value: str | None) -> str | None:
     return " ".join(tokens) or None
 
 
+def name_like_pattern(value: str | None) -> str | None:
+    """Prefix-anchored SOQL LIKE pattern for account name recall (2026-07-08 backtest gap).
+
+    `Name IN (...)` is exact, so normalized-equal spelling variants ("GmbH & Co.KG." vs
+    "Gmbh & Co. Kg") never enter the candidate pool. This builds the widening pattern from
+    the SAME normalization every name rule uses: `%` between base tokens absorbs the
+    punctuation/suffix variance and the trailing `%` absorbs the legal form. LIKE is
+    case-insensitive in SOQL, and extra candidates cost nothing — the rules re-compare
+    normalized names. None for bases under 4 chars (acronym-ish; a `LIKE 'azs%'` sweep is
+    all noise and acronyms can't be trusted on name evidence anyway).
+    Residual gap: variance inside a token ("O'Brien" vs "OBrien") is still missed.
+    """
+    base = normalize_name(value)
+    if not base or len(base) < 4:
+        return None
+    tokens = [re.sub(r"[\\'%]", "", t) for t in base.split()]
+    tokens = [t for t in tokens if t and t != "&"]  # standalone '&' is connector noise
+    if not tokens:
+        return None
+    return "%".join(tokens) + "%"
+
+
 def alnum(value: str | None) -> str:
     """Lowercase value with everything but [a-z0-9] removed (for domain-vs-name compare)."""
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())

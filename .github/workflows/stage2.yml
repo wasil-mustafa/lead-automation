@@ -1,13 +1,14 @@
 name: Lead Automation — Stage 2 (convert, gated)
 
-# Convert ONLY the Leads a human approved in the QA artifact. The reviewer commits
-# review/approved_<date>.csv (the Review-sheet rows with Approve?=yes); this workflow
-# converts those, linking matched Accounts/Contacts. The conversion Apex re-filters
+# Convert the approved Leads: either a human-committed review/approved_<date>.csv or,
+# with config `pipeline.review_gate: false`, the approved_<ts>_auto.csv a live Stage-1
+# run committed (link/create_new rows pre-approved). The conversion Apex re-filters
 # IsConverted=false, so re-running is a no-op.
 #
-# THE HUMAN GATE: the `lead-conversion` Environment below must have "Required reviewers"
-# configured in repo Settings -> Environments. GitHub then pauses this job until an
-# approver signs off — that approval IS the conversion gate.
+# THE GATE: this workflow is dispatch-only and `dry_run` defaults to true — a live
+# conversion happens only when a human deliberately dispatches with dry_run unchecked.
+# (A GitHub Environment with required reviewers was the original plan, but that
+# protection rule needs a paid plan on private repos — verified 2026-07-10.)
 
 on:
   workflow_dispatch:
@@ -35,7 +36,6 @@ permissions:
 jobs:
   convert:
     runs-on: ubuntu-latest
-    environment: lead-conversion   # required-reviewers gate; configure in repo settings
     env:
       # Quiet the sf CLI's background async work — a source of intermittent
       # "unsettled top-level await" / Node exit-13 hangs on CI runners.

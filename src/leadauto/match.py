@@ -47,6 +47,7 @@ from .textnorm import (  # noqa: F401
     email_domain,
     normalize_city,
     normalize_host,
+    name_like_pattern,
     normalize_name,
     normalize_postal,
     normalize_url as _normalize_url,
@@ -391,6 +392,7 @@ def load_existing_records(client, enriched_leads: list[EnrichedLead], settings, 
     dbids: set[str] = set()
     hosts: set[str] = set()
     names: set[str] = set()
+    name_patterns: set[str] = set()  # normalized LIKE widening (backtest recall gap)
     user_uuids: set[str] = set()
     emails: set[str] = set()
     linkedins: set[str] = set()
@@ -418,6 +420,9 @@ def load_existing_records(client, enriched_leads: list[EnrichedLead], settings, 
         name = e.best_company
         if name:
             names.add(name.strip())
+            pattern = name_like_pattern(name)
+            if pattern:
+                name_patterns.add(pattern)
         if e.kununu_user_uuid:
             user_uuids.add(e.kununu_user_uuid.strip())
         email = e.contact_email or e.lead_email
@@ -431,6 +436,7 @@ def load_existing_records(client, enriched_leads: list[EnrichedLead], settings, 
     acct_q = soql.accounts_by_signals(
         profile_uuids=sorted(profile_uuids), kununu_urls=sorted(kununu_urls),
         vats=sorted(vats), dbids=sorted(dbids), hosts=sorted(hosts), names=sorted(names),
+        name_patterns=sorted(name_patterns),
     )
     if acct_q:
         accounts = client.query(acct_q)

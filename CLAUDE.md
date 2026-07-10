@@ -230,8 +230,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   humans follow the profile-UUID account — candidate fix: kununu-identity disagreement with
   the name-rule target ⇒ review), 4 = engine linked the profile-carrying account while the
   human chose another duplicate (defensible), 1 = **candidate-recall gap**:
-  `accounts_by_signals` matches `Name IN (…)` exactly, so normalized-equal spelling variants
-  ("GmbH & Co.KG." vs "Gmbh & Co. Kg") never enter the pool. Caveat: population is
+  `accounts_by_signals` matched `Name IN (…)` exactly, so normalized-equal spelling variants
+  ("GmbH & Co.KG." vs "Gmbh & Co. Kg") never entered the pool — CLOSED 2026-07-10: the
+  account query now also carries a prefix-anchored `Name LIKE` per name
+  (`textnorm.name_like_pattern`: normalized base tokens `%`-joined, skipped for bases
+  <4 chars); precision untouched (name rules re-compare normalized names). Caveat: population is
   link-biased (accounts existed — that's why they were skipped); validates dedupe, NOT
   create_new. Gotcha: ~280 leads in one match batch blow the **100k-char SOQL limit** in
   `accounts_by_signals` — the backtest chunks `load_existing_records` in batches of 40.
@@ -254,9 +257,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 ## Open items (resume here)
 
 1. **End-to-end live validation:** small live write-back (`stage1 --limit 5`, inspect `KN_*` on
-   those Leads) → one gated `stage2` conversion. Prereqs + risk-ordered 3-path testing plan in
-   `src/leadauto/convert/CLAUDE.md` (create the `lead-conversion` GitHub Environment FIRST — it
-   does not exist yet).
+   those Leads) → convert 3 certainly-new create_new leads (Wasil 2026-07-10; picked from the
+   closed-task run's create_new set after the recall fix). Prereqs + testing plan in
+   `src/leadauto/convert/CLAUDE.md`. **Go-live conversion is auto-approved** (Wasil
+   2026-07-10): flip config `pipeline.review_gate: false` → live Stage 1 commits
+   `review/approved_<ts>_auto.csv` (link+create_new only; skip/review never) and Stage 2
+   converts it. The only brake: Stage 2 is dispatch-only with `dry_run` defaulting true —
+   a required-reviewers Environment is NOT possible (needs a paid plan on private repos,
+   verified 2026-07-10; the `environment:` reference was removed from stage2.yml).
 2. **Task-type rollout:** `claimer` + `ebp_trial` are enabled; add `event`, then `content`,
    calibrating from the review sheet's false-match rate.
 3. **Validate the rule engine WITH LeadFeeder:** largely answered by the 2026-07-08 skipped-task
@@ -265,9 +273,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    (profile-UUID/URL hit) now wins over a `name_address`/`name_vat` hit on a *different* account,
    linking the kununu account (humans followed it 14/14 in the misses) rather than demoting to
    review. Standalone `kununu_conflict` review is unchanged; `name_corroborated`/`name_only`/
-   `duplicate` were already unreachable when a kununu account exists. (b) STILL OPEN — fix the
-   `accounts_by_signals` exact-`Name IN`
-   recall gap (query/normalize name variants). Still read the scheduled dry-run QA artifacts for
+   `duplicate` were already unreachable when a kununu account exists. (b) **DONE
+   (2026-07-10): `accounts_by_signals` recall gap closed** — normalized `Name LIKE`
+   widening (see Matching section). Still read the scheduled dry-run QA artifacts for
    the create_new side, which the backtest cannot validate.
 4. **Review shadow accuracy after a few days:** `shadow_comparison.xlsx` (Decisions = per-lead
    hit/miss vs the human-chosen account; Fields = enrichment agreement) — the go-live evidence.

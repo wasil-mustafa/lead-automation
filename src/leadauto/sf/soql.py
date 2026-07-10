@@ -10,6 +10,7 @@ the collected WhoIds — `Task` is not allowed in reverse semi-joins on `Lead`.
 """
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 # Selected verbatim from the approved plan / verified org fields.
@@ -158,8 +159,14 @@ def accounts_by_signals(
     dbids: Sequence[str] = (),
     hosts: Sequence[str] = (),
     names: Sequence[str] = (),
+    name_patterns: Sequence[str] = (),
 ) -> str | None:
-    """Accounts matching ANY collected signal; None when no signals were collected."""
+    """Accounts matching ANY collected signal; None when no signals were collected.
+
+    `name_patterns` are pre-built `textnorm.name_like_pattern` LIKE patterns (their `%`
+    separators are load-bearing, so they must NOT go through `_like_escape`); quotes and
+    backslashes are still stripped defensively before embedding in the literal.
+    """
     clauses: list[str] = []
     if profile_uuids:
         clauses.append(f"KN_KununuProfileUuid__c IN ({_in_list(profile_uuids)})")
@@ -169,6 +176,8 @@ def accounts_by_signals(
         clauses.append(f"KN_DBID__c IN ({_in_list(dbids)})")
     if names:
         clauses.append(f"Name IN ({_in_list(names)})")
+    patterns = [re.sub(r"[\\']", "", p) for p in name_patterns]
+    clauses.extend(f"Name LIKE '{p}'" for p in patterns if p.strip("%"))
     url_like = _like_any("KN_KununuLinkProfile__c", kununu_urls)
     if url_like:
         clauses.append(url_like)
