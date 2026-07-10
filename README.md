@@ -1,7 +1,6 @@
 # Lead Automation
 
-Automates the processing of new Salesforce sales leads at kununu — work that used to be a fragile
-manual chain of report exports, Excel workbooks, and copy-paste steps.
+Automates the processing of new Salesforce sales leads at kununu.
 
 ## The goal
 
