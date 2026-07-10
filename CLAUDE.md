@@ -64,10 +64,15 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   unchecked). Change the schedule in *that job*, not the workflow. GitHub's own `schedule:` cron
   was removed. Shadow files committed every run; watermark only on non-dry. Stage 2 is dispatch-only.
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `dry_run: true`.
-- **NOT yet live:** Salesforce write-back and LeadConvert — no live write has ever run.
+- **LIVE-PROVEN end to end (2026-07-10):** first live write-back (3 test leads, KN_* fields
+  org-verified) AND first live conversion — stage2 run 29126789599 converted
+  dbeyond/coderis/econoomy via SOAP (3 converted, 0 failed/missing; owner=Wasil, Qualified,
+  no Opportunity, task re-parented, KN_Email2__c on econoomy only); the live idempotency
+  re-run was a green no-op (preflight skipped all 3 as IsConverted). Scheduled runs remain
+  DRY (config `dry_run: true`); going live at scale is now a config/dispatch decision.
   The Dublettencheck rules were validated WITH LeadFeeder by the 2026-07-08 skipped-task
   backtest (87% correct account on 283 cases — see Matching section); the create_new path
-  is still only shadow-scored.
+  is shadow-scored plus this 3-lead live test.
 - **Write-back field spec (Wasil, 2026-07-10, `writeback.py`):** from the Task ONLY kununu URL
   (= the processed marker, replacing `KN_KununuProfileName__c` — reader accepts either), Region
   (derived from the URL's country slug: `/de/`→Germany, `/at/`→Austria, `/ch/`→Switzerland) and
@@ -260,15 +265,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Open items (resume here)
 
-1. **End-to-end live validation:** small live write-back (`stage1 --limit 5`, inspect `KN_*` on
-   those Leads) → convert 3 certainly-new create_new leads (Wasil 2026-07-10; picked from the
-   closed-task run's create_new set after the recall fix). Prereqs + testing plan in
-   `src/leadauto/convert/CLAUDE.md`. **Go-live conversion is auto-approved** (Wasil
-   2026-07-10): flip config `pipeline.review_gate: false` → live Stage 1 commits
-   `review/approved_<ts>_auto.csv` (link+create_new only; skip/review never) and Stage 2
-   converts it. The only brake: Stage 2 is dispatch-only with `dry_run` defaulting true —
-   a required-reviewers Environment is NOT possible (needs a paid plan on private repos,
-   verified 2026-07-10; the `environment:` reference was removed from stage2.yml).
+1. **End-to-end live validation: DONE 2026-07-10** (see Status) — live write-back + live
+   SOAP conversion of dbeyond/coderis/econoomy, all step-4 checks green, idempotent re-run
+   green. Remaining go-live moves: flip config `dry_run: false` (scheduled Stage 1 writes
+   back + commits the auto-approved CSV once `pipeline.review_gate: false` is set — Wasil
+   approved auto-approve 2026-07-10: link+create_new only, skip/review never) and dispatch
+   Stage 2 with dry_run unchecked per batch. The only brake: Stage 2 is dispatch-only with
+   `dry_run` defaulting true — a required-reviewers Environment is NOT possible (needs a
+   paid plan on private repos, verified 2026-07-10).
 2. **Task-type rollout:** `claimer` + `ebp_trial` are enabled; add `event`, then `content`,
    calibrating from the review sheet's false-match rate.
 3. **Validate the rule engine WITH LeadFeeder:** largely answered by the 2026-07-08 skipped-task
