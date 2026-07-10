@@ -13,7 +13,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-_ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true"}
+# FORCE_COLOR=0: an inherited FORCE_COLOR (e.g. from a harness/CI terminal) makes the
+# sf CLI ANSI-colorize its --json output, which breaks json.loads (seen 2026-07-10).
+_ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true",
+        "FORCE_COLOR": "0", "NO_COLOR": "1"}
 
 # A plain `sf data query` sends the SOQL in the GET request URL, so a long IN(...) list
 # overflows Salesforce's request-header limit -> HTTP 431 "Request Header Fields Too

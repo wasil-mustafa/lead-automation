@@ -440,6 +440,69 @@ def test_four_letter_uppercase_acronym_guarded_but_not_ordinary_names():
     assert r2.matched is True             # "Acme" is a name, not an acronym
 
 
+def test_url_country_beats_defaulted_lead_countrycode():
+    # 2026-07-10 closed-task dry run: old queue leads carry a defaulted
+    # CountryCode=DE/Country=Germany, which wrongly rejected 37 correct AT/CH
+    # matches. The kununu-URL-derived country is task evidence and must win.
+    fc = FakeClient()
+    fc.match_by_name = {"Robatech AG": {"company_id": "c1", "match_score": 0.9,
+                                        "matched_name": "Robatech AG"}}
+    fc.company_attrs = {"c1": {"url": "https://robatech.ch",
+                               "address": {"country": "Switzerland"}}}
+    e = _extracted(company="Robatech AG", contact_name=None,
+                   region="Switzerland", cc="CH")
+    e.lead_country_code = "DE"
+    e.lead_country = "Germany"
+    [r] = enrich_leads(fc, [e], SETTINGS)
+    assert r.matched is True
+    assert r.lf_rejected is None
+
+
+def test_feed_country_beats_defaulted_lead_countrycode():
+    # No URL-derived country, but the kununu feed's profile_country_code says CH:
+    # it must outrank the Lead's defaulted CountryCode=DE, just like the URL country.
+    fc = FakeClient()
+    fc.match_by_name = {"Robatech AG": {"company_id": "c1", "match_score": 0.9,
+                                        "matched_name": "Robatech AG"}}
+    fc.company_attrs = {"c1": {"address": {"country": "Switzerland"}}}
+    e = _extracted(company="Robatech AG", contact_name=None, region=None, cc=None)
+    e.kununu_profile_uuid = "uuid-1"
+    e.lead_country_code = "DE"
+    profiles = {"uuid-1": ProfileInfo(name="Robatech", country_code="ch")}
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles=profiles)
+    assert r.feed_country_code == "ch"
+    assert r.matched is True
+    assert r.lf_rejected is None
+
+
+def test_url_country_beats_feed_country():
+    # Both kununu sources present but disagreeing: the URL country (task evidence
+    # for THIS claim) wins over the feed's profile-level country.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {"address": {"country": "Austria"}}}
+    e = _extracted(contact_name=None, region="Austria", cc="AT")
+    e.kununu_profile_uuid = "uuid-1"
+    profiles = {"uuid-1": ProfileInfo(name="Acme", country_code="de")}
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles=profiles)
+    assert r.matched is True
+    assert r.lf_rejected is None
+
+
+def test_lead_countrycode_still_used_without_url_country():
+    # No kununu-URL country -> the Lead's CountryCode remains the gate's evidence.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {"address": {"country": "France"}}}
+    e = _extracted(contact_name=None, cc=None, region=None)
+    e.lead_country_code = "DE"
+    [r] = enrich_leads(fc, [e], SETTINGS)
+    assert r.matched is False
+    assert r.lf_rejected == "country_conflict:FR!=DE"
+
+
 def test_no_countries_no_rejection():
     # Fail open: without a country on either side the conflict check must not fire.
     fc = FakeClient()

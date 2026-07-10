@@ -30,6 +30,7 @@ class EnrichedLead:
     lf_company_id: str | None = None
     matched_name: str | None = None
     match_score: float | None = None
+    feed_country_code: str | None = None  # kununu feed profile_country_code (sanity-gate evidence)
     name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
     agreed_via: str | None = None  # which signal vouched: company_name / alt_name:<n> / email_domain
     alt_names: list[str] = field(default_factory=list)  # assigned-company names from the kununu feed
@@ -56,7 +57,8 @@ def _is_acronymish(raw_name: str | None, norm_name: str | None) -> bool:
             and any(t.isupper() and len(t) == 4 for t in (raw_name or "").split()))
 
 
-def _match_sanity_reason(e: ExtractedLead, company: dict) -> str | None:
+def _match_sanity_reason(e: ExtractedLead, company: dict,
+                         feed_cc: str | None = None) -> str | None:
     """Post-retrieve sanity gate on an accepted LF match; a reason string rejects it.
 
     Live miss 2026-07-07 (00QMz00000mBy5FMAS): lead "SNG" (sng.ch, CH) matched a
@@ -70,8 +72,13 @@ def _match_sanity_reason(e: ExtractedLead, company: dict) -> str | None:
       the lead's email domain matching the company's website/email domain, or by
       VAT equality against the task-extracted VAT.
     """
-    lead_cc = next((cc for cc in (country_iso2(e.lead_country_code),
-                                  country_iso2(e.country_code),
+    # kununu-derived countries first (URL, then the feed's profile_country_code):
+    # they are profile evidence, while the Lead's CountryCode/Country is often a
+    # defaulted 'DE'/'Germany' (2026-07-10 closed-task dry run: 37 correct AT/CH
+    # matches were rejected against that default).
+    lead_cc = next((cc for cc in (country_iso2(e.country_code),
+                                  country_iso2(feed_cc),
+                                  country_iso2(e.lead_country_code),
                                   country_iso2(e.lead_country)) if cc), None)
     comp_cc = country_iso2(company.get("Country"))
     if lead_cc and comp_cc and lead_cc != comp_cc:
@@ -127,6 +134,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
             info = (profiles.get(e.kununu_profile_uuid or "")
                     or profiles.get(base_slug(e.kununu_url) or ""))
             if info:
+                result.feed_country_code = info.country_code
                 own = normalize_name(company_name)
                 alts = []
                 for n in info.companies:
@@ -165,7 +173,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
         enriched = client.retrieve_companies([r.lf_company_id for r in matched])
         for r in matched:
             r.company = flatten_company(enriched.get(r.lf_company_id, {}))
-            reason = _match_sanity_reason(r.extracted, r.company)
+            reason = _match_sanity_reason(r.extracted, r.company, r.feed_country_code)
             if reason:
                 log.warning("LF match rejected for %r (lf %s, matched %r): %s",
                             r.extracted.best_company, r.lf_company_id,
