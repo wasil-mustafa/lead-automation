@@ -105,8 +105,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `KUNUNU_API_TOKEN`. **All local plaintext copies were deleted 2026-07-05** (OneDrive-synced repo);
   keys live ONLY in GitHub Secrets, rotation deliberately skipped. For local runs set env vars ad hoc.
   Never hardcode.
-- **Conversion (Stage 2):** see `src/leadauto/convert/CLAUDE.md` — mechanics, safety model,
-  duplicate/validation-rule gotchas, live-testing plan.
+- **Conversion (Stage 2) runs over the SOAP Partner API `convertLead()`** (`sf/soap.py` +
+  `SfClient.convert_lead`) — anonymous-Apex conversion is IMPOSSIBLE: the pipeline user lacks
+  "Author Apex", so execute-anonymous runs restricted and `Database.convertLead`/`JSON.serialize`
+  throw `System.SecurityException` (root-caused 2026-07-10; the CI CLI mangles it into empty
+  `--json` output that mimics a flake). See `src/leadauto/convert/CLAUDE.md` — mechanics,
+  safety model, duplicate/validation-rule gotchas, live-testing plan.
 - **Write-back transforms are org-verified** (`writeback.py` header): revenue in millions ✓,
   uppercase ISO2 country ✓, `KN_Region__c` restricted picklist ✓, `KN_Employee__c` restricted
   picklist with the org's real 14 German-format bands (e.g. `751-1.000`, `> 100.000`) in

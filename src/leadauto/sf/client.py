@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import requests
+
 # FORCE_COLOR=0: an inherited FORCE_COLOR (e.g. from a harness/CI terminal) makes the
 # sf CLI ANSI-colorize its --json output, which breaks json.loads (seen 2026-07-10).
 _ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true",
@@ -76,11 +78,16 @@ def parse_bulk_update_result(stdout: str) -> dict:
     return {"failed": failed, "failures": failures, "confirmed": confirmed}
 
 
+# SOAP Partner API convertLead accepts at most 100 LeadConvert elements per call.
+_SOAP_CONVERT_MAX = 100
+
+
 class SfClient:
     def __init__(self, alias: str, api_version: str = "66.0", logger=None):
         self.alias = alias
         self.api_version = api_version
         self.log = logger
+        self._auth: dict | None = None
 
     def _run(self, cmd: str, check: bool = True) -> subprocess.CompletedProcess:
         res = subprocess.run(
@@ -185,6 +192,65 @@ class SfClient:
             "processed": len(records), "failed": parsed["failed"],
             "failures": parsed["failures"], "confirmed": parsed["confirmed"],
         }
+
+    # --- SOAP conversion ---
+    def auth_info(self, refresh: bool = False) -> dict:
+        """Access token + instance URL from `sf org display --json`, cached per client.
+
+        The CLI's cached org auth is the session the SOAP call rides on; `refresh=True`
+        re-fetches after an INVALID_SESSION_ID fault.
+        """
+        if self._auth is not None and not refresh:
+            return self._auth
+        cmd = f"sf org display --target-org {self.alias} --json"
+        data = json.loads(self._run(cmd).stdout)
+        result = data.get("result") or {}
+        token, url = result.get("accessToken"), result.get("instanceUrl")
+        if not token or not url:
+            raise SfError("sf org display returned no accessToken/instanceUrl:\n"
+                          f"{json.dumps(result)[:500]}")
+        self._auth = {"access_token": token, "instance_url": url.rstrip("/")}
+        return self._auth
+
+    def convert_lead(self, conversions: list[dict], *, converted_status: str,
+                     owner_id: str | None) -> list[dict]:
+        """Convert leads via the SOAP Partner API (the org forbids anonymous Apex
+        conversion for this user; SOAP honors his Convert Leads permission).
+
+        Each conversion dict: lead_id + optional account_id/contact_id. Returns one
+        result row per conversion, in request order, with a nil leadId (structural
+        rejections) backfilled from that order. An INVALID_SESSION_ID fault triggers
+        one auth re-fetch + retry; any other fault raises SfError.
+        """
+        from .soap import build_convert_envelope, parse_convert_response
+
+        if not conversions:
+            return []
+        if len(conversions) > _SOAP_CONVERT_MAX:
+            raise SfError(f"convert_lead accepts at most {_SOAP_CONVERT_MAX} conversions "
+                          f"per call, got {len(conversions)}")
+        for attempt in (1, 2):
+            auth = self.auth_info(refresh=attempt > 1)
+            envelope = build_convert_envelope(
+                auth["access_token"], conversions,
+                converted_status=converted_status, owner_id=owner_id)
+            url = f"{auth['instance_url']}/services/Soap/u/{self.api_version}"
+            response = requests.post(url, data=envelope.encode("utf-8"), headers={
+                "Content-Type": "text/xml; charset=UTF-8", "SOAPAction": '""',
+            }, timeout=120)
+            try:
+                rows = parse_convert_response(response.text)
+            except SfError as exc:
+                if attempt == 1 and "INVALID_SESSION_ID" in str(exc):
+                    if self.log:
+                        self.log.warning("SOAP session invalid; refreshing auth and retrying")
+                    continue
+                raise
+            for conversion, row in zip(conversions, rows):
+                if not row.get("leadId"):
+                    row["leadId"] = conversion["lead_id"]
+            return rows
+        raise SfError("unreachable")  # pragma: no cover
 
     def apex_run(self, apex_code: str) -> str:
         """Execute anonymous Apex and return the execution debug log.

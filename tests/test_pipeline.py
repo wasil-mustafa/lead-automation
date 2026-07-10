@@ -220,24 +220,23 @@ def test_targets_from_approved_carries_pool_and_cluster_keys():
 
 # --- Stage 2 orchestration ---------------------------------------------------
 
-class FakeApexClient:
+class FakeConvertClient:
+    """Fake SOAP-converting client: query() answers the LeadStatus / already-converted
+    SOQL (plus the pool queries, empty here so resolve_pool_links passes through);
+    convert_lead() echoes success per conversion."""
+
     def __init__(self):
-        self.apex_calls = []
+        self.convert_calls = []
 
     def query(self, soql, bulk=False):
-        # No pool-owned accounts/leads in these orchestration fixtures: resolve_pool_links
-        # finds nothing to enrich and every link target passes through unchanged.
+        if "FROM LeadStatus" in soql:
+            return [{"MasterLabel": "Qualified"}]
         return []
 
-    def apex_run(self, apex):
-        self.apex_calls.append(apex)
-        from leadauto.convert import SENTINEL
-        import json
-        import re
-        head = apex.split("Map<Id,Id>", 1)[0]
-        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-        out = [{"leadId": i, "success": True, "accountId": "001X"} for i in ids]
-        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+    def convert_lead(self, conversions, *, converted_status, owner_id):
+        self.convert_calls.append(conversions)
+        return [{"leadId": c["lead_id"], "success": True, "accountId": "001X"}
+                for c in conversions]
 
 
 def _write_approved(path, rows):
@@ -261,9 +260,9 @@ def test_run_stage2_dry_run_makes_no_conversions(tmp_path):
     p = tmp_path / "approved.csv"
     _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
                          "contact_score": "1.0", "Approve?": "yes"}])
-    client = FakeApexClient()
+    client = FakeConvertClient()
     res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
-    assert client.apex_calls == []
+    assert client.convert_calls == []
     assert res.result["converted"] == 0
     assert res.result["planned"] == 1
 
@@ -274,9 +273,10 @@ def test_run_stage2_live_converts_approved(tmp_path):
         {"lead_id": LEAD1, "account_match_id": ACCT1, "contact_score": "1.0", "Approve?": "yes"},
         {"lead_id": LEAD2, "Approve?": "no"},
     ])
-    client = FakeApexClient()
+    client = FakeConvertClient()
     res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
-    assert len(client.apex_calls) == 1
+    assert len(client.convert_calls) == 1
+    assert [c["lead_id"] for c in client.convert_calls[0]] == [LEAD1]
     assert res.result["converted"] == 1   # only the approved lead
     assert res.result["missing"] == 0     # the converted lead was reconciled in the results
 
@@ -284,7 +284,7 @@ def test_run_stage2_live_converts_approved(tmp_path):
 def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
     """Create-new conversion + LF contact email differing from the task email ->
     one Contact update setting KN_Email2__c."""
-    class _Email2ApexClient(FakeApexClient):
+    class _Email2ConvertClient(FakeConvertClient):
         def __init__(self):
             super().__init__()
             self.updates = []
@@ -292,15 +292,13 @@ def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
         def query(self, soql, bulk=False):
             if "FROM Contact" in soql:
                 return [{"Id": "003NEW", "Email": "task@acme.de", "KN_Email2__c": ""}]
-            return []
+            return super().query(soql, bulk=bulk)
 
-        def apex_run(self, apex):
-            self.apex_calls.append(apex)
-            from leadauto.convert import SENTINEL
-            import json
-            out = [{"leadId": LEAD1, "success": True,
-                    "accountId": "001NEW", "contactId": "003NEW"}]
-            return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            self.convert_calls.append(conversions)
+            return [{"leadId": c["lead_id"], "success": True,
+                     "accountId": "001NEW", "contactId": "003NEW"}
+                    for c in conversions]
 
         def update_bulk(self, sobject, records):
             self.updates.append((sobject, records))
@@ -309,7 +307,7 @@ def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
     p = tmp_path / "approved.csv"
     _write_approved(p, [{"lead_id": LEAD1, "decision": "create_new",
                          "lf_contact_email": "lf.contact@acme.de", "Approve?": "yes"}])
-    client = _Email2ApexClient()
+    client = _Email2ConvertClient()
     res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
     assert res.result["converted"] == 1
     assert res.result["email2"] == {"processed": 1, "failed": 0}
@@ -321,7 +319,7 @@ def test_run_stage2_dry_run_email2_is_noop(tmp_path):
     p = tmp_path / "approved.csv"
     _write_approved(p, [{"lead_id": LEAD1, "decision": "create_new",
                          "lf_contact_email": "lf@acme.de", "Approve?": "yes"}])
-    client = FakeApexClient()
+    client = FakeConvertClient()
     res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
     assert res.result["email2"] == {"processed": 0, "failed": 0}
 
@@ -339,24 +337,22 @@ _GOOD_ROW = {
 
 
 class _PreflightSfFake:
-    """query() answers the preflight SOQL; apex_run echoes success for every lead it sees."""
+    """query() answers the preflight (and conversion-support) SOQL; convert_lead
+    echoes success for every lead it sees."""
     def __init__(self, rows):
         self.rows = rows
-        self.apex_calls = []
+        self.convert_calls = []
 
-    def query(self, soql):
+    def query(self, soql, bulk=False):
+        if "FROM LeadStatus" in soql:
+            return [{"MasterLabel": "Qualified"}]
+        if "IsConverted = true" in soql:
+            return []
         return self.rows
 
-    def apex_run(self, apex):
-        import json
-        import re
-
-        from leadauto.convert import SENTINEL
-        self.apex_calls.append(apex)
-        head = apex.split("Map<Id,Id>", 1)[0]
-        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-        out = [{"leadId": i, "success": True} for i in ids]
-        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+    def convert_lead(self, conversions, *, converted_status, owner_id):
+        self.convert_calls.append(conversions)
+        return [{"leadId": c["lead_id"], "success": True} for c in conversions]
 
 
 class _PreflightSettings:
@@ -387,7 +383,7 @@ def test_stage2_preflight_excludes_failing_leads(tmp_path):
                      failures_csv=tmp_path / "preflight_failures.csv")
     assert [t.lead_id for t in res.targets] == [LEAD1]
     assert res.preflight_failures[0]["lead_id"] == LEAD2
-    assert LEAD2 not in "".join(client.apex_calls)
+    assert LEAD2 not in [c["lead_id"] for call in client.convert_calls for c in call]
     assert (tmp_path / "preflight_failures.csv").exists()
 
 
@@ -406,7 +402,7 @@ def test_stage2_dry_run_still_preflights(tmp_path):
     client = _PreflightSfFake([dict(_GOOD_ROW, Id=LEAD2, KN_Employee__c="")])
     res = run_stage2(client, _PreflightSettings(), approved, dry_run=True,
                      failures_csv=tmp_path / "pf.csv")
-    assert res.preflight_failures and not client.apex_calls
+    assert res.preflight_failures and not client.convert_calls
 
 
 def test_stage2_preflight_writes_csv_even_with_zero_targets(tmp_path):
@@ -418,7 +414,7 @@ def test_stage2_preflight_writes_csv_even_with_zero_targets(tmp_path):
                      failures_csv=tmp_path / "pf.csv")
     assert res.targets == []
     assert res.preflight_failures == []
-    assert not client.apex_calls
+    assert not client.convert_calls
     assert (tmp_path / "pf.csv").exists()
     assert (tmp_path / "pf.csv").read_text(encoding="utf-8").strip() == "lead_id,check,value,detail"
 
@@ -437,10 +433,10 @@ def test_run_stage2_routes_kununu_conflict_to_failures(tmp_path, monkeypatch):
     p = tmp_path / "approved.csv"
     _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
                          "contact_score": "1.0", "Approve?": "yes"}])
-    client = FakeApexClient()
+    client = FakeConvertClient()
     res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False,
                      failures_csv=tmp_path / "preflight_failures.csv")
-    assert client.apex_calls == []                 # conflicted lead never converted
+    assert client.convert_calls == []              # conflicted lead never converted
     assert any(f["check"] == "kununu_uuid_conflict" for f in res.preflight_failures)
 
 

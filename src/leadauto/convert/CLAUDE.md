@@ -44,21 +44,23 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    of leads with the same company ID are deduplicated into one primary (the first in sort order)
    that creates a new Account, and secondaries that link to the primary's new Account. If a
    primary fails conversion, its secondaries are reported as failed orphans (not converted).
-   Conversion runs anonymous Apex per batch (default **10**, `--batch-size`; kept small because
-   each conversion cascades Account/Contact triggers, flows and validation/duplicate rules
-   synchronously in one transaction — 50/tx risks governor limits): bulk `Database.convertLead
-   (list, allOrNone=false)`, per-lead `setAccountId`/`setContactId`, `setDoNotCreateOpportunity
-   (true)`, `setOwnerId(config owner_id)`. Converted status is resolved dynamically in Apex: the
-   configured label if the org has it, else the org's first converted `LeadStatus` by `SortOrder`.
-   The whole body is wrapped in try/catch — any uncaught exception reports every not-yet-reported
-   lead as failed, so a batch can never vanish silently.
-6. Results come back as ONE `@@LEADAUTO@@`-sentinel-wrapped `JSON.serialize` blob (emitted at
-   `LoggingLevel.ERROR` so no debug-log filter drops it) decoded by `parse_results` — never
-   regex-scrape debug lines. `convert_leads` reconciles the returned leadIds against its input:
-   leads already converted before the run get an explicit `alreadyConverted` result row (so a
-   re-run is a true no-op — counted `already_converted`, never `missing`), while any input lead
-   with NO result row at all (dead run, lost sentinel) is counted `missing`. Only `failed`/
-   `missing` fail the job; `already_converted` does not.
+   Conversion runs over the **SOAP Partner API `convertLead()`** (`SfClient.convert_lead` →
+   `sf/soap.py`; anonymous Apex is impossible — see Gotchas) per batch (default **10**,
+   `--batch-size`; kept small because each conversion cascades Account/Contact triggers, flows
+   and validation/duplicate rules synchronously — and the SOAP call takes ≤100 LeadConverts).
+   Each LeadConvert carries accountId/contactId when linked, `doNotCreateOpportunity=true`,
+   `overwriteLeadSource=false`, `sendNotificationEmail=false`, `ownerId` = config owner_id.
+   Converted status is resolved ONCE per run by SOQL (`LeadStatus WHERE IsConverted = true
+   ORDER BY SortOrder NULLS LAST`): the configured label if the org has it, else the first; no
+   converted status in the org fails every lead without calling SOAP.
+6. Per batch, a pre-query (`IsConverted = true`) gives already-converted inputs an explicit
+   `alreadyConverted` result row (so a re-run is a true no-op — counted `already_converted`,
+   never `missing`) and only the rest go to SOAP. `SfClient.convert_lead` returns one result
+   row per conversion in request order, backfilling a nil leadId (structural rejections) from
+   that order, and retries ONCE on an `INVALID_SESSION_ID` fault after re-fetching auth
+   (`SfClient.auth_info`, cached from `sf org display --json`). `convert_leads` still reconciles
+   returned leadIds against its input: any lead with NO result row is counted `missing`. Only
+   `failed`/`missing` fail the job; `already_converted` does not.
 7. **Post-convert email enrichment** (`converter.enrich_contact_email2`, called by `run_stage2`):
    leads converted in this run into a NEW Contact (no contact link — linked existing Contacts
    are never touched) whose Review-sheet row carried an `lf_contact_email` get that LF email
@@ -77,18 +79,18 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 
 ## Safety model
 
-- `dry_run` short-circuits in `convert_leads` before ANY Apex runs; config has `dry_run: true`
+- `dry_run` short-circuits in `convert_leads` before ANY org call; config has `dry_run: true`
   and the workflow input defaults to true.
 - IDs from the approved CSV are validated to the 15/18-char alphanumeric shape in
   `targets_from_approved` (raises `ValueError` → CLI exits non-zero) and re-guarded to
-  alphanumeric-only before embedding in Apex (`converter._apex_id`), so a malformed or
-  malicious cell can neither inject into the conversion Apex nor crash a batch at map-build.
+  alphanumeric-only before embedding in SOQL (`converter._apex_id`) or the SOAP envelope
+  (`soap._xml_id`), so a malformed or malicious cell can neither inject nor crash a batch.
 - A contact link without an account link is dropped in `targets_from_approved` (LeadConvert
   requires `setAccountId` alongside `setContactId`; the lead converts create-new instead).
-- Idempotent: the Apex only converts `IsConverted = false` leads and emits an explicit
-  `alreadyConverted` row for the rest, so re-running a batch (or an approved CSV where some rows
-  already converted) is a no-op that exits **green** — already-converted leads count as
-  `already_converted`, not `missing`/`failed`.
+- Idempotent: the per-batch pre-query routes `IsConverted = true` leads to an explicit
+  `alreadyConverted` row instead of the SOAP call, so re-running a batch (or an approved CSV
+  where some rows already converted) is a no-op that exits **green** — already-converted leads
+  count as `already_converted`, not `missing`/`failed`.
 - **No GitHub Environment gate** (resolved 2026-07-10): required-reviewers protection needs
   a paid plan on private repos (API returns 422 on this repo), so the `environment:`
   reference was REMOVED from `stage2.yml`. The conversion brake is that Stage 2 is
@@ -99,7 +101,16 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 
 ## Gotchas
 
-- **Duplicate rules can block `Database.convertLead` and Apex cannot bypass them** — the
+- **Anonymous-Apex conversion is impossible for the pipeline user** (root-caused 2026-07-10):
+  his `Kununu - Base Profile` lacks **Author Apex** (revoked since May 2026; no perm set grants
+  it), so execute-anonymous runs in RESTRICTED mode where the JSON class, JSONGenerator AND
+  `Database.convertLead` itself throw `System.SecurityException` — bisect-proven with harmless
+  snippets. He DOES hold Convert Leads (`KN_DataManager` perm set), which the SOAP Partner API
+  honors — hence `sf/soap.py`. Extra trap: the CI CLI (2.140.6, Linux) mangles that runtime
+  SecurityException into empty/unparseable `--json` output, which mimics a CLI flake (locally
+  2.141.6 shows the real exception). `SfClient.apex_run` still exists but conversion must NEVER
+  go back to Apex while the permission is absent.
+- **Duplicate rules can block conversion** (Apex or SOAP — same engine underneath) — the
   `setBypass*` methods on `Database.LeadConvert` are internal-only, and
   `Database.DMLOptions.DuplicateRuleHeader.AllowSave` does not apply to conversion (only to
   plain DML). If a Block rule fires: fix the duplicate or downgrade the rule to Alert.
@@ -107,11 +118,13 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
 - **Validation rules block conversion of sparse leads** — see "Conversion requirements" below
   (org-verified 2026-07-05). The May-2026 manual runs had to patch `Street = ','`,
   `KN_Employee__c = '11-50'`, `KN_NoOwnDBID__c = true` (`docs/legacy/convert-leads/convertLead.apex`).
-- `parse_results` returns `[]` on any missing sentinel / bad JSON. `convert_leads` no longer
-  lets that pass silently: it reconciles returned leadIds against the batch and counts any
-  absent lead as `missing` (logged at ERROR), and `apex_run` now runs `sf apex run --json` and
-  raises `SfError` on a compile error / uncaught exception. The `stage2` CLI exits non-zero when
-  `failed` or `missing` is non-zero, so CI fails loudly instead of reporting a false green.
+- **SOAP LeadConvert element ORDER matters** (WSDL sequence: accountId?, contactId?,
+  convertedStatus, doNotCreateOpportunity, leadId, overwriteLeadSource, ownerId?,
+  sendNotificationEmail) — `build_convert_envelope` pins it and tests assert it; a shuffled
+  envelope is rejected org-side. A SOAP Fault raises `SfError` (one INVALID_SESSION_ID retry);
+  `convert_leads` reconciles returned leadIds against the batch and counts any absent lead as
+  `missing` (logged at ERROR). The `stage2` CLI exits non-zero when `failed` or `missing` is
+  non-zero, so CI fails loudly instead of reporting a false green.
 - LeadConvert **re-parents the Lead's Tasks onto the Contact** (`Who.Type` flips) — the reason
   control-set joins had to go through `ConvertedContactId`.
 - `Lead.ConvertedDate` is Date-only (no time component) — shadow-compare treats "same UTC day"

@@ -1,165 +1,159 @@
-"""Conversion tests (Module 3c).
+"""Conversion tests (Module 3c) — SOAP-based.
 
-The generated Apex is asserted as a string (match-aware setAccountId/setContactId, bulk
-convertLead with allOrNone=false, IsConverted re-filter, sentinel-wrapped JSON). The org
-boundary is a FakeApexClient that echoes a serialized result for the lead ids it sees, so
-`convert_leads` batching + parsing + aggregation run end to end with no live conversion.
+Anonymous-Apex conversion is impossible in the org (the pipeline user lacks "Author
+Apex"; Database.convertLead throws System.SecurityException in restricted mode), so
+`convert_leads` drives `client.convert_lead` (SOAP Partner API) instead. The org
+boundary is a FakeSoapClient answering the LeadStatus/IsConverted SOQL and echoing
+success per conversion, so batching + reconciliation + aggregation run end to end
+with no live conversion.
 """
-import json
-import re
-
 import pytest
 
 from leadauto.config import Settings
 from leadauto.convert import (
-    SENTINEL,
     ConversionTarget,
-    build_convert_apex,
     convert_leads,
     enrich_contact_email2,
-    parse_results,
 )
 
 SETTINGS = Settings.load()
 
 
-class FakeApexClient:
-    def __init__(self):
-        self.apex_calls: list[str] = []
+class FakeSoapClient:
+    """query() answers the converted-status + already-converted SOQL;
+    convert_lead() echoes success (new account/contact) per conversion."""
 
-    def apex_run(self, apex: str) -> str:
-        self.apex_calls.append(apex)
-        # lead ids live in the `Set<Id> leadIds` literal before the first Map<Id,Id>
-        head = apex.split("Map<Id,Id>", 1)[0]
-        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-        out = [{"leadId": i, "success": True, "accountId": "001NEW", "contactId": "003NEW"}
-               for i in ids]
-        return f"45.0 APEX_CODE\nUSER_DEBUG|{SENTINEL}{json.dumps(out)}{SENTINEL}\nDONE"
+    def __init__(self, statuses=("Qualified",), already_converted=()):
+        self.statuses = list(statuses)
+        self.already_converted = {i for i in already_converted}
+        self.queries: list[str] = []
+        self.convert_calls: list[dict] = []
 
+    def query(self, soql, bulk=False):
+        self.queries.append(soql)
+        if "FROM LeadStatus" in soql:
+            return [{"MasterLabel": s} for s in self.statuses]
+        if "FROM Lead" in soql and "IsConverted = true" in soql:
+            return [{"Id": i} for i in self.already_converted if i in soql]
+        return []
 
-# --- Apex generation ---------------------------------------------------------
-
-def test_build_apex_is_match_aware():
-    targets = [
-        ConversionTarget("00Q1", account_id="001A", contact_id="003C"),  # link both
-        ConversionTarget("00Q2"),                                        # create new
-    ]
-    apex = build_convert_apex(targets, owner_id="005OWNER", converted_status="Qualified")
-    assert "'00Q1'" in apex and "'00Q2'" in apex
-    assert "'00Q1' => '001A'" in apex   # account map entry
-    assert "'00Q1' => '003C'" in apex   # contact map entry
-    assert "setAccountId" in apex and "setContactId" in apex
-    assert "setOwnerId('005OWNER')" in apex
-    assert "Qualified" in apex
-    assert "setDoNotCreateOpportunity(true)" in apex
-    assert "Database.convertLead(conversions, false)" in apex
-    assert "IsConverted = false" in apex
-    assert "JSON.serialize" in apex
-    assert SENTINEL in apex
-
-
-def test_build_apex_omits_owner_when_absent():
-    apex = build_convert_apex([ConversionTarget("00Q1")], owner_id=None,
-                              converted_status="Qualified")
-    assert "setOwnerId" not in apex
-
-
-def test_build_apex_escapes_single_quote_in_status():
-    apex = build_convert_apex([ConversionTarget("00Q1")], owner_id=None,
-                              converted_status="Qual'ified")
-    assert "Qual\\'ified" in apex   # apostrophe escaped for the Apex string literal
-    assert "'Qual'ified'" not in apex  # unescaped form must not appear
-
-
-def test_build_apex_always_emits_sentinel_and_guards_exceptions():
-    # An uncaught Apex exception must not swallow the whole batch: the run is wrapped in
-    # try/catch and the sentinel is always printed at ERROR level.
-    apex = build_convert_apex([ConversionTarget("00Q1")], owner_id=None,
-                              converted_status="Qualified")
-    assert "try {" in apex and "catch (Exception" in apex
-    assert "LoggingLevel.ERROR" in apex
-    assert apex.count(SENTINEL) == 2   # one JSON.serialize call, opened + closed
-
-
-def test_build_apex_rejects_id_injection():
-    # A value that could break out of the Apex string literal is refused, not escaped.
-    with pytest.raises(ValueError, match="non-alphanumeric"):
-        build_convert_apex([ConversionTarget("00Q1'); System.abortJob('x")],
-                           owner_id=None, converted_status="Qualified")
-
-
-def test_build_apex_reports_already_converted_leads():
-    # Already-converted inputs must get an explicit result row (idempotent no-op) rather
-    # than being silently filtered out and later counted as `missing`.
-    apex = build_convert_apex([ConversionTarget("00Q1")], owner_id=None,
-                              converted_status="Qualified")
-    assert "IsConverted = true" in apex
-    assert "'alreadyConverted'" in apex
-
-
-# --- result parsing ----------------------------------------------------------
-
-def test_parse_results_extracts_json_between_sentinels():
-    payload = [{"leadId": "00Q1", "success": True, "accountId": "001A"}]
-    output = f"junk before {SENTINEL}{json.dumps(payload)}{SENTINEL} junk after"
-    parsed = parse_results(output)
-    assert parsed == payload
-
-
-def test_parse_results_no_sentinel_returns_empty():
-    assert parse_results("nothing serialized here") == []
+    def convert_lead(self, conversions, *, converted_status, owner_id):
+        self.convert_calls.append({"conversions": conversions,
+                                   "converted_status": converted_status,
+                                   "owner_id": owner_id})
+        return [{"leadId": c["lead_id"], "success": True,
+                 "accountId": "001NEW", "contactId": "003NEW"} for c in conversions]
 
 
 # --- convert_leads orchestration ---------------------------------------------
 
 def test_convert_leads_dry_run_makes_no_calls():
-    client = FakeApexClient()
+    client = FakeSoapClient()
     targets = [ConversionTarget("00Q1", account_id="001A"), ConversionTarget("00Q2")]
     res = convert_leads(client, targets, SETTINGS, dry_run=True)
-    assert client.apex_calls == []
+    assert client.convert_calls == [] and client.queries == []
     assert res["converted"] == 0
     assert res["planned"] == 2
 
 
 def test_convert_leads_live_converts_and_aggregates():
-    client = FakeApexClient()
+    client = FakeSoapClient()
     targets = [ConversionTarget("00Q1", account_id="001A", contact_id="003C"),
                ConversionTarget("00Q2")]
     res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
-    assert len(client.apex_calls) == 1
+    assert len(client.convert_calls) == 1
+    call = client.convert_calls[0]
+    # match-aware: the linked lead carries its account/contact ids, create-new does not
+    assert call["conversions"] == [
+        {"lead_id": "00Q1", "account_id": "001A", "contact_id": "003C"},
+        {"lead_id": "00Q2", "account_id": None, "contact_id": None},
+    ]
+    assert call["converted_status"] == SETTINGS.converted_status
+    assert call["owner_id"] == SETTINGS.owner_id
     assert res["converted"] == 2
     assert res["failed"] == 0
     assert len(res["results"]) == 2
 
 
 def test_convert_leads_batches_by_size():
-    client = FakeApexClient()
+    client = FakeSoapClient()
     targets = [ConversionTarget(f"00Q{i}") for i in range(120)]
     res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
-    assert len(client.apex_calls) == 3          # 50 + 50 + 20
+    assert len(client.convert_calls) == 3          # 50 + 50 + 20
     assert res["converted"] == 120
+    # the converted-status SOQL runs once for the whole run, not per batch
+    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 1
 
 
 def test_convert_leads_empty_is_noop():
-    client = FakeApexClient()
+    client = FakeSoapClient()
     res = convert_leads(client, [], SETTINGS, dry_run=False)
-    assert client.apex_calls == []
+    assert client.convert_calls == [] and client.queries == []
     assert res["converted"] == 0 and res["planned"] == 0
 
 
-class _PartialApexClient:
-    """Echoes a result only for the first lead of each batch; the rest go unaccounted for."""
-    def apex_run(self, apex: str) -> str:
-        head = apex.split("Map<Id,Id>", 1)[0]
-        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-        out = [{"leadId": ids[0], "success": True}] if ids else []
-        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+def test_convert_leads_prefers_configured_status_falls_back_to_first():
+    client = FakeSoapClient(statuses=("Closed - Converted", "Qualified"))
+    convert_leads(client, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
+    # config says Qualified and the org has it -> Qualified wins over the first row
+    assert client.convert_calls[0]["converted_status"] == "Qualified"
+
+    client2 = FakeSoapClient(statuses=("Closed - Converted",))
+    convert_leads(client2, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
+    assert client2.convert_calls[0]["converted_status"] == "Closed - Converted"
+
+
+def test_convert_leads_no_converted_status_fails_all_without_converting():
+    client = FakeSoapClient(statuses=())
+    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False)
+    assert client.convert_calls == []
+    assert res["failed"] == 2 and res["converted"] == 0 and res["missing"] == 0
+    assert all("No converted LeadStatus" in r["errors"][0] for r in res["results"])
+
+
+def test_convert_leads_already_converted_is_noop_not_missing():
+    # Re-running an already-converted batch is a clean no-op: the pre-query finds the
+    # leads IsConverted=true, they get explicit alreadyConverted rows, never reach the
+    # SOAP call, and count as `already_converted`, not `missing`/`failed`/`converted`.
+    client = FakeSoapClient(already_converted=("00Q1", "00Q2"))
+    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False)
+    assert client.convert_calls == []              # nothing left to convert
+    assert res["already_converted"] == 2
+    assert res["converted"] == 0
+    assert res["failed"] == 0
+    assert res["missing"] == 0 and res["missing_ids"] == []
+
+
+def test_convert_leads_already_converted_matches_18_char_ids():
+    # The org returns 18-char Ids; a 15-char target must still reconcile as already
+    # converted (case-sensitive 15-char prefix comparison).
+    lead15 = "00QMz00000kDmtx"
+    client = FakeSoapClient(already_converted=(lead15 + "MAC",))
+    client.already_converted = {lead15 + "MAC"}
+
+    def query(soql, bulk=False):
+        client.queries.append(soql)
+        if "FROM LeadStatus" in soql:
+            return [{"MasterLabel": "Qualified"}]
+        if "IsConverted = true" in soql:
+            return [{"Id": lead15 + "MAC"}]        # 18-char org form
+        return []
+    client.query = query
+    res = convert_leads(client, [ConversionTarget(lead15)], SETTINGS, dry_run=False)
+    assert res["already_converted"] == 1 and res["missing"] == 0
 
 
 def test_convert_leads_reports_leads_missing_from_results():
-    # A lead the Apex never returns at all (a run that died before the sentinel) must
-    # surface as `missing`, never silently drop from the counts.
-    client = _PartialApexClient()
+    # A lead the SOAP call never returns a row for must surface as `missing`,
+    # never silently drop from the counts.
+    class _PartialClient(FakeSoapClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            first = conversions[0]
+            return [{"leadId": first["lead_id"], "success": True}]
+
+    client = _PartialClient()
     targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
     res = convert_leads(client, targets, SETTINGS, dry_run=False)
     assert res["converted"] == 1
@@ -167,78 +161,76 @@ def test_convert_leads_reports_leads_missing_from_results():
     assert res["missing_ids"] == ["00Q2"]
 
 
-class _AlreadyConvertedApexClient:
-    """Simulates a re-run: every input lead is already converted, so the Apex returns an
-    `alreadyConverted` row for each (no fresh conversion happens)."""
-    def apex_run(self, apex: str) -> str:
-        head = apex.split("Map<Id,Id>", 1)[0]
-        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-        out = [{"leadId": i, "success": True, "alreadyConverted": True} for i in ids]
-        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+def test_convert_leads_failure_rows_aggregate_as_failed():
+    class _FailingClient(FakeSoapClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            return [{"leadId": c["lead_id"], "success": False,
+                     "errors": ["DUPLICATES_DETECTED: Use one of these records?"]}
+                    for c in conversions]
+
+    client = _FailingClient()
+    res = convert_leads(client, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
+    assert res["failed"] == 1 and res["converted"] == 0 and res["missing"] == 0
 
 
-def test_convert_leads_already_converted_is_noop_not_missing():
-    # Re-running an already-converted batch is a clean no-op: leads count as
-    # `already_converted`, not `missing`/`failed`/`converted`, so the job stays green.
-    client = _AlreadyConvertedApexClient()
-    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
-    res = convert_leads(client, targets, SETTINGS, dry_run=False)
-    assert res["already_converted"] == 2
-    assert res["converted"] == 0
-    assert res["failed"] == 0
-    assert res["missing"] == 0 and res["missing_ids"] == []
-
-
-def test_convert_leads_no_sentinel_marks_whole_batch_missing():
-    class _SilentClient:
-        def apex_run(self, apex: str) -> str:
-            return "compiled, but produced no sentinel"
-
-    res = convert_leads(_SilentClient(), [ConversionTarget("00Q1"), ConversionTarget("00Q2")],
-                        SETTINGS, dry_run=False)
-    assert res["converted"] == 0
-    assert res["missing"] == 2
-    assert set(res["missing_ids"]) == {"00Q1", "00Q2"}
+def test_convert_leads_rejects_id_injection():
+    # A lead id that could break out of the SOQL literal / SOAP envelope is refused.
+    client = FakeSoapClient()
+    with pytest.raises(ValueError, match="non-alphanumeric"):
+        convert_leads(client, [ConversionTarget("00Q1'); DELETE ALL --")],
+                      SETTINGS, dry_run=False)
 
 
 # --- two-phase same-company clustering ---------------------------------------
 
-class _ClusterApexClient:
-    """Per-primary account ids so secondaries can link; records each phase's apex."""
-    def __init__(self):
-        self.calls = []
+class _ClusterClient(FakeSoapClient):
+    """Per-primary account ids so secondaries can link; records each phase's calls."""
 
-    def apex_run(self, apex: str) -> str:
-        self.calls.append(apex)
-        head = apex.split("Map<Id,Id>", 1)[0]
-        ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-        out = []
-        for i in ids:
-            # a lead already linked (appears in acctByLead map) echoes that account;
-            # otherwise it "creates" account 001<lead>.
-            out.append({"leadId": i, "success": True, "accountId": f"001{i}"})
-        return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
+    def convert_lead(self, conversions, *, converted_status, owner_id):
+        self.convert_calls.append({"conversions": conversions,
+                                   "converted_status": converted_status,
+                                   "owner_id": owner_id})
+        return [{"leadId": c["lead_id"], "success": True,
+                 "accountId": c.get("account_id") or f"001{c['lead_id']}"}
+                for c in conversions]
 
 
 def test_convert_leads_clusters_same_company_create_new():
-    client = _ClusterApexClient()
+    client = _ClusterClient()
     targets = [ConversionTarget("00Q1", lf_company_id="LF-1"),
                ConversionTarget("00Q2", lf_company_id="LF-1"),
                ConversionTarget("00Q3", lf_company_id="LF-2")]
     res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
     assert res["converted"] == 3 and res["failed"] == 0 and res["missing"] == 0
     # Phase 2 ran and linked 00Q2 to the account 00Q1 created (00100Q1).
-    phase2 = client.calls[-1]
-    assert "00Q2" in phase2 and "'00Q2' => '00100Q1'" in phase2
+    phase2 = client.convert_calls[-1]["conversions"]
+    assert phase2 == [{"lead_id": "00Q2", "account_id": "00100Q1", "contact_id": None}]
 
 
 def test_convert_leads_blank_company_not_clustered():
-    client = _ClusterApexClient()
+    client = _ClusterClient()
     targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]  # both blank lf_company_id
     res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
     assert res["converted"] == 2
-    # single phase only (no secondaries) -> exactly one apex call
-    assert len(client.calls) == 1
+    # single phase only (no secondaries) -> exactly one SOAP call
+    assert len(client.convert_calls) == 1
+
+
+def test_convert_leads_orphan_secondary_when_primary_fails():
+    class _PrimaryFailsClient(FakeSoapClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            self.convert_calls.append({"conversions": conversions})
+            return [{"leadId": c["lead_id"], "success": False, "errors": ["DUPLICATE"]}
+                    for c in conversions]
+
+    client = _PrimaryFailsClient()
+    targets = [ConversionTarget("00Q1", lf_company_id="LF-1"),
+               ConversionTarget("00Q2", lf_company_id="LF-1")]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
+    assert res["converted"] == 0
+    assert res["failed"] == 2          # primary failed + secondary reported failed
+    assert res["missing"] == 0
+    assert len(client.convert_calls) == 1      # no phase 2 (primary produced no account)
 
 
 # --- post-convert KN_Email2__c enrichment on NEW Contacts ---------------------
@@ -317,25 +309,3 @@ def test_email2_failure_never_raises():
     results = [{"leadId": "00Q1", "success": True, "contactId": "003NEW"}]
     out = enrich_contact_email2(_Boom(), targets, results)
     assert out["processed"] == 0 and out["failed"] == 1
-
-
-def test_convert_leads_orphan_secondary_when_primary_fails():
-    class _PrimaryFailsClient:
-        def __init__(self):
-            self.calls = []
-
-        def apex_run(self, apex):
-            self.calls.append(apex)
-            head = apex.split("Map<Id,Id>", 1)[0]
-            ids = list(dict.fromkeys(re.findall(r"'(00Q[0-9A-Za-z]+)'", head)))
-            out = [{"leadId": i, "success": False, "errors": ["DUPLICATE"]} for i in ids]
-            return f"{SENTINEL}{json.dumps(out)}{SENTINEL}"
-
-    client = _PrimaryFailsClient()
-    targets = [ConversionTarget("00Q1", lf_company_id="LF-1"),
-               ConversionTarget("00Q2", lf_company_id="LF-1")]
-    res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
-    assert res["converted"] == 0
-    assert res["failed"] == 2          # primary failed + secondary reported failed
-    assert res["missing"] == 0
-    assert len(client.calls) == 1      # no phase 2 (primary produced no account)

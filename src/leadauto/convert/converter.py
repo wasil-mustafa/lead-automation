@@ -1,53 +1,47 @@
-"""Match-aware bulk Lead conversion (ported + extended from Scripts/convert.py).
+"""Match-aware bulk Lead conversion via the SOAP Partner API.
 
-Kept from the legacy script: dynamic converted-status resolution, owner assignment,
-`setDoNotCreateOpportunity(true)`, and the bulk `Database.convertLead(List, allOrNone=false)`
-partial-success call. Added per the plan:
+History: the original implementation generated anonymous conversion Apex, but the
+pipeline user lacks the "Author Apex" permission, so execute-anonymous runs in
+restricted mode where `Database.convertLead` itself throws System.SecurityException
+(root-caused 2026-07-10 — the May-2026 manual Apex conversions predate the revocation).
+The user DOES hold Convert Leads, which the SOAP Partner API `convertLead()` call
+honors, so conversion now goes through `client.convert_lead` (sf/soap.py builds and
+parses the envelope). Semantics are unchanged:
 
-  * **match-aware** — per-lead `setAccountId` / `setContactId` from the approved match, so a
+  * **match-aware** — per-lead accountId/contactId from the approved match, so a
     matched Lead links to its existing Account/Contact instead of always creating new;
-  * **idempotent** — the Apex re-filters `IsConverted = false`, so re-running converts nothing;
-  * **robust results** — instead of regex-scraping debug lines, the Apex emits one
-    sentinel-wrapped `JSON.serialize` blob that `parse_results` decodes. The whole run is
-    wrapped in try/catch and the sentinel is ALWAYS printed (at LoggingLevel.ERROR so no
-    debug-level filter can drop it); an uncaught-exception batch reports every lead as
-    failed instead of vanishing. `convert_leads` reconciles results against its input and
-    reports leads with no result row as `missing` (e.g. already-converted ones the Apex
-    query filters out).
+  * **idempotent** — a pre-query finds `IsConverted = true` inputs and emits an explicit
+    `alreadyConverted` result row for each (never sent to SOAP), so a re-run is a true
+    no-op that stays green;
+  * **reconciled** — every input lead must come back in the results; leads with no
+    result row are counted `missing`, never silently dropped.
 
-`dry_run` short-circuits before any Apex runs. Alias/owner/status come from config (the dead
-`myOrg` alias is gone — the injected client targets `headless`).
+The converted LeadStatus is resolved once per run by SOQL (prefer the configured
+label, else the org's first converted status by SortOrder); `dry_run` short-circuits
+before any org call.
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, replace
 
 from ..logging import get_logger
 
-SENTINEL = "@@LEADAUTO@@"
-
-# Injection guard for values embedded in generated Apex Id literals. Shape validation
+# Injection guard for values embedded in generated SOQL Id literals. Shape validation
 # (15/18 chars) happens at the CSV boundary in stage2_convert.targets_from_approved;
 # this is the last line of defense for ANY caller.
 _APEX_ID_RE = re.compile(r"[A-Za-z0-9]{1,18}")
 
 
-def _apex_str(value: str) -> str:
-    """Escape a value for safe embedding inside an Apex single-quoted string literal."""
-    return value.replace("\\", "\\\\").replace("'", "\\'")
-
-
 def _apex_id(value: str) -> str:
-    """Refuse to embed anything but a plain alphanumeric Id in generated Apex."""
+    """Refuse to embed anything but a plain alphanumeric Id in generated SOQL."""
     if not _APEX_ID_RE.fullmatch(value or ""):
-        raise ValueError(f"Refusing to embed non-alphanumeric Salesforce Id in Apex: {value!r}")
+        raise ValueError(f"Refusing to embed non-alphanumeric Salesforce Id: {value!r}")
     return value
 
 
 def _short_id(sf_id: str) -> str:
-    """Case-sensitive 15-char prefix: Apex serializes 18-char Ids, CSV rows may carry 15."""
+    """Case-sensitive 15-char prefix: the org returns 18-char Ids, CSV rows may carry 15."""
     return (sf_id or "")[:15]
 
 
@@ -67,125 +61,16 @@ class ConversionTarget:
     lf_contact_email: str | None = None
 
 
-def _id_set(targets: list[ConversionTarget]) -> str:
-    return ", ".join(f"'{_apex_id(t.lead_id)}'" for t in targets)
-
-
-def _id_map(pairs: list[tuple[str, str]]) -> str:
-    if not pairs:
-        return "new Map<Id,Id>()"
-    entries = ", ".join(f"'{_apex_id(k)}' => '{_apex_id(v)}'" for k, v in pairs)
-    return f"new Map<Id,Id>{{ {entries} }}"
-
-
-def build_convert_apex(
-    targets: list[ConversionTarget], *, owner_id: str | None, converted_status: str,
-    sentinel: str = SENTINEL,
-) -> str:
-    """Generate bulk, match-aware, idempotent conversion Apex for one batch of targets."""
-    acct_pairs = [(t.lead_id, t.account_id) for t in targets if t.account_id]
-    con_pairs = [(t.lead_id, t.contact_id) for t in targets if t.contact_id]
-    owner_line = f"            lc.setOwnerId('{_apex_str(owner_id)}');\n" if owner_id else ""
-    status_literal = _apex_str(converted_status)
-
-    return f"""Set<Id> leadIds = new Set<Id>{{ {_id_set(targets)} }};
-Map<Id,Id> acctByLead = {_id_map(acct_pairs)};
-Map<Id,Id> conByLead = {_id_map(con_pairs)};
-
-List<Map<String, Object>> out = new List<Map<String, Object>>();
-Set<Id> reported = new Set<Id>();
-
-try {{
-    // Already-converted inputs are an idempotent no-op, not a silent drop: emit a result
-    // row so reconciliation counts them (never as `missing`) and a re-run stays green.
-    for (Lead l : [SELECT Id FROM Lead WHERE Id IN :leadIds AND IsConverted = true]) {{
-        Map<String, Object> m = new Map<String, Object>();
-        m.put('leadId', l.Id); m.put('success', true); m.put('alreadyConverted', true);
-        out.add(m); reported.add(l.Id);
-    }}
-
-    // Resolve the converted LeadStatus: prefer the configured one, else the org's first converted status.
-    String convertedStatus;
-    for (LeadStatus s : [SELECT MasterLabel FROM LeadStatus WHERE IsConverted = true ORDER BY SortOrder NULLS LAST]) {{
-        if (s.MasterLabel == '{status_literal}') {{ convertedStatus = s.MasterLabel; break; }}
-        if (convertedStatus == null) {{ convertedStatus = s.MasterLabel; }}
-    }}
-
-    Map<Id, Lead> leadsById = new Map<Id, Lead>(
-        [SELECT Id, Name FROM Lead WHERE Id IN :leadIds AND IsConverted = false]
-    );
-
-    List<Database.LeadConvert> conversions = new List<Database.LeadConvert>();
-
-    if (convertedStatus == null) {{
-        for (Lead l : leadsById.values()) {{
-            Map<String, Object> m = new Map<String, Object>();
-            m.put('leadId', l.Id); m.put('success', false);
-            m.put('errors', new List<String>{{ 'No converted LeadStatus configured in this org.' }});
-            out.add(m); reported.add(l.Id);
-        }}
-    }} else {{
-        for (Lead l : leadsById.values()) {{
-            Database.LeadConvert lc = new Database.LeadConvert();
-            lc.setLeadId(l.Id);
-{owner_line}            lc.setConvertedStatus(convertedStatus);
-            lc.setDoNotCreateOpportunity(true);
-            if (acctByLead.containsKey(l.Id)) {{ lc.setAccountId(acctByLead.get(l.Id)); }}
-            if (conByLead.containsKey(l.Id)) {{ lc.setContactId(conByLead.get(l.Id)); }}
-            conversions.add(lc);
-        }}
-        if (!conversions.isEmpty()) {{
-            List<Database.LeadConvertResult> results = Database.convertLead(conversions, false);
-            for (Integer i = 0; i < results.size(); i++) {{
-                Database.LeadConvertResult r = results[i];
-                Map<String, Object> m = new Map<String, Object>();
-                m.put('leadId', conversions[i].getLeadId());
-                m.put('success', r.isSuccess());
-                if (r.isSuccess()) {{
-                    m.put('accountId', r.getAccountId());
-                    m.put('contactId', r.getContactId());
-                }} else {{
-                    List<String> errs = new List<String>();
-                    for (Database.Error e : r.getErrors()) {{ errs.add(e.getStatusCode() + ': ' + e.getMessage()); }}
-                    m.put('errors', errs);
-                }}
-                out.add(m); reported.add(conversions[i].getLeadId());
-            }}
-        }}
-    }}
-}} catch (Exception ex) {{
-    // Catching (not rethrowing) keeps any conversions committed before the exception; the
-    // sentinel below must still print. Leads without a result row are reported failed.
-    String err = ex.getTypeName() + ': ' + ex.getMessage();
-    for (Id lid : leadIds) {{
-        if (reported.contains(lid)) {{ continue; }}
-        Map<String, Object> m = new Map<String, Object>();
-        m.put('leadId', lid); m.put('success', false);
-        m.put('errors', new List<String>{{ err }});
-        out.add(m);
-    }}
-}}
-
-// ERROR level: survives restrictive debug-log filter levels that would drop plain System.debug.
-System.debug(LoggingLevel.ERROR, '{sentinel}' + JSON.serialize(out) + '{sentinel}');
-"""
-
-
-def parse_results(output: str, sentinel: str = SENTINEL) -> list[dict]:
-    """Decode the sentinel-wrapped JSON result blob from the Apex run output. [] if absent."""
-    first = output.find(sentinel)
-    if first == -1:
-        return []
-    start = first + len(sentinel)
-    end = output.find(sentinel, start)
-    if end == -1:
-        return []
-    blob = output[start:end].strip()
-    try:
-        data = json.loads(blob)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
+def _resolve_converted_status(client, settings) -> str | None:
+    """Prefer the configured converted-status label if the org has it, else the org's
+    first converted LeadStatus by SortOrder. None when the org has no converted status."""
+    rows = client.query(
+        "SELECT MasterLabel FROM LeadStatus WHERE IsConverted = true "
+        "ORDER BY SortOrder NULLS LAST")
+    labels = [r.get("MasterLabel") for r in rows if r.get("MasterLabel")]
+    if settings.converted_status in labels:
+        return settings.converted_status
+    return labels[0] if labels else None
 
 
 def _norm_email(value) -> str:
@@ -259,23 +144,48 @@ def _cluster_by_company(targets: list[ConversionTarget]) -> list[list[Conversion
     return [groups[k] for k in order] + singletons
 
 
-def _run_convert(client, targets, settings, batch_size, log, phase_label=""):
-    """Convert one target list in batches; return (results, missing_ids)."""
+def _already_converted(client, batch: list[ConversionTarget]) -> set[str]:
+    """15-char prefixes of batch leads the org already holds as IsConverted=true."""
+    id_list = ", ".join(f"'{_apex_id(t.lead_id)}'" for t in batch)
+    rows = client.query(
+        f"SELECT Id FROM Lead WHERE Id IN ({id_list}) AND IsConverted = true")
+    return {_short_id(str(r.get("Id") or "")) for r in rows}
+
+
+def _run_convert(client, targets, settings, batch_size, log, phase_label="",
+                 converted_status=None):
+    """Convert one target list in batches; return (results, missing_ids).
+
+    Per batch: (1) pre-query already-converted inputs and emit explicit
+    `alreadyConverted` rows (idempotent no-op, never `missing`); (2) SOAP-convert the
+    rest; (3) reconcile — any batch lead with no result row is reported `missing`.
+    """
     results: list[dict] = []
     missing_ids: list[str] = []
     for i in range(0, len(targets), batch_size):
         batch = targets[i:i + batch_size]
-        apex = build_convert_apex(
-            batch, owner_id=settings.owner_id, converted_status=settings.converted_status)
-        parsed = parse_results(client.apex_run(apex))
-        returned = {_short_id(str(r.get("leadId") or "")) for r in parsed}
+        rows: list[dict] = []
+        done = _already_converted(client, batch)
+        pending: list[ConversionTarget] = []
+        for t in batch:
+            if _short_id(t.lead_id) in done:
+                rows.append({"leadId": t.lead_id, "success": True,
+                             "alreadyConverted": True})
+            else:
+                pending.append(t)
+        if pending:
+            rows.extend(client.convert_lead(
+                [{"lead_id": t.lead_id, "account_id": t.account_id,
+                  "contact_id": t.contact_id} for t in pending],
+                converted_status=converted_status, owner_id=settings.owner_id))
+        returned = {_short_id(str(r.get("leadId") or "")) for r in rows}
         absent = [t.lead_id for t in batch if _short_id(t.lead_id) not in returned]
         if absent:
             log.error("%sBatch %d: %d of %d lead(s) have no conversion result: %s",
                       phase_label, i // batch_size + 1, len(absent), len(batch),
                       ", ".join(absent))
             missing_ids.extend(absent)
-        results.extend(parsed)
+        results.extend(rows)
     return results, missing_ids
 
 
@@ -283,13 +193,12 @@ def convert_leads(
     client, targets: list[ConversionTarget], settings, *,
     dry_run: bool = False, batch_size: int = 10, logger=None,
 ) -> dict:
-    """Convert the targets in batches; aggregate per-lead results. No Apex runs under dry_run.
+    """Convert the targets in batches; aggregate per-lead results. No org call under dry_run.
 
     Every input lead is reconciled against the returned results: leads already converted
-    before this run come back as `already_converted` (the Apex emits an explicit row for
-    them, so a re-run is a true no-op), while leads with NO result row at all (missing
-    sentinel, or a run that died mid-batch) come back in `missing`/`missing_ids`. No lead
-    can silently drop out of the counts.
+    before this run come back as `already_converted` (the pre-query emits an explicit row
+    for them, so a re-run is a true no-op), while leads with NO result row at all come
+    back in `missing`/`missing_ids`. No lead can silently drop out of the counts.
     """
     log = logger or get_logger("convert")
     planned = len(targets)
@@ -301,13 +210,23 @@ def convert_leads(
         return {"converted": 0, "already_converted": 0, "failed": 0, "planned": 0,
                 "missing": 0, "missing_ids": [], "results": []}
 
+    converted_status = _resolve_converted_status(client, settings)
+    if converted_status is None:
+        log.error("No converted LeadStatus configured in this org; converting nothing")
+        results = [{"leadId": t.lead_id, "success": False,
+                    "errors": ["No converted LeadStatus configured in this org."]}
+                   for t in targets]
+        return {"converted": 0, "already_converted": 0, "failed": planned,
+                "planned": planned, "missing": 0, "missing_ids": [], "results": results}
+
     existing_link = [t for t in targets if t.account_id]
     create_new = [t for t in targets if not t.account_id]
     clusters = _cluster_by_company(create_new)
     primaries = [c[0] for c in clusters]
 
     results1, missing1 = _run_convert(
-        client, existing_link + primaries, settings, batch_size, log, "phase1 ")
+        client, existing_link + primaries, settings, batch_size, log, "phase1 ",
+        converted_status=converted_status)
     acct_by_primary = {_short_id(str(r.get("leadId") or "")): r["accountId"]
                        for r in results1 if r.get("success") and r.get("accountId")}
 
@@ -327,7 +246,8 @@ def convert_leads(
                 for s in secondaries)
 
     results2, missing2 = ((_run_convert(client, phase2_targets, settings, batch_size, log,
-                                        "phase2 ")) if phase2_targets else ([], []))
+                                        "phase2 ", converted_status=converted_status))
+                          if phase2_targets else ([], []))
 
     all_results = results1 + results2 + orphan_results
     missing_ids = missing1 + missing2

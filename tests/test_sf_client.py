@@ -181,6 +181,170 @@ def test_apex_run_gives_up_after_three_unparseable_attempts(monkeypatch):
     assert len(calls) == 3
 
 
+# --- auth_info + SOAP convert_lead --------------------------------------------
+# Conversion goes over the SOAP Partner API (the org user lacks "Author Apex", so
+# anonymous-Apex conversion throws System.SecurityException; SOAP honors his
+# Convert Leads permission). auth_info supplies the session id + instance URL.
+
+def _fake_org_display(capture, token="TOK1", url="https://kununu.my.salesforce.com"):
+    def run(cmd, check=True):
+        capture.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+            {"result": {"accessToken": token, "instanceUrl": url}}), stderr="")
+    return run
+
+
+def test_auth_info_parses_and_caches_org_display(monkeypatch):
+    client = SfClient("headless")
+    cmds: list[str] = []
+    monkeypatch.setattr(client, "_run", _fake_org_display(cmds))
+    info = client.auth_info()
+    assert info == {"access_token": "TOK1",
+                    "instance_url": "https://kununu.my.salesforce.com"}
+    assert client.auth_info() is info          # cached: no second CLI call
+    assert len(cmds) == 1
+    assert "org display" in cmds[0] and "--json" in cmds[0]
+
+
+def test_auth_info_raises_when_fields_missing(monkeypatch):
+    client = SfClient("headless")
+
+    def run(cmd, check=True):
+        return types.SimpleNamespace(returncode=0,
+                                     stdout=json.dumps({"result": {}}), stderr="")
+    monkeypatch.setattr(client, "_run", run)
+    with pytest.raises(SfError, match="accessToken|instanceUrl"):
+        client.auth_info()
+
+
+class _FakeResponse:
+    def __init__(self, text, status_code=200):
+        self.text = text
+        self.status_code = status_code
+
+
+def _soap_success(lead_rows) -> str:
+    results = "".join(
+        f"<result><accountId>{r.get('accountId', '')}</accountId>"
+        f"<contactId>{r.get('contactId', '')}</contactId>"
+        f"<leadId>{r['leadId']}</leadId><success>true</success></result>"
+        for r in lead_rows)
+    return ('<?xml version="1.0"?><soapenv:Envelope '
+            'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+            'xmlns="urn:partner.soap.sforce.com"><soapenv:Body>'
+            f"<convertLeadResponse>{results}</convertLeadResponse>"
+            "</soapenv:Body></soapenv:Envelope>")
+
+
+_SOAP_FAULT_SESSION = ('<?xml version="1.0"?><soapenv:Envelope '
+                       'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+                       "<soapenv:Body><soapenv:Fault>"
+                       "<faultcode>sf:INVALID_SESSION_ID</faultcode>"
+                       "<faultstring>INVALID_SESSION_ID: session expired</faultstring>"
+                       "</soapenv:Fault></soapenv:Body></soapenv:Envelope>")
+
+
+def test_convert_lead_posts_partner_soap_and_returns_rows(monkeypatch):
+    client = SfClient("headless", api_version="66.0")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    posts: list[dict] = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        # the envelope is posted as UTF-8 bytes so the charset header is honest
+        posts.append({"url": url, "data": data.decode("utf-8"), "headers": headers})
+        return _FakeResponse(_soap_success(
+            [{"leadId": "00Q1", "accountId": "001A", "contactId": "003A"}]))
+    monkeypatch.setattr("leadauto.sf.client.requests.post", fake_post)
+
+    rows = client.convert_lead([{"lead_id": "00Q1"}],
+                               converted_status="Qualified", owner_id="005X")
+    assert rows[0]["leadId"] == "00Q1" and rows[0]["success"] is True
+    post = posts[0]
+    assert post["url"] == "https://kununu.my.salesforce.com/services/Soap/u/66.0"
+    assert post["headers"]["Content-Type"].startswith("text/xml")
+    assert post["headers"]["SOAPAction"] == '""'
+    assert "TOK1" in post["data"] and "00Q1" in post["data"]
+
+
+def test_convert_lead_backfills_nil_lead_id_from_request_order(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    body = ('<?xml version="1.0"?><soapenv:Envelope '
+            'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+            'xmlns="urn:partner.soap.sforce.com" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body>'
+            "<convertLeadResponse>"
+            "<result><leadId>00Q1</leadId><success>true</success></result>"
+            "<result><errors><message>bad</message><statusCode>INVALID_ID</statusCode>"
+            '</errors><leadId xsi:nil="true"/><success>false</success></result>'
+            "</convertLeadResponse></soapenv:Body></soapenv:Envelope>")
+    monkeypatch.setattr("leadauto.sf.client.requests.post",
+                        lambda *a, **k: _FakeResponse(body))
+    rows = client.convert_lead([{"lead_id": "00Q1"}, {"lead_id": "00Q2"}],
+                               converted_status="Qualified", owner_id=None)
+    assert rows[1]["leadId"] == "00Q2"       # backfilled from request order
+    assert rows[1]["success"] is False
+
+
+def test_convert_lead_retries_once_on_invalid_session(monkeypatch):
+    client = SfClient("headless")
+    tokens = iter(["STALE", "FRESH"])
+    auth_calls: list[str] = []
+
+    def run(cmd, check=True):
+        auth_calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+            {"result": {"accessToken": next(tokens),
+                        "instanceUrl": "https://x.my.salesforce.com"}}), stderr="")
+    monkeypatch.setattr(client, "_run", run)
+    posts: list[str] = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        data = data.decode("utf-8")
+        posts.append(data)
+        if "STALE" in data:
+            return _FakeResponse(_SOAP_FAULT_SESSION, status_code=500)
+        return _FakeResponse(_soap_success([{"leadId": "00Q1"}]))
+    monkeypatch.setattr("leadauto.sf.client.requests.post", fake_post)
+
+    rows = client.convert_lead([{"lead_id": "00Q1"}],
+                               converted_status="Qualified", owner_id=None)
+    assert rows[0]["success"] is True
+    assert len(posts) == 2                    # stale session retried once
+    assert len(auth_calls) == 2               # auth re-fetched after the fault
+    assert "FRESH" in posts[1]
+
+
+def test_convert_lead_other_fault_does_not_retry(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    posts: list[str] = []
+    fault = _SOAP_FAULT_SESSION.replace("INVALID_SESSION_ID", "UNKNOWN_EXCEPTION")
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        posts.append(data)
+        return _FakeResponse(fault, status_code=500)
+    monkeypatch.setattr("leadauto.sf.client.requests.post", fake_post)
+    with pytest.raises(SfError, match="UNKNOWN_EXCEPTION"):
+        client.convert_lead([{"lead_id": "00Q1"}],
+                            converted_status="Qualified", owner_id=None)
+    assert len(posts) == 1
+
+
+def test_convert_lead_rejects_oversized_batch(monkeypatch):
+    client = SfClient("headless")
+    conversions = [{"lead_id": f"00Q{i:03d}"} for i in range(101)]
+    with pytest.raises(SfError, match="100"):
+        client.convert_lead(conversions, converted_status="Qualified", owner_id=None)
+
+
+def test_convert_lead_empty_is_noop_without_post(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr("leadauto.sf.client.requests.post",
+                        lambda *a, **k: pytest.fail("must not POST"))
+    assert client.convert_lead([], converted_status="Qualified", owner_id=None) == []
+
+
 def test_apex_run_does_not_retry_apex_level_failures(monkeypatch):
     """A parseable failure (compile error / runtime exception) is real — never re-run."""
     client = SfClient("headless")
