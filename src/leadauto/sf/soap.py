@@ -13,23 +13,12 @@ rejects shuffled elements. Up to 100 LeadConverts per call.
 """
 from __future__ import annotations
 
-import re
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
-from .client import SfError
+from .client import SfError, guard_sf_id
 
 PARTNER_NS = "urn:partner.soap.sforce.com"
-
-# Same last-line-of-defense guard as the old Apex embedding: only plain alphanumeric
-# Salesforce Ids may ride in the envelope (shape validation happens at the CSV boundary).
-_ID_RE = re.compile(r"[A-Za-z0-9]{1,18}")
-
-
-def _xml_id(value: str) -> str:
-    if not _ID_RE.fullmatch(value or ""):
-        raise ValueError(f"Refusing to embed non-alphanumeric Salesforce Id in SOAP: {value!r}")
-    return value
 
 
 def build_convert_envelope(
@@ -47,15 +36,15 @@ def build_convert_envelope(
     for c in conversions:
         fields: list[str] = []
         if c.get("account_id"):
-            fields.append(f"<urn:accountId>{_xml_id(c['account_id'])}</urn:accountId>")
+            fields.append(f"<urn:accountId>{guard_sf_id(c['account_id'])}</urn:accountId>")
         if c.get("contact_id"):
-            fields.append(f"<urn:contactId>{_xml_id(c['contact_id'])}</urn:contactId>")
+            fields.append(f"<urn:contactId>{guard_sf_id(c['contact_id'])}</urn:contactId>")
         fields.append(f"<urn:convertedStatus>{escape(converted_status)}</urn:convertedStatus>")
         fields.append("<urn:doNotCreateOpportunity>true</urn:doNotCreateOpportunity>")
-        fields.append(f"<urn:leadId>{_xml_id(c['lead_id'])}</urn:leadId>")
+        fields.append(f"<urn:leadId>{guard_sf_id(c['lead_id'])}</urn:leadId>")
         fields.append("<urn:overwriteLeadSource>false</urn:overwriteLeadSource>")
         if owner_id:
-            fields.append(f"<urn:ownerId>{_xml_id(owner_id)}</urn:ownerId>")
+            fields.append(f"<urn:ownerId>{guard_sf_id(owner_id)}</urn:ownerId>")
         fields.append("<urn:sendNotificationEmail>false</urn:sendNotificationEmail>")
         parts.append("<urn:leadConverts>" + "".join(fields) + "</urn:leadConverts>")
 

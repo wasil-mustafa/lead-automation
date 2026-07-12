@@ -83,8 +83,8 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   and the workflow input defaults to true.
 - IDs from the approved CSV are validated to the 15/18-char alphanumeric shape in
   `targets_from_approved` (raises `ValueError` → CLI exits non-zero) and re-guarded to
-  alphanumeric-only before embedding in SOQL (`converter._apex_id`) or the SOAP envelope
-  (`soap._xml_id`), so a malformed or malicious cell can neither inject nor crash a batch.
+  alphanumeric-only before embedding in SOQL or the SOAP envelope (one shared guard,
+  `sf.client.guard_sf_id`), so a malformed or malicious cell can neither inject nor crash a batch.
 - A contact link without an account link is dropped in `targets_from_approved` (LeadConvert
   requires `setAccountId` alongside `setContactId`; the lead converts create-new instead).
 - Idempotent: the per-batch pre-query routes `IsConverted = true` leads to an explicit

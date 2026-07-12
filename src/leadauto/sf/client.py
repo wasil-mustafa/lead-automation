@@ -1,4 +1,5 @@
-"""Thin wrapper over the `sf` CLI: SOQL queries, bulk field updates, anonymous Apex.
+"""Wrapper over the `sf` CLI (SOQL queries, bulk field updates, anonymous Apex) plus a
+direct SOAP Partner API `convertLead()` call over HTTP for lead conversion.
 
 Uses shell=True with a single command string (portable across Windows cmd and Linux
 bash: SOQL string literals use single quotes, so a double-quoted --query value is safe
@@ -9,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -41,6 +43,20 @@ _APEX_RETRY_DELAY_S = 10
 
 class SfError(RuntimeError):
     pass
+
+
+# Last line of defense for ANY Id embedded in a generated SOQL literal or a SOAP
+# envelope: only a plain alphanumeric Salesforce Id (≤18 chars) is allowed through.
+# Shape validation (15/18 chars) happens earlier at the CSV boundary
+# (stage2_convert.targets_from_approved); this rejects anything that could inject or crash.
+_SF_ID_RE = re.compile(r"[A-Za-z0-9]{1,18}")
+
+
+def guard_sf_id(value: str) -> str:
+    """Return `value` unchanged, or raise ValueError if it is not a bare Salesforce Id."""
+    if not _SF_ID_RE.fullmatch(value or ""):
+        raise ValueError(f"Refusing to embed non-alphanumeric Salesforce Id: {value!r}")
+    return value
 
 
 def parse_bulk_update_result(stdout: str) -> dict:
@@ -227,35 +243,38 @@ class SfClient:
         rejections) backfilled from that order. An INVALID_SESSION_ID fault triggers
         one auth re-fetch + retry; any other fault raises SfError.
         """
-        from .soap import build_convert_envelope, parse_convert_response
-
         if not conversions:
             return []
         if len(conversions) > _SOAP_CONVERT_MAX:
             raise SfError(f"convert_lead accepts at most {_SOAP_CONVERT_MAX} conversions "
                           f"per call, got {len(conversions)}")
-        for attempt in (1, 2):
-            auth = self.auth_info(refresh=attempt > 1)
-            envelope = build_convert_envelope(
-                auth["access_token"], conversions,
-                converted_status=converted_status, owner_id=owner_id)
-            url = f"{auth['instance_url']}/services/Soap/u/{self.api_version}"
-            response = requests.post(url, data=envelope.encode("utf-8"), headers={
-                "Content-Type": "text/xml; charset=UTF-8", "SOAPAction": '""',
-            }, timeout=120)
-            try:
-                rows = parse_convert_response(response.text)
-            except SfError as exc:
-                if attempt == 1 and "INVALID_SESSION_ID" in str(exc):
-                    if self.log:
-                        self.log.warning("SOAP session invalid; refreshing auth and retrying")
-                    continue
+        try:
+            return self._convert_once(conversions, converted_status, owner_id, refresh=False)
+        except SfError as exc:
+            if "INVALID_SESSION_ID" not in str(exc):
                 raise
-            for conversion, row in zip(conversions, rows):
-                if not row.get("leadId"):
-                    row["leadId"] = conversion["lead_id"]
-            return rows
-        raise SfError("unreachable")  # pragma: no cover
+            if self.log:
+                self.log.warning("SOAP session invalid; refreshing auth and retrying")
+            return self._convert_once(conversions, converted_status, owner_id, refresh=True)
+
+    def _convert_once(self, conversions: list[dict], converted_status: str,
+                      owner_id: str | None, *, refresh: bool) -> list[dict]:
+        """One convertLead round trip; nil leadIds backfilled from request order."""
+        from .soap import build_convert_envelope, parse_convert_response
+
+        auth = self.auth_info(refresh=refresh)
+        envelope = build_convert_envelope(
+            auth["access_token"], conversions,
+            converted_status=converted_status, owner_id=owner_id)
+        url = f"{auth['instance_url']}/services/Soap/u/{self.api_version}"
+        response = requests.post(url, data=envelope.encode("utf-8"), headers={
+            "Content-Type": "text/xml; charset=UTF-8", "SOAPAction": '""',
+        }, timeout=120)
+        rows = parse_convert_response(response.text)
+        for conversion, row in zip(conversions, rows):
+            if not row.get("leadId"):
+                row["leadId"] = conversion["lead_id"]
+        return rows
 
     def apex_run(self, apex_code: str) -> str:
         """Execute anonymous Apex and return the execution debug log.

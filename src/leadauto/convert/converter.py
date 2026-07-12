@@ -22,22 +22,15 @@ before any org call.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, replace
 
 from ..logging import get_logger
-
-# Injection guard for values embedded in generated SOQL Id literals. Shape validation
-# (15/18 chars) happens at the CSV boundary in stage2_convert.targets_from_approved;
-# this is the last line of defense for ANY caller.
-_APEX_ID_RE = re.compile(r"[A-Za-z0-9]{1,18}")
+from ..sf.client import guard_sf_id
 
 
-def _apex_id(value: str) -> str:
-    """Refuse to embed anything but a plain alphanumeric Id in generated SOQL."""
-    if not _APEX_ID_RE.fullmatch(value or ""):
-        raise ValueError(f"Refusing to embed non-alphanumeric Salesforce Id: {value!r}")
-    return value
+def _id_in_list(ids) -> str:
+    """Comma-joined quoted SOQL literals, each re-guarded to a bare Salesforce Id."""
+    return ", ".join(f"'{guard_sf_id(i)}'" for i in ids)
 
 
 def _short_id(sf_id: str) -> str:
@@ -101,7 +94,7 @@ def enrich_contact_email2(client, targets: list[ConversionTarget], results: list
     if not lf_by_contact:
         return {"processed": 0, "failed": 0}
 
-    id_list = ", ".join(f"'{_apex_id(c)}'" for c in sorted(lf_by_contact))
+    id_list = _id_in_list(sorted(lf_by_contact))
     updates: list[dict] = []
     try:
         contacts = client.query(
@@ -146,14 +139,14 @@ def _cluster_by_company(targets: list[ConversionTarget]) -> list[list[Conversion
 
 def _already_converted(client, batch: list[ConversionTarget]) -> set[str]:
     """15-char prefixes of batch leads the org already holds as IsConverted=true."""
-    id_list = ", ".join(f"'{_apex_id(t.lead_id)}'" for t in batch)
+    id_list = _id_in_list(t.lead_id for t in batch)
     rows = client.query(
         f"SELECT Id FROM Lead WHERE Id IN ({id_list}) AND IsConverted = true")
     return {_short_id(str(r.get("Id") or "")) for r in rows}
 
 
 def _run_convert(client, targets, settings, batch_size, log, phase_label="",
-                 converted_status=None):
+                 *, converted_status):
     """Convert one target list in batches; return (results, missing_ids).
 
     Per batch: (1) pre-query already-converted inputs and emit explicit
