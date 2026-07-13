@@ -54,6 +54,10 @@ def test_review_header_includes_match_and_gate_columns():
         assert col in headers
 
 
+def test_review_row_has_predicted_industry_column():
+    assert "predicted_industry" in REVIEW_COLUMNS
+
+
 def test_review_row_maps_match_result():
     res = _result(
         decision="link",
