@@ -5,7 +5,7 @@ loader tests."""
 from datetime import datetime, timezone
 
 from leadauto.predictions import Prediction, load_predictions, save_predictions
-from leadauto.shadow_compare import run_shadow_compare
+from leadauto.shadow_compare import compare_fields, run_shadow_compare
 
 NOW = datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc)
 
@@ -239,3 +239,20 @@ def test_xlsx_written(tmp_path):
     from openpyxl import load_workbook
     wb = load_workbook(xpath)
     assert set(wb.sheetnames) == {"Decisions", "Fields", "Summary"}
+
+
+def test_industry_agrees_with_converted_account():
+    # Standard LeadConvert maps Lead.Industry -> Account.Industry with the same
+    # picklist labels, so an exact match should score "agree".
+    from types import SimpleNamespace
+    pred = SimpleNamespace(payload={"Industry": "BANKING and INSURANCE"},
+                           lf_website=None)
+    out = compare_fields(pred, lead={}, account={"Industry": "BANKING and INSURANCE"})
+    assert out["industry"]["status"] == "agree"
+
+
+def test_industry_differs_from_converted_account():
+    from types import SimpleNamespace
+    pred = SimpleNamespace(payload={"Industry": "BANKING and INSURANCE"}, lf_website=None)
+    out = compare_fields(pred, lead={}, account={"Industry": "OTHER"})
+    assert out["industry"]["status"] == "differ"

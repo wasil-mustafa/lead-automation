@@ -215,10 +215,10 @@ def contacts_by_signals(
 
 _LEAD_SHADOW_FIELDS = (
     "Id, Email, IsConverted, ConvertedDate, ConvertedAccountId, ConvertedContactId, "
-    "KN_Employee__c, FirstName, Phone, PostalCode, City, Country, CountryCode"
+    "KN_Employee__c, FirstName, Phone, PostalCode, City, Country, CountryCode, Industry"
 )
 _ACCOUNT_SHADOW_FIELDS = ("Id, Name, CreatedDate, Website, BillingPostalCode, "
-                          "BillingCity, BillingCountryCode")
+                          "BillingCity, BillingCountryCode, Industry")
 _CONTACT_SHADOW_FIELDS = "Id, AccountId, Email, Phone, FirstName"
 
 

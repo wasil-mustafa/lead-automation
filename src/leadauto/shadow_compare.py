@@ -71,6 +71,7 @@ _FIELD_CHECKS = [
      ("KN_Employee__c",)),
     ("first_name", ("FirstName",), "contact", "FirstName", _norm_name, ("FirstName",)),
     ("phone", ("Phone",), "contact", "Phone", normalize_phone, ("Phone",)),
+    ("industry", ("Industry",), "account", "Industry", _norm_text, ("Industry",)),
 ]
 
 
