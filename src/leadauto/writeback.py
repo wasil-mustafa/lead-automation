@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 
+from .industry import sf_industry_from_kununu, sf_industry_from_leadfeeder
 from .leadfeeder.enrich import EnrichedLead
 from .logging import get_logger
 
@@ -130,6 +131,8 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     else comes from LeadFeeder — VAT from LF VAT_Id, employee band from LF headcount
     (the task's Unternehmensgröße line is never used). LinkedIn/Title/Phone come from
     the LF contact; company LinkedIn is never used and mobile numbers are never written.
+    `Industry` ← kununu profile `profile_industry_name_de` mapped to the picklist
+    (overwrite), else LeadFeeder industry mapped (fill-only-blank).
     """
     e = enriched.extracted
     company = enriched.company or {}
@@ -150,6 +153,17 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     # KN_Employee__c overwrites: fresh LF headcount beats a stale manual pick.
     _put(payload, "KN_VATNumber__c", company.get("VAT_Id"))
     _put(payload, "KN_Employee__c", employee_bin(company.get("Employee_Count")))
+
+    # Industry ('Branche'): the kununu profile industry IS this taxonomy, so it is
+    # authoritative and OVERWRITES (like KN_Region__c/CountryCode). The LeadFeeder
+    # industry is a mapped fallback and fills only a blank. Unmapped -> nothing written
+    # (industry.py logs the miss). See the 2026-07-13 industry-enrichment design doc.
+    kununu_industry = sf_industry_from_kununu(enriched.feed_industry)
+    if kununu_industry:
+        _put(payload, "Industry", kununu_industry)
+    else:
+        _fill(payload, "Industry", e.lead_industry,
+              sf_industry_from_leadfeeder(company.get("Industry")))
 
     # from the LF contact: LinkedIn, Title (position) — left empty when no contact found
     _put(payload, "KN_LinkedInProfileLink__c", contact.get("contact_linkedin"))

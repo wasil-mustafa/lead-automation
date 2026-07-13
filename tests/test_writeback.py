@@ -379,6 +379,34 @@ class TestFirstNameAndPhone:
         assert "Phone" not in lead_field_payload(enr)
 
 
+class TestIndustry:
+    def test_kununu_overwrites_existing(self):
+        # kununu profile industry IS the SF taxonomy — authoritative, overwrites.
+        e = _extracted(lead_industry="OTHER")
+        enr = _enriched(e, feed_industry="IT")
+        assert lead_field_payload(enr)["Industry"] == "INTERNET and INFORMATION TECHNOLOGY"
+
+    def test_leadfeeder_fills_only_when_blank(self):
+        e = _extracted()
+        enr = _enriched(e, company={"Industry": "Business Consulting and Services"})
+        assert lead_field_payload(enr)["Industry"] == "CONSULTING, AUDITING and LAW"
+
+    def test_leadfeeder_skipped_when_lead_already_set(self):
+        e = _extracted(lead_industry="OTHER")
+        enr = _enriched(e, company={"Industry": "Business Consulting and Services"})
+        assert "Industry" not in lead_field_payload(enr)
+
+    def test_kununu_beats_leadfeeder(self):
+        e = _extracted()
+        enr = _enriched(e, feed_industry="Banken", company={"Industry": "Software"})
+        assert lead_field_payload(enr)["Industry"] == "BANKING and INSURANCE"
+
+    def test_unmapped_writes_nothing(self):
+        e = _extracted()
+        enr = _enriched(e, feed_industry="Raumfahrt")
+        assert "Industry" not in lead_field_payload(enr)
+
+
 class TestEmployeeAlwaysLeadfeeder:
     def test_lf_headcount_wins_over_task_size(self):
         # 2026-07-10 spec: KN_Employee__c ALWAYS comes from the LF headcount — the task's
