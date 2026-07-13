@@ -94,6 +94,18 @@ def test_company_names_field_shapes(tmp_path):
     assert found["c"].companies == ["Other Field GmbH"]
 
 
+def test_lookup_captures_profile_industry(tmp_path):
+    feed = _write_feed(tmp_path, [_record(profile_industry_name_de="IT")])
+    found = lookup_profiles(feed, uuids={"u1"}, slugs=set())
+    assert found["u1"].industry == "IT"
+
+
+def test_lookup_industry_absent_is_none(tmp_path):
+    feed = _write_feed(tmp_path, [_record()])  # _record adds no industry key
+    found = lookup_profiles(feed, uuids={"u1"}, slugs=set())
+    assert found["u1"].industry is None
+
+
 # --- ensure_feed + load_profiles_for_leads -----------------------------------
 
 def _settings(tmp_path, token="tok", enabled=True, max_age=24):

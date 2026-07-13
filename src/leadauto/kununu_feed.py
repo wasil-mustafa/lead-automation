@@ -28,6 +28,7 @@ class ProfileInfo:
     companies: list[str] = field(default_factory=list)
     city: str | None = None
     country_code: str | None = None
+    industry: str | None = None
 
 
 def base_slug(url: str | None) -> str | None:
@@ -104,6 +105,7 @@ def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
                     companies=companies,
                     city=d.get("profile_city"),
                     country_code=d.get("profile_country_code"),
+                    industry=d.get("profile_industry_name_de"),
                 )
                 if uuid:
                     found.setdefault(uuid, info)
