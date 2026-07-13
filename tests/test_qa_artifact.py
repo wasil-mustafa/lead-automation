@@ -58,6 +58,15 @@ def test_review_row_has_predicted_industry_column():
     assert "predicted_industry" in REVIEW_COLUMNS
 
 
+def test_review_row_emits_predicted_industry_value():
+    # predicted_industry mirrors what lead_field_payload would write to Industry;
+    # the kununu feed's profile_industry_name_de ("IT") maps and overwrites.
+    from leadauto.qa_artifact import _review_row
+    result = _result()
+    result.enriched.feed_industry = "IT"
+    assert _review_row(result)["predicted_industry"] == "INTERNET and INFORMATION TECHNOLOGY"
+
+
 def test_review_row_maps_match_result():
     res = _result(
         decision="link",

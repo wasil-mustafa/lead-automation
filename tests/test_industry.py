@@ -63,6 +63,13 @@ def test_leadfeeder_first_mappable_token_wins():
         "CONSULTING, AUDITING and LAW"
 
 
+def test_leadfeeder_skips_unmapped_leading_token():
+    # "Raumfahrt" doesn't map; the loop must skip it and keep scanning tokens
+    # rather than stopping (or logging) on the first unmapped one.
+    assert sf_industry_from_leadfeeder("Raumfahrt; IT") == \
+        "INTERNET and INFORMATION TECHNOLOGY"
+
+
 def test_leadfeeder_unknown_returns_none_and_logs(caplog):
     caplog.set_level(logging.WARNING)
     assert sf_industry_from_leadfeeder("Underwater Basket Weaving") is None
