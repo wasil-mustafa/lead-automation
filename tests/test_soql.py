@@ -198,3 +198,8 @@ def test_accounts_by_signals_sanitizes_patterns():
     q = soql.accounts_by_signals(name_patterns=["o'brien%", "a\cme%"])
     assert "'o'brien" not in q and "\\" not in q
     assert "obrien%" in q and "acme%" in q
+
+
+def test_leads_by_ids_selects_industry():
+    q = soql.leads_by_ids(["00Q000000000001AAA"])
+    assert "Industry" in q

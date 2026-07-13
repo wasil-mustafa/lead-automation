@@ -89,6 +89,7 @@ def _base(task: dict, lead: dict, task_type: str) -> ExtractedLead:
         lead_country=lead.get("Country"),
         lead_phone=lead.get("Phone"),
         lead_title=lead.get("Title"),
+        lead_industry=lead.get("Industry"),
         lead_source=lead.get("LeadSource"),
         lead_opted_out_email=_bool(lead.get("HasOptedOutOfEmail")),
         lead_dbid=lead.get("KN_DBID__c"),

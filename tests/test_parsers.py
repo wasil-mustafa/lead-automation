@@ -132,3 +132,10 @@ def test_base_bool_coercion_accepts_real_booleans():
     e = parse_claimer(task, lead)
     assert e.lead_opted_out_email is False
     assert e.lead_no_own_dbid is True
+
+
+def test_base_captures_lead_industry():
+    from leadauto.extract.parsers import _base
+    lead = {"Id": "00Q1", "Industry": "IT"}
+    e = _base({"WhoId": "00Q1"}, lead, "claimer")
+    assert e.lead_industry == "IT"
