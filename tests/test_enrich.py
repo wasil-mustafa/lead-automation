@@ -485,6 +485,17 @@ def test_feed_country_beats_defaulted_lead_countrycode():
     assert r.lf_rejected is None
 
 
+def test_enrich_carries_feed_industry_from_profile():
+    # The kununu feed's profile_industry_name_de (ProfileInfo.industry) must land on
+    # EnrichedLead.feed_industry for write-back to consume later.
+    fc = FakeClient()
+    e = _extracted(company="Acme GmbH", contact_name=None, region=None, cc=None)
+    e.kununu_profile_uuid = "uuid-1"
+    profiles = {"uuid-1": ProfileInfo(name="Acme", country_code="de", industry="IT")}
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles=profiles)
+    assert r.feed_industry == "IT"
+
+
 def test_url_country_beats_feed_country():
     # Both kununu sources present but disagreeing: the URL country (task evidence
     # for THIS claim) wins over the feed's profile-level country.
