@@ -201,3 +201,17 @@ class Settings:
     @property
     def task_lookback_days(self) -> int:
         return int(self.raw["pipeline"].get("task_lookback_days", 35))
+
+    @property
+    def record_predictions(self) -> bool:
+        """False disables the dry-run shadow-prediction log. One-off backlog runs set
+        this: their leads are converted by the pipeline itself, so shadow-compare would
+        later score our own conversions as if a human had made them."""
+        return bool(self.raw["pipeline"].get("record_predictions", True))
+
+    @property
+    def include_enriched_leads(self) -> bool:
+        """True bypasses the already-enriched skip (kununu marker field set). One-off
+        backlog runs set this to re-process leads the legacy manual pipeline enriched
+        but never converted."""
+        return bool(self.raw["pipeline"].get("include_enriched_leads", False))

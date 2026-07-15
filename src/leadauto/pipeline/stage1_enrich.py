@@ -76,7 +76,7 @@ def run_stage1(
     if failures:
         log.warning("%d write-back failure(s) recorded in the QA Failures sheet", len(failures))
 
-    if dry_run and predictions_path is not None:
+    if dry_run and predictions_path is not None and settings.record_predictions:
         stamp = (now or datetime.now(timezone.utc)).isoformat()
         n = record_predictions(results, wb.get("payloads", []), stamp, predictions_path)
         log.info("Recorded %d pending prediction(s) -> %s", n, predictions_path)

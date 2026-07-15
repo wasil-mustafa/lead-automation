@@ -26,6 +26,10 @@ on:
         description: "Approved CSV path (blank = newest review/approved_*.csv)"
         type: string
         default: ""
+      config:
+        description: "Alternate config.yaml path (blank = config/config.yaml)"
+        type: string
+        default: ""
 
 concurrency:
   group: lead-automation-stage2
@@ -91,6 +95,7 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi
           if [ -n "${{ inputs.batch_size }}" ]; then FLAGS="$FLAGS --batch-size ${{ inputs.batch_size }}"; fi
           if [ -n "${{ inputs.approved }}" ]; then FLAGS="$FLAGS --approved ${{ inputs.approved }}"; fi
+          if [ -n "${{ inputs.config }}" ]; then FLAGS="$FLAGS --config ${{ inputs.config }}"; fi
           echo "Running: python -m leadauto stage2 $FLAGS"
           python -m leadauto stage2 $FLAGS | tee stage2_log.txt
 

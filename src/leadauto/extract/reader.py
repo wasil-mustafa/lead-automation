@@ -110,7 +110,7 @@ def read_extracted_leads(
             result.skipped.append(Skipped(tid, who or "", subject,
                                           "lead not found or already converted"))
             continue
-        if is_already_enriched(lead):
+        if not settings.include_enriched_leads and is_already_enriched(lead):
             result.skipped.append(Skipped(tid, who, subject,
                                           "lead already enriched (kununu marker field set)"))
             continue

@@ -20,6 +20,10 @@ on:
         description: "Use LeadFeeder enrichment (uncheck to skip credits)"
         type: boolean
         default: true
+      config:
+        description: "Alternate config.yaml path (blank = config/config.yaml)"
+        type: string
+        default: ""
   # Scheduling is EXTERNAL: cron-job.org hits this workflow's workflow_dispatch
   # (GitHub's own cron delivered these runs hours late and dropped most firings).
   # The external job POSTs {"ref":"master"} with no inputs, so runs stay dry.
@@ -138,6 +142,7 @@ jobs:
           if [ "${{ inputs.leadfeeder }}" = "false" ]; then FLAGS="$FLAGS --no-leadfeeder"; fi
           LIMIT="${{ inputs.limit }}"
           if [ -n "$LIMIT" ] && [ "$LIMIT" -gt 0 ] 2>/dev/null; then FLAGS="$FLAGS --limit $LIMIT"; fi
+          if [ -n "${{ inputs.config }}" ]; then FLAGS="$FLAGS --config ${{ inputs.config }}"; fi
           echo "Running: python -m leadauto stage1 $FLAGS"
           python -m leadauto stage1 $FLAGS --qa-path qa_artifact.xlsx
 

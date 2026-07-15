@@ -77,3 +77,24 @@ def test_stage1_records_predictions_on_dry_run(tmp_path, monkeypatch):
     s1.run_stage1(None, None, SETTINGS, state=State(), dry_run=False,
                   qa_path=None, state_path=None, predictions_path=p2)
     assert not p2.exists()
+
+
+def test_stage1_skips_predictions_when_config_disabled(tmp_path, monkeypatch):
+    # pipeline.record_predictions: false (one-off backlog runs) suppresses the
+    # dry-run prediction log — those leads get converted by the pipeline itself,
+    # so shadow-compare must never score them.
+    from leadauto.pipeline import stage1_enrich as s1
+    from leadauto.state import State
+
+    settings = Settings.load()
+    settings.raw["pipeline"]["record_predictions"] = False
+    e = ExtractedLead(lead_id="00Q9", task_id="T9", task_type="claimer",
+                      company_name="Acme GmbH")
+    monkeypatch.setattr(s1, "read_extracted_leads", lambda *a, **k: SimpleNamespace(
+        leads=[e], skipped=[], processed_tasks=[]))
+    monkeypatch.setattr(s1, "load_existing_records",
+                        lambda *a, **k: ExistingRecords())
+    p = tmp_path / "predictions.jsonl"
+    s1.run_stage1(None, None, settings, state=State(), dry_run=True,
+                  qa_path=None, state_path=None, predictions_path=p)
+    assert not p.exists()

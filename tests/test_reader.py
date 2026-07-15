@@ -127,6 +127,18 @@ def test_read_skips_already_enriched_lead():
     assert "enrich" in result.skipped[0].reason.lower()
 
 
+def test_include_enriched_leads_bypasses_marker_skip():
+    # One-off backlog runs (pipeline.include_enriched_leads: true) re-process leads the
+    # legacy manual pipeline enriched but never converted.
+    settings = Settings.load()
+    settings.raw["pipeline"]["include_enriched_leads"] = True
+    client = FakeClient(tasks=[_task("T1", "00Q1")],
+                        leads=[_lead("00Q1", enriched="Already GmbH")])
+    result = read_extracted_leads(client, settings, since=SINCE)
+    assert result.skipped == []
+    assert [l.lead_id for l in result.leads] == ["00Q1"]
+
+
 def test_read_skips_internal_lead_email():
     settings = Settings.load()  # config.yaml excludes kununu/xing/onlyfy
     client = FakeClient(tasks=[_task("T1", "00Q1")],

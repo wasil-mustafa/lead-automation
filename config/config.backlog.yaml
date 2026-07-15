@@ -1,0 +1,79 @@
+# Lead Automation — ONE-OFF closed-task backlog configuration (2026-07-15).
+#
+# Purpose: run the ~656 leads behind already-CLOSED claimer/EBP-trial tasks through the
+# pipeline (Wasil's backlog-conversion decision, 2026-07-15). Differences vs config.yaml:
+#   - fresh_task_statuses targets Closed/Abgeschlossen tasks instead of fresh ones
+#   - task_lookback_days reaches back years (the backlog predates the watermark)
+#   - owner_id = 'Rohdaten Pool' user: new Accounts/Contacts (and converted Leads) are
+#     pool-owned raw-data stubs, enrichable by future resolve_pool_links runs
+#   - include_enriched_leads: the 87 marker-carrying leads (legacy manual enrichment,
+#     never converted) are processed too
+#   - record_predictions off: these conversions are made by the pipeline itself, so
+#     shadow-compare must never score them as human decisions
+# Conversion scope (create_new only) is NOT config — it is enforced by approving only
+# decision == create_new rows in the review CSV. review_gate stays true for that reason.
+#
+# Usage: pass via the workflows' `config` input or locally with
+#   python -m leadauto stage1 --config config/config.backlog.yaml --dry-run
+# Secrets (SF_AUTH_URL, LEADFEEDER_API_KEY) come from env / GitHub Secrets, never here.
+
+salesforce:
+  org_alias: headless
+  api_version: "66.0"
+  converted_status: Qualified
+  # BACKLOG: converted records go to the 'Rohdaten Pool' user (NOT Wasil, who owns
+  # scheduled-pipeline conversions per config.yaml). Single ownerId on LeadConvert =
+  # new Account, new Contact and converted Lead are all pool-owned (accepted 2026-07-15).
+  owner_id: "005Mz00000Xw0jjIAB"
+  rohdaten_pool_owner_id: "005Mz00000Xw0jjIAB"
+  campaign_id: null
+
+leadfeeder:
+  base_url: "https://api.leadfeeder.com/v1"
+  company_list_name: "Lead_Automation"
+  contact_list_name: "Lead_Automation"
+  max_requests_per_min: 95
+  max_retries: 4
+  retrieve_batch: 100
+  match_batch: 200
+  find_contact_data: true
+  find_details_timeout: 180
+  find_details_poll: 10
+
+kununu_feed:
+  enabled: true
+  cache_path: kununu_profiles.jsonl
+  max_age_hours: 24
+
+task_types:
+  "Inbound Sales Task: New Claimed Profile": claimer
+  "Inbound Sales Task: EBP Trial": ebp_trial
+
+enabled_task_types:
+  - claimer
+  - ebp_trial
+
+# BACKLOG: the population is the CLOSED tasks (both org spellings) — the exact inverse
+# of the scheduled pipeline's fresh-task allowlist.
+fresh_task_statuses:
+  - "Closed"
+  - "Abgeschlossen"
+
+excluded_email_domains:
+  - kununu
+  - xing
+  - onlyfy
+
+matching:
+  lf_min_match_score: 0.70
+  lf_name_agree_min: 85
+  lf_name_agree_rescue: 90
+  dedupe_name_agree_min: 85
+
+pipeline:
+  review_gate: true          # manual approval — only create_new rows get approved
+  dry_run: true              # live only via an explicit --no-dry-run / dispatch input
+  batch_limit: 0
+  task_lookback_days: 3650   # reach back to the oldest closed tasks
+  record_predictions: false  # keep shadow-compare blind to backlog leads
+  include_enriched_leads: true  # process the 87 legacy-enriched, never-converted leads
