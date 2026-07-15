@@ -22,6 +22,10 @@ from .models import ExtractedLead
 from .parsers import extract_lead
 
 
+# Lead ids per leads_by_ids query: 500 ids ≈ 11k chars, safely under the 100k SOQL limit.
+_LEAD_ID_CHUNK = 500
+
+
 @dataclass
 class Skipped:
     """A task that reached the reader but was intentionally not extracted."""
@@ -94,7 +98,14 @@ def read_extracted_leads(
         return ExtractionResult()
 
     who_ids = sorted({t["WhoId"] for t in tasks})
-    leads_raw = client.query(soql.leads_by_ids(who_ids))
+    # Only Lead WhoIds (00Q…) can resolve — converted leads' tasks sit re-parented on
+    # Contacts (003…) and fall through to the Skipped branch below. Chunked because a
+    # backlog-sized IN(...) list breaches Salesforce's 100k-char SOQL limit
+    # (live-proven 2026-07-15: 12,778 closed-task WhoIds in one query).
+    lead_ids = [w for w in who_ids if w.startswith("00Q")]
+    leads_raw: list[dict] = []
+    for i in range(0, len(lead_ids), _LEAD_ID_CHUNK):
+        leads_raw += client.query(soql.leads_by_ids(lead_ids[i:i + _LEAD_ID_CHUNK]))
     lead_map = {l["Id"]: l for l in leads_raw}
     log.info("Resolved %d/%d WhoId(s) to unconverted queue-owned lead(s)", len(lead_map), len(who_ids))
 

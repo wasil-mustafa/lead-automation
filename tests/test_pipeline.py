@@ -88,6 +88,25 @@ def _contact(cid="003C", aid="001A"):
 
 # --- Stage 1 -----------------------------------------------------------------
 
+def test_stage1_chunks_the_match_phase(monkeypatch):
+    # Backlog-sized runs (500+ leads) must not load candidates in one query — the
+    # signals SOQL breaches the 100k-char limit. Expect one load per 40-lead chunk.
+    from leadauto.match import ExistingRecords
+    from leadauto.pipeline import stage1_enrich as s1
+
+    tasks = [_task(tid=f"T{i}", who=f"00Q{i:04d}") for i in range(90)]
+    leads = [dict(_lead(lid=f"00Q{i:04d}"), Email=f"r{i}@hufeland.de") for i in range(90)]
+    sf = FakeSfClient(tasks=tasks, leads=leads)
+    calls = []
+    monkeypatch.setattr(s1, "load_existing_records",
+                        lambda _sf, batch, *a, **k: calls.append(len(batch)) or ExistingRecords())
+    res = s1.run_stage1(sf, None, SETTINGS, state=State(None, []),
+                        since="2026-05-01T00:00:00Z", dry_run=True,
+                        qa_path=None, state_path=None, predictions_path=None)
+    assert calls == [40, 40, 10]
+    assert len(res.results) == 90
+
+
 def test_stage1_matches_links_and_advances_watermark(tmp_path):
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
                       accounts=[_account()], contacts=[_contact()])

@@ -21,6 +21,11 @@ from ..state import REPO_ROOT, State, advance, compute_since, load_state, save_s
 from ..writeback import write_back
 
 
+# Enriched leads per load_existing_records call (same size the skipped-task backtest
+# proved out: ~40 leads' signals stay well under the 100k-char SOQL limit).
+_MATCH_CHUNK = 40
+
+
 @dataclass
 class Stage1Result:
     results: list[MatchResult] = field(default_factory=list)
@@ -66,8 +71,14 @@ def run_stage1(
         log.info("LeadFeeder disabled; skipping enrichment")
         enriched = [EnrichedLead(extracted=e) for e in extraction.leads]
 
-    existing = load_existing_records(sf_client, enriched, settings, logger=log)
-    results = [match_lead(e, existing, settings) for e in enriched]
+    # Chunk the match phase like backtest_skipped: a backlog-sized run pushes the
+    # one-shot candidate query past Salesforce's 100k-char SOQL limit. Candidate
+    # loading is per-batch by construction, so results are identical.
+    results: list[MatchResult] = []
+    for i in range(0, len(enriched), _MATCH_CHUNK):
+        batch = enriched[i:i + _MATCH_CHUNK]
+        existing = load_existing_records(sf_client, batch, settings, logger=log)
+        results += [match_lead(e, existing, settings) for e in batch]
 
     wb = write_back(sf_client, enriched, dry_run=dry_run, logger=log)
     new_state = advance(state, extraction.processed_tasks)

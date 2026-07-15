@@ -204,6 +204,22 @@ def test_read_records_processed_tasks_even_when_skipped():
     assert [t["Id"] for t in result.processed_tasks] == ["T1"]
 
 
+def test_lead_resolution_chunks_ids_and_filters_contact_whoids():
+    # 12,778 closed-task WhoIds in one leads_by_ids IN(...) breached the 100k-char SOQL
+    # limit (backlog run 2026-07-15): only 00Q ids may be queried, in chunks of 500.
+    settings = Settings.load()
+    n = 1100
+    tasks = [_task(f"T{i}", f"00Q{i:05d}") for i in range(n)]
+    tasks.append(_task("TC", "003CONTACT"))
+    client = FakeClient(tasks=tasks, leads=[_lead(f"00Q{i:05d}") for i in range(n)])
+    result = read_extracted_leads(client, settings, since=SINCE)
+    lead_queries = [q for q in client.queries if "FROM Lead" in q]
+    assert len(lead_queries) == 3                      # 1100 ids -> 500/500/100
+    assert not any("003CONTACT" in q for q in lead_queries)
+    assert len(result.leads) == n
+    assert [s.task_id for s in result.skipped] == ["TC"]  # contact task still accounted for
+
+
 def test_read_passes_limit_to_task_query():
     settings = Settings.load()
     client = FakeClient(tasks=[_task("T1", "00Q1")], leads=[_lead("00Q1")])
