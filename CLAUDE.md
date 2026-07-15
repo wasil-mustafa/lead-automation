@@ -265,6 +265,18 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Open items (resume here)
 
+0. **Closed-task backlog conversion IN FLIGHT (2026-07-15):** converting the 626 leads behind
+   closed claimer/EBP tasks — create_new only (266 rows,
+   `review/approved_20260715_backlog_createnew.csv`), converted records owned by Rohdaten
+   Pool via `config/config.backlog.yaml` (new flags `include_enriched_leads`,
+   `record_predictions`; workflows take a `config` input; reader + stage-1 match phase now
+   chunk for the 100k-char SOQL limit). Dry run 29425910623 ✓ (266 create_new / 301 skip /
+   32 review / 27 link). Stage 1 LIVE write-back = run 29430746090 (dispatched 2026-07-15
+   16:02 UTC — check it finished green). Next: Stage 2 dry with the backlog config+CSV
+   (expect ~76 preflight drops: postal_length/employee_category/address), then Wasil
+   HIMSELF dispatches Stage 2 live (dry_run unchecked). The 32 review + 27 link rows and
+   preflight failures are follow-up batches.
+
 1. **End-to-end live validation: DONE 2026-07-10** (see Status) — live write-back + live
    SOAP conversion of dbeyond/coderis/econoomy, all step-4 checks green, idempotent re-run
    green. Remaining go-live moves: flip config `dry_run: false` (scheduled Stage 1 writes
