@@ -75,6 +75,66 @@ def test_update_bulk_partial_failure_returns_row_failures(monkeypatch):
     assert r["confirmed"] is True
 
 
+def _failed_details_error(job_id="750Mz00000z2eflIAA"):
+    # Real shape live-captured 2026-07-16 (run 29497405506): on partial failure the CLI
+    # emits an SfCommandError envelope with the job id, NOT the success shape.
+    return json.dumps({
+        "name": "FailedRecordDetailsError",
+        "message": "Job finished being processed but failed to process 36 records.",
+        "exitCode": 1,
+        "data": {"jobId": job_id, "state": "JobComplete"},
+        "code": "FailedRecordDetailsError",
+        "status": 1,
+    })
+
+
+def test_update_bulk_fetches_row_failures_via_bulk_results(monkeypatch, tmp_path):
+    failed_csv = tmp_path / "750Mz00000z2eflIAA-failed-records.csv"
+    failed_csv.write_text('"sf__Id","sf__Error","Id","Email"\n'
+                          '"00Q1","DUPLICATES_DETECTED:duplicate record:--","00Q1","a@b.c"\n',
+                          encoding="utf-8")
+    results_json = json.dumps({"status": 0, "result": {
+        "processedRecords": 2, "successfulRecords": 1, "failedRecords": 1,
+        "status": "JobComplete", "operation": "update", "object": "Lead",
+        "successFilePath": str(tmp_path / "success.csv"),
+        "failedFilePath": str(failed_csv)}})
+    cmds: list[str] = []
+
+    def run(cmd, **kwargs):
+        cmds.append(cmd)
+        if "data bulk results" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=results_json, stderr="")
+        return types.SimpleNamespace(returncode=1, stdout=_failed_details_error(), stderr="")
+    monkeypatch.setattr("leadauto.sf.client.subprocess.run", run)
+    client = SfClient("headless")
+    r = client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"},
+                                    {"Id": "00Q2", "Email": "c@d.e"}])
+    assert r["failed"] == 1
+    assert r["failures"] == [{"id": "00Q1",
+                              "error": "DUPLICATES_DETECTED:duplicate record:--"}]
+    assert r["confirmed"] is True
+    assert any("data bulk results" in c and "750Mz00000z2eflIAA" in c for c in cmds)
+
+
+def test_update_bulk_raises_when_bulk_results_yields_no_failures(monkeypatch, tmp_path):
+    # A job id but no retrievable row failures (e.g. whole-job death) must still raise —
+    # never report an unverified partial failure as handled.
+    empty_csv = tmp_path / "failed.csv"
+    empty_csv.write_text('"sf__Id","sf__Error"\n', encoding="utf-8")
+    results_json = json.dumps({"status": 0, "result": {
+        "failedRecords": 0, "status": "JobComplete",
+        "failedFilePath": str(empty_csv)}})
+
+    def run(cmd, **kwargs):
+        if "data bulk results" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=results_json, stderr="")
+        return types.SimpleNamespace(returncode=1, stdout=_failed_details_error(), stderr="")
+    monkeypatch.setattr("leadauto.sf.client.subprocess.run", run)
+    client = SfClient("headless")
+    with pytest.raises(SfError):
+        client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+
+
 def test_update_bulk_nonzero_exit_without_row_detail_raises_with_stdout(monkeypatch):
     # Whole-job failure (or unrecognized shape): raise, but keep the stdout payload in
     # the error — that is where the CLI puts its diagnostics, stderr only carries noise.

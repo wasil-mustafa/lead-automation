@@ -94,6 +94,26 @@ def parse_bulk_update_result(stdout: str) -> dict:
     return {"failed": failed, "failures": failures, "confirmed": confirmed}
 
 
+def parse_bulk_error_job_id(stdout: str) -> str | None:
+    """Job id from the CLI's exit-1 error envelope.
+
+    On partial failure `sf data update bulk --json` does NOT emit the success shape —
+    it emits an SfCommandError envelope ({"name": "FailedRecordDetailsError", ...,
+    "data": {"jobId": ..., "state": "JobComplete"}}; live-captured 2026-07-16, run
+    29497405506). The row-level detail must then be fetched with `sf data bulk results`.
+    """
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    inner = data.get("data")
+    if not isinstance(inner, dict):
+        return None
+    return inner.get("jobId") or None
+
+
 # SOAP Partner API convertLead accepts at most 100 LeadConvert elements per call.
 _SOAP_CONVERT_MAX = 100
 
@@ -209,14 +229,51 @@ class SfClient:
         parsed = parse_bulk_update_result(res.stdout)
         if res.returncode != 0 and not (parsed["confirmed"]
                                         and (parsed["failed"] or parsed["failures"])):
-            raise SfError(
-                f"sf command failed ({res.returncode}) with no row-level failure detail:\n"
-                f"{cmd}\n{res.stderr}\n{res.stdout}"
-            )
+            job_id = parse_bulk_error_job_id(res.stdout)
+            failures = self._bulk_failed_rows(job_id) if job_id else []
+            if not failures:
+                raise SfError(
+                    f"sf command failed ({res.returncode}) with no row-level failure "
+                    f"detail:\n{cmd}\n{res.stderr}\n{res.stdout}"
+                )
+            parsed = {"failed": len(failures), "failures": failures, "confirmed": True}
         return {
             "processed": len(records), "failed": parsed["failed"],
             "failures": parsed["failures"], "confirmed": parsed["confirmed"],
         }
+
+    def _bulk_failed_rows(self, job_id: str) -> list[dict]:
+        """Row-level failures of a finished bulk job via `sf data bulk results`.
+
+        The command writes <jobid>-success-records.csv / <jobid>-failed-records.csv
+        into the CWD; both are removed after the failed rows are read. Returns
+        [{id, error}] — empty when nothing could be retrieved (callers must then
+        treat the job outcome as unverified).
+        """
+        cmd = (f"sf data bulk results --job-id {guard_sf_id(job_id)} "
+               f"--target-org {self.alias} --json")
+        res = self._run(cmd, check=False)
+        try:
+            result = json.loads(res.stdout).get("result", {})
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return []
+        if not isinstance(result, dict):
+            return []
+        failures: list[dict] = []
+        failed_path = result.get("failedFilePath")
+        if failed_path and Path(failed_path).exists():
+            with open(failed_path, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    failures.append({"id": row.get("sf__Id") or row.get("Id"),
+                                     "error": row.get("sf__Error", "")})
+        for key in ("successFilePath", "failedFilePath"):
+            path = result.get(key)
+            if path:
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
+        return failures
 
     # --- SOAP conversion ---
     def auth_info(self, refresh: bool = False) -> dict:
