@@ -271,8 +271,17 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    Pool via `config/config.backlog.yaml` (new flags `include_enriched_leads`,
    `record_predictions`; workflows take a `config` input; reader + stage-1 match phase now
    chunk for the 100k-char SOQL limit). Dry run 29425910623 ✓ (266 create_new / 301 skip /
-   32 review / 27 link). Stage 1 LIVE write-back = run 29430746090 (dispatched 2026-07-15
-   16:02 UTC — check it finished green). Next: Stage 2 dry with the backlog config+CSV
+   32 review / 27 link). Stage 1 LIVE write-back: DONE 2026-07-16, run 29499738399 green —
+   639 leads, 603 written, 36 row failures in the QA Failures sheet (29× DUPLICATES_DETECTED
+   duplicate rule, 6× "Private Mail" validation rule, 1× invalid LF email); the population
+   had grown since the dry run (272 create_new / 30 link / 32 review). Two earlier dispatches
+   (29430746090, 29497405506) crashed on the same write-back and were fixed by making
+   `update_bulk` survive partial bulk failures: `sf data update bulk --json` exits 1 on
+   row failures with a FailedRecordDetailsError envelope (job id only, NO inline
+   failedResults) — `SfClient` now fetches `sf data bulk results` and feeds the Failures
+   sheet (closes open item 5's shape question). NOTE: the run advanced+committed the shared
+   watermark to 2026-07-16T12:03 (newest closed backlog task), shrinking the scheduled dry
+   runs' scan window. Next: Stage 2 dry with the backlog config+CSV
    (expect ~76 preflight drops: postal_length/employee_category/address), then Wasil
    HIMSELF dispatches Stage 2 live (dry_run unchecked). The 32 review + 27 link rows and
    preflight failures are follow-up batches.
