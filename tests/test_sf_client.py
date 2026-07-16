@@ -44,6 +44,69 @@ def test_parse_bulk_result_unrecognized_is_unconfirmed():
     assert r["failed"] == 0
 
 
+# --- update_bulk: partial row failures exit the CLI non-zero -------------------
+# `sf data update bulk --json` exits 1 when the job finishes with failed records
+# (live-hit 2026-07-15, run 29430746090: 626-row backlog write-back crashed with the
+# row errors discarded — they are on stdout, not stderr). update_bulk must parse
+# stdout regardless of exit code and only raise when no row-level detail is present.
+# subprocess.run is the mock boundary so the real _run/update_bulk interplay is tested.
+
+def _fake_subprocess(returncode, stdout, stderr=""):
+    def run(cmd, **kwargs):
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    return run
+
+
+def test_update_bulk_partial_failure_returns_row_failures(monkeypatch):
+    out = json.dumps({"status": 1, "result": {
+        "jobInfo": {"numberRecordsProcessed": 2, "numberRecordsFailed": 1},
+        "records": {
+            "failedResults": [{"sf__Id": "00Q1",
+                               "sf__Error": "FIELD_CUSTOM_VALIDATION_EXCEPTION: bad postal"}],
+            "successfulResults": [{"sf__Id": "00Q2"}],
+        }}})
+    monkeypatch.setattr("leadauto.sf.client.subprocess.run", _fake_subprocess(1, out))
+    client = SfClient("headless")
+    r = client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"},
+                                    {"Id": "00Q2", "Email": "c@d.e"}])
+    assert r["failed"] == 1
+    assert r["failures"][0]["id"] == "00Q1"
+    assert "FIELD_CUSTOM_VALIDATION_EXCEPTION" in r["failures"][0]["error"]
+    assert r["confirmed"] is True
+
+
+def test_update_bulk_nonzero_exit_without_row_detail_raises_with_stdout(monkeypatch):
+    # Whole-job failure (or unrecognized shape): raise, but keep the stdout payload in
+    # the error — that is where the CLI puts its diagnostics, stderr only carries noise.
+    monkeypatch.setattr("leadauto.sf.client.subprocess.run",
+                        _fake_subprocess(1, "boom: job aborted", "update warning"))
+    client = SfClient("headless")
+    with pytest.raises(SfError, match="boom: job aborted"):
+        client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+
+
+def test_update_bulk_nonzero_exit_with_recognized_but_clean_result_raises(monkeypatch):
+    # Exit 1 with a recognized shape but zero row failures = job-level failure that
+    # must not be reported as success.
+    out = json.dumps({"status": 1, "result": {
+        "jobInfo": {"numberRecordsProcessed": 0, "numberRecordsFailed": 0},
+        "records": {"failedResults": []}}})
+    monkeypatch.setattr("leadauto.sf.client.subprocess.run", _fake_subprocess(1, out))
+    client = SfClient("headless")
+    with pytest.raises(SfError):
+        client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+
+
+def test_update_bulk_clean_exit_still_returns_summary(monkeypatch):
+    out = json.dumps({"status": 0, "result": {
+        "jobInfo": {"numberRecordsProcessed": 1, "numberRecordsFailed": 0},
+        "records": {"failedResults": []}}})
+    monkeypatch.setattr("leadauto.sf.client.subprocess.run", _fake_subprocess(0, out))
+    client = SfClient("headless")
+    r = client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+    assert r == {"processed": 1, "failed": 0, "failures": [], "confirmed": True}
+
+
 # --- query routing: REST for short queries, Bulk API for long ones -----------
 # Long IN(...) lists overflow the GET-URL header limit (HTTP 431); the client must
 # route them through `sf data export bulk` instead. `_run` is the only mock (the org

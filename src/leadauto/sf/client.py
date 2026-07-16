@@ -172,9 +172,12 @@ class SfClient:
     def update_bulk(self, sobject: str, records: list[dict]) -> dict:
         """Bulk-update existing records. Each dict must contain 'Id' plus fields to set.
 
-        Returns {processed, failed, failures, confirmed}. A non-zero CLI exit (whole-job
-        failure) raises; row-level failures are parsed from the --json payload so a partial
-        failure is never reported as a clean success.
+        Returns {processed, failed, failures, confirmed}. The CLI exits non-zero when the
+        job finishes with failed records (live-confirmed 2026-07-15, run 29430746090), so
+        stdout is parsed regardless of exit code: row-level failures become the returned
+        `failures` (-> QA Failures sheet). Only a non-zero exit WITHOUT row-level detail
+        (whole-job failure, unrecognized shape) raises — with stdout in the message,
+        because that is where the CLI puts its diagnostics (stderr only carries noise).
         """
         if not records:
             return {"processed": 0, "failed": 0, "failures": [], "confirmed": True}
@@ -197,13 +200,19 @@ class SfClient:
                 f'sf data update bulk --sobject {sobject} --file "{tmp}" '
                 f"--target-org {self.alias} --line-ending LF --wait 10 --json"
             )
-            res = self._run(cmd)
+            res = self._run(cmd, check=False)
         finally:
             try:
                 tmp.unlink()
             except OSError:
                 pass
         parsed = parse_bulk_update_result(res.stdout)
+        if res.returncode != 0 and not (parsed["confirmed"]
+                                        and (parsed["failed"] or parsed["failures"])):
+            raise SfError(
+                f"sf command failed ({res.returncode}) with no row-level failure detail:\n"
+                f"{cmd}\n{res.stderr}\n{res.stdout}"
+            )
         return {
             "processed": len(records), "failed": parsed["failed"],
             "failures": parsed["failures"], "confirmed": parsed["confirmed"],
