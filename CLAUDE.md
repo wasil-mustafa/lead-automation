@@ -281,10 +281,17 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    failedResults) — `SfClient` now fetches `sf data bulk results` and feeds the Failures
    sheet (closes open item 5's shape question). NOTE: the run advanced+committed the shared
    watermark to 2026-07-16T12:03 (newest closed backlog task), shrinking the scheduled dry
-   runs' scan window. Next: Stage 2 dry with the backlog config+CSV
-   (expect ~76 preflight drops: postal_length/employee_category/address), then Wasil
-   HIMSELF dispatches Stage 2 live (dry_run unchecked). The 32 review + 27 link rows and
-   preflight failures are follow-up batches.
+   runs' scan window. **Stage 2 backlog conversion DONE 2026-07-17:** dry run 29577236996
+   (230/266 pass preflight; 36 drops: 22 employee_category, 17 address_create_new, 1 dbid_xor,
+   1 freemail), then live run 29578167853 converted 115 but FAILED the other 115 — in every
+   10-lead batch exactly the first 5 converted and the last 5 failed: **batched SOAP
+   convertLead() runs one transaction per call and ~5 conversions' cascaded triggers/flows
+   exhaust a per-transaction governor limit** (the 3-lead July test sat under it). Per-lead
+   SOAP errors were being discarded (fixed in 37bce35 — now logged at ERROR). Retry run
+   29579163559 with `batch_size=3` converted the remaining 115/115 (0 failed/missing;
+   org-verified: 230/230 targets IsConverted, owner Rohdaten Pool, no Opportunities,
+   KN_Email2__c on 28+25 contacts). **Keep `--batch-size` ≤3 for live conversions.**
+   Remaining follow-up batches: 36 preflight drops + 32 review + 27 link rows.
 
 1. **End-to-end live validation: DONE 2026-07-10** (see Status) — live write-back + live
    SOAP conversion of dbeyond/coderis/econoomy, all step-4 checks green, idempotent re-run
