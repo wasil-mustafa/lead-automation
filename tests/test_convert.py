@@ -7,6 +7,8 @@ boundary is a FakeSoapClient answering the LeadStatus/IsConverted SOQL and echoi
 success per conversion, so batching + reconciliation + aggregation run end to end
 with no live conversion.
 """
+import logging
+
 import pytest
 
 from leadauto.config import Settings
@@ -171,6 +173,22 @@ def test_convert_leads_failure_rows_aggregate_as_failed():
     client = _FailingClient()
     res = convert_leads(client, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
     assert res["failed"] == 1 and res["converted"] == 0 and res["missing"] == 0
+
+
+def test_convert_leads_logs_each_failure_with_error_text(caplog):
+    # Per-lead SOAP errors must land in the log — the 2026-07-17 backlog run failed
+    # 115 leads and left no error text anywhere (results were only aggregated).
+    class _FailingClient(FakeSoapClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            return [{"leadId": c["lead_id"], "success": False,
+                     "errors": ["LIMIT_EXCEEDED: too many SOQL queries"]}
+                    for c in conversions]
+
+    client = _FailingClient()
+    with caplog.at_level(logging.ERROR):
+        convert_leads(client, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
+    assert any("00Q1" in r.message and "LIMIT_EXCEEDED: too many SOQL queries" in r.message
+               for r in caplog.records)
 
 
 def test_convert_leads_rejects_id_injection():

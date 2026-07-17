@@ -171,6 +171,10 @@ def _run_convert(client, targets, settings, batch_size, log, phase_label="",
                 [{"lead_id": t.lead_id, "account_id": t.account_id,
                   "contact_id": t.contact_id} for t in pending],
                 converted_status=converted_status, owner_id=settings.owner_id))
+        for r in rows:
+            if not r.get("success"):
+                log.error("%sLead %s conversion failed: %s", phase_label,
+                          r.get("leadId"), "; ".join(r.get("errors") or ["(no error detail)"]))
         returned = {_short_id(str(r.get("leadId") or "")) for r in rows}
         absent = [t.lead_id for t in batch if _short_id(t.lead_id) not in returned]
         if absent:
