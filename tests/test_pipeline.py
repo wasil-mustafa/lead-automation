@@ -540,10 +540,16 @@ def test_run_stage2_routes_kununu_conflict_to_failures(tmp_path, monkeypatch):
 
 # --- Stage 1: auto-approved CSV (review_gate: false, 2026-07-10) ---------------
 
-def _no_gate_settings():
+def _gate_settings(review_gate: bool):
+    """Settings with review_gate pinned — never depend on the config.yaml value
+    (it flipped to false at go-live 2026-07-18)."""
     s = Settings.load()
-    s.raw["pipeline"] = dict(s.raw["pipeline"], review_gate=False)
+    s.raw["pipeline"] = dict(s.raw["pipeline"], review_gate=review_gate)
     return s
+
+
+def _no_gate_settings():
+    return _gate_settings(review_gate=False)
 
 
 def _matched_enrich(monkeypatch):
@@ -592,7 +598,7 @@ def test_stage1_review_gate_on_never_emits_auto_csv(tmp_path, monkeypatch):
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
                       leads=[_lead("00Q000000000001")])
     review_dir = tmp_path / "review"
-    run_stage1(sf, object(), SETTINGS, state=State(None, []),   # review_gate stays true
+    run_stage1(sf, object(), _gate_settings(review_gate=True), state=State(None, []),
                since="2026-05-01T00:00:00Z", dry_run=False,
                qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
                review_dir=review_dir, predictions_path=None)
