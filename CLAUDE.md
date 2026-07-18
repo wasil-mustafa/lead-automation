@@ -29,12 +29,13 @@ Code lives under `src/leadauto/`. Each module is independently runnable.
    vs existing Accounts/Contacts → write-back to `KN_*` fields → gated, match-aware LeadConvert.
 
 Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artifact.py`,
-`pipeline/stage1_enrich.py` + `stage2_convert.py`, `cli.py`, `.github/workflows/`.
+`live_scope.py` (phased go-live gate), `pipeline/stage1_enrich.py` + `stage2_convert.py`,
+`cli.py`, `.github/workflows/`.
 
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 356 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 489 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -54,16 +55,22 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 340 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 489 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
 - **Scheduled:** Stage 1 is triggered by an **external cron-job.org job** (id 8029899) hitting the
   `stage1.yml` `workflow_dispatch` at 09/12/15/18 Vienna; it POSTs `{"ref":"master"}` with no
-  inputs ⇒ `dry_run` defaults **true** (runs stay dry; go live by dispatching with dry_run
-  unchecked). Change the schedule in *that job*, not the workflow. GitHub's own `schedule:` cron
-  was removed. Shadow files committed every run; watermark only on non-dry. Stage 2 is dispatch-only.
-- **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `dry_run: true`.
+  inputs ⇒ `dry_run` defaults **true** — so **scheduled runs are STILL DRY even after the
+  2026-07-18 go-live**; the last step to full automation is changing the cron job's payload to
+  `{"ref":"master","inputs":{"dry_run":"false"}}` (Wasil's call). Change the schedule in *that
+  job*, not the workflow. GitHub's own `schedule:` cron was removed. Shadow files committed every
+  run; watermark only on non-dry. Stage 2 runs on manual dispatch OR chained from a live Stage-1
+  run (`workflow_call`, see the go-live bullet).
+- **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `pipeline.dry_run: true`
+  (local-run default; CI takes the dispatch input), `review_gate: false` (since go-live),
+  `task_lookback_days: 90` (sweeps the open-task backlog; processed_task_ids dedupes), and the
+  **live-scope gate** `pipeline.live_scope` — see next bullet.
 - **LIVE-PROVEN end to end (2026-07-10):** first live write-back (3 test leads, KN_* fields
   org-verified) AND first live conversion — stage2 run 29126789599 converted
   dbeyond/coderis/econoomy via SOAP (3 converted, 0 failed/missing; owner=Wasil, Qualified,
@@ -73,6 +80,19 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   The Dublettencheck rules were validated WITH LeadFeeder by the 2026-07-08 skipped-task
   backtest (87% correct account on 283 cases — see Matching section); the create_new path
   is shadow-scored plus this 3-lead live test.
+- **GO-LIVE (phased) 2026-07-18 — first fully automated E2E run:** run 29653343786 did live
+  write-back → committed the auto-approved CSV → **chained Stage 2** (`stage1.yml` `convert` job
+  calls `stage2.yml` via `workflow_call`, batch_size 3, checkout `ref: master` to see the CSV
+  committed mid-run) → converted 3/3 (GS Gestelltechnik/HGW Winterthur/Angeringer; org-verified:
+  Qualified, owner **Rohdaten Pool** on Lead/Account/Contact, no Opportunity, tasks re-parented).
+  **Live scope** (`live_scope.py` + config `pipeline.live_scope`): on a non-dry run ONLY leads
+  with decision ∈ `decisions` (currently `create_new`) AND kununu profile score <
+  `max_kununu_score` (3.0, strict — the human "No Demand" line) are written back + staged;
+  missing score fails closed; every other lead stays untouched (humans keep it) and gets a
+  shadow prediction (live-scope rows never do — we convert those ourselves). Score source:
+  feed `profile_score` (stringly typed) → `ProfileInfo.score` → `EnrichedLead.kununu_score`.
+  QA Review sheet gained `kununu_score` + `live_scope` (yes/exclusion-reason) columns and a
+  Summary `live_scope_pass` count. Widen the rollout in config (add `link`, raise the cap).
 - **Write-back field spec (Wasil, 2026-07-10, `writeback.py`):** from the Task ONLY kununu URL
   (= the processed marker, replacing `KN_KununuProfileName__c` — reader accepts either), Region
   (derived from the URL's country slug: `/de/`→Germany, `/at/`→Austria, `/ch/`→Switzerland) and
@@ -144,7 +164,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (humans set it for kununu score <3.0 — a triage practice that automation replaces); humans keep
   closing those tasks, so shadow evidence comes mostly from the non-No-Demand minority. The few
   pool-user-owned leads (contact-attached tasks) are out of scope for now. Config `owner_id` =
-  Wasil (deliberate, 2026-07-05 — converted records are assigned to him).
+  the **'Rohdaten Pool' user since 2026-07-18** (the live scope is pool-quality leads; revisit
+  when it widens — Wasil's own id is kept in the config comment).
 - **Own-company emails are out of scope.** Stage 1 extraction AND shadow scoring skip any lead
   whose lead/contact email second-level domain ∈ `excluded_email_domains` (`kununu`, `xing`,
   `onlyfy`) — internal colleagues doing profile-claim/trial tests, not sales leads. Matched on the
@@ -202,7 +223,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   website/email domain nor VAT equality corroborates — acronym name agreement is tautological
   since LF searched on the acronym we sent.
 - **kununu profile feed** (`kununu_feed.py`): daily-cached DWH bulk file (551 MB;
-  `assigned_companies` = list of `{company_uuid, company_name}`) supplies alt names; joins on
+  `assigned_companies` = list of `{company_uuid, company_name}`) supplies alt names AND
+  `profile_score` (stringly typed; missing/garbage → None), the live-scope gate's input —
+  a feed outage therefore fails the gate closed (no scores ⇒ nothing converts, safe); joins on
   `profile_uuid` with URL-slug fallback; degrades to no-alt behavior without `KUNUNU_API_TOKEN`
   (`--no-kununu-feed` to disable). Also planned input for a future live-lead duplicate-detection
   feature — the `kununu-data` MCP server is the same file, no per-lead API.
@@ -301,14 +324,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    KN_Email2__c on 28+25 contacts). **Keep `--batch-size` ≤3 for live conversions.**
    Remaining follow-up batches: 36 preflight drops + 32 review + 27 link rows.
 
-1. **End-to-end live validation: DONE 2026-07-10** (see Status) — live write-back + live
-   SOAP conversion of dbeyond/coderis/econoomy, all step-4 checks green, idempotent re-run
-   green. Remaining go-live moves: flip config `dry_run: false` (scheduled Stage 1 writes
-   back + commits the auto-approved CSV once `pipeline.review_gate: false` is set — Wasil
-   approved auto-approve 2026-07-10: link+create_new only, skip/review never) and dispatch
-   Stage 2 with dry_run unchecked per batch. The only brake: Stage 2 is dispatch-only with
-   `dry_run` defaulting true — a required-reviewers Environment is NOT possible (needs a
-   paid plan on private repos, verified 2026-07-10).
+1. **Phased go-live: DONE 2026-07-18** (see Status GO-LIVE bullet) — `review_gate: false`
+   committed, live-scope gate shipped, first automated E2E run converted 3/3. **The one
+   remaining move to full automation:** change the cron-job.org payload to
+   `{"ref":"master","inputs":{"dry_run":"false"}}` so scheduled runs go live (they currently
+   stay dry — dispatch with dry_run unchecked for a manual live run). Widening the scope
+   (add `link` to `live_scope.decisions`, raise `max_kununu_score`) is a config commit,
+   informed by shadow accuracy (item 4). A required-reviewers Environment is NOT possible
+   (needs a paid plan on private repos, verified 2026-07-10).
 2. **Task-type rollout:** `claimer` + `ebp_trial` are enabled; add `event`, then `content`,
    calibrating from the review sheet's false-match rate.
 3. **Validate the rule engine WITH LeadFeeder:** largely answered by the 2026-07-08 skipped-task
@@ -326,12 +349,20 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 5. **Write-back failure handling: RESOLVED 2026-07-18** — all record updates (Lead write-back,
    pool Accounts, Contact KN_Email2__c) moved off CLI bulk jobs onto `SfClient.update_records`
    (REST sObject Collections PATCH, ≤200 records/request, allOrNone=false): per-row errors are
-   inline in the one response, so the bulk-shape/`confirmed=False` question is gone. Still open
+   inline in the one response, so the bulk-shape/`confirmed=False` question is gone.
+   Live-proven small-scale 2026-07-18 (go-live run: 3 leads written, 0 failures). Still open
    from the old item: watermark exclusion for failed rows vs. Failures sheet + overlap-window
-   retry. First live run should sanity-check the failures land in the QA Failures sheet as before.
+   retry.
 6. **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path; `stage2_convert`
    re-derives the auto-link predicate; `stage1.yml` push lacks rebase/retry (mitigated by the
-   concurrency group); add `caplog` assertions to the LF chunk-failure tests.
+   concurrency group); add `caplog` assertions to the LF chunk-failure tests;
+   `qa_artifact._convert_blockers` false-positives `postal_length` when the payload changes the
+   country (it merges payload `CountryCode` over the lead's stale `Country` name — leads default
+   to Germany; the real preflight reads post-write-back state and passes, proven on the go-live
+   run). **Test gotcha (fixed 8ee8eb8, keep honoring it):** any `dry_run=False` `run_stage1`
+   test MUST pass `review_dir=tmp_path` — with `review_gate: false` in config it otherwise
+   writes a fake auto-approved CSV into the repo's real `review/` dir, which Stage 1's
+   detect-step glob (`review/approved_*_auto.csv`, first untracked match) could feed to Stage 2.
 
 ## Git
 

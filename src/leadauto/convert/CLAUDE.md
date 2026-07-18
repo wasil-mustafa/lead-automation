@@ -1,19 +1,26 @@
 # Stage 2 — Gated Lead Conversion
 
 Scope: the conversion path — this package (`convert/converter.py`), `pipeline/stage2_convert.py`,
-`cli.py stage2`, `.github/workflows/stage2.yml`, and `review/approved_*.csv`. Stage 2 is
-**dispatch-only** (no cron, no watermark) and has NOT yet run a live conversion.
+`cli.py stage2`, `.github/workflows/stage2.yml`, and `review/approved_*.csv`. Stage 2 runs on
+**manual dispatch** OR **chained from a live Stage-1 run** (`workflow_call` from `stage1.yml`'s
+`convert` job, since go-live 2026-07-18); no cron, no watermark. LIVE-PROVEN: 3-lead test
+2026-07-10 (run 29126789599), 230-lead backlog 2026-07-17, first chained auto-run 2026-07-18
+(run 29653343786, 3/3). The chained call checks out `ref: master` (NOT the triggering SHA) so it
+sees the auto CSV committed mid-run, and reuses the `lead-automation-stage2` concurrency group
+at the caller's job level (a called workflow's top-level `concurrency` is ignored).
 
 ## Flow
 
 1. Reviewer fills `Approve?` in the QA artifact's Review sheet and commits the rows as
    `review/approved_<date>.csv`. `stage2` picks the newest by filename (`--approved` overrides).
-   **Auto-approve mode (Wasil 2026-07-10):** with config `pipeline.review_gate: false`, live
-   Stage-1 runs emit + commit `review/approved_<UTCts>_auto.csv` themselves
-   (`qa_artifact.write_auto_approved_csv`): every `link`/`create_new` row pre-approved,
-   `skip`/`review` never included, write-back failures held back. Stage 2 is unchanged —
-   preflight/pool-gate/clustering still run; the only human brake is the deliberate
-   workflow dispatch with dry_run unchecked (see Safety model).
+   **Auto-approve mode (Wasil 2026-07-10; ACTIVE + narrowed to the live scope since go-live
+   2026-07-18):** with config `pipeline.review_gate: false`, live Stage-1 runs emit + commit
+   `review/approved_<UTCts>_auto.csv` themselves (`qa_artifact.write_auto_approved_csv`):
+   exactly the rows passing the live-scope gate (`live_scope.py`: decision ∈
+   `pipeline.live_scope.decisions` — currently `create_new` — AND kununu score <
+   `max_kununu_score` 3.0; missing score fails closed) pre-approved, `skip`/`review` never
+   included, write-back failures held back. Stage 2 is unchanged — preflight/pool-gate/
+   clustering still run (see Safety model for the brakes).
 2. `targets_from_approved` builds one `ConversionTarget(lead_id, account_id?, contact_id?)`
    per approved row (`Approve?` ∈ yes/y/true/x/1):
    - Rows with `decision == "skip"` (no LeadFeeder match) are dropped even if approved — a
@@ -45,9 +52,11 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    that creates a new Account, and secondaries that link to the primary's new Account. If a
    primary fails conversion, its secondaries are reported as failed orphans (not converted).
    Conversion runs over the **SOAP Partner API `convertLead()`** (`SfClient.convert_lead` →
-   `sf/soap.py`; anonymous Apex is impossible — see Gotchas) per batch (default **10**,
-   `--batch-size`; kept small because each conversion cascades Account/Contact triggers, flows
-   and validation/duplicate rules synchronously — and the SOAP call takes ≤100 LeadConverts).
+   `sf/soap.py`; anonymous Apex is impossible — see Gotchas) per batch (default **3**,
+   `--batch-size`; **keep ≤3 live** — each conversion cascades Account/Contact triggers, flows
+   and validation/duplicate rules synchronously in ONE transaction per SOAP call, and >5
+   exhausted a per-transaction governor limit on the 2026-07-17 backlog run: exactly the
+   first 5 of each 10-lead batch converted, the rest failed).
    Each LeadConvert carries accountId/contactId when linked, `doNotCreateOpportunity=true`,
    `overwriteLeadSource=false`, `sendNotificationEmail=false`, `ownerId` = config owner_id.
    Converted status is PINNED in config (`salesforce.converted_status: Qualified`) and trusted
@@ -104,11 +113,15 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   the converter's own per-batch `IsConverted = true` pre-query still runs.
 - **No GitHub Environment gate** (resolved 2026-07-10): required-reviewers protection needs
   a paid plan on private repos (API returns 422 on this repo), so the `environment:`
-  reference was REMOVED from `stage2.yml`. The conversion brake is that Stage 2 is
-  dispatch-only and its `dry_run` input defaults to true — live conversion takes a
-  deliberate manual dispatch with dry_run unchecked.
-- Config `owner_id` stays Wasil's user DELIBERATELY (decision 2026-07-05) — converted records
-  are assigned to him at setOwnerId time; queue ownership ends at conversion.
+  reference was REMOVED from `stage2.yml`. The conversion brakes: on **manual dispatch** the
+  `dry_run` input defaults to true — live conversion takes a deliberate dispatch with dry_run
+  unchecked. On the **chained path** (since go-live 2026-07-18) the brake sits upstream: the
+  chain only fires from a live Stage-1 run (itself gated by Stage 1's dry_run input, default
+  true — scheduled cron-job.org runs stay dry), and the auto CSV is already narrowed to the
+  live scope (create_new + kununu score <3).
+- Config `owner_id` = the **'Rohdaten Pool' user since 2026-07-18** (live scope is pool-quality
+  leads; was Wasil's user for the 2026-07-10 test) — converted records are assigned to it at
+  setOwnerId time; queue ownership ends at conversion.
 
 ## Gotchas
 
@@ -188,13 +201,13 @@ Stage-1 write-back now fills KN_NoOwnDBID__c / address (CountryCode) / KN_Employ
 FirstName / Phone (fill-only-blank; spec docs/superpowers/specs/2026-07-05-writeback-gaps-and-stage2-preflight-design.md),
 and the QA Review sheet previews these checks in convert_blockers.
 
-## Live-testing plan (prod only, no sandbox — risk-ordered)
+## Live validation history (prod only, no sandbox)
 
-1. **Link-existing path, real lead:** one approved lead with a confident `name_address`/
-   `kununu_agree` link, `--batch-size 1`; verify owner/status/no Opportunity/task re-parenting;
-   re-run to confirm no-op.
-2. **New-account path, synthetic lead:** throwaway Lead + Task on a kununu-internal test
-   profile; convert, inspect, delete. Check the "Delete converted leads" org permission FIRST
-   or the test leaves a permanent stub.
-3. **Existing-account + new-contact path:** synthetic lead whose company matches a disposable
-   test account.
+The create-new path is live-proven at three scales: 3-lead test 2026-07-10 (run 29126789599,
+incl. green idempotency re-run), 230-lead backlog 2026-07-17 (runs 29578167853 + 29579163559 —
+the run that established the batch-size ≤3 governor ceiling), and the first chained auto-run
+2026-07-18 (run 29653343786, 3/3; org-verified: Qualified, owner Rohdaten Pool, no Opportunity,
+tasks re-parented, addresses/Industry/employee bins on the new Accounts). The **link-existing
+path has NOT yet converted live** (only 27 backlog link rows are staged; validate with
+`--batch-size 1` and verify owner/status/no-Opportunity/task re-parenting before trusting it
+at scale) — pool-account enrichment ran live only as part of dry-run queries so far.
