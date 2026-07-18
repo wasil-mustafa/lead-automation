@@ -496,6 +496,25 @@ def test_enrich_carries_feed_industry_from_profile():
     assert r.feed_industry == "IT"
 
 
+def test_enrich_carries_kununu_score_from_profile():
+    # ProfileInfo.score (feed profile_score) must land on EnrichedLead.kununu_score —
+    # it is the live-scope gate's input on non-dry runs.
+    fc = FakeClient()
+    e = _extracted(company="Acme GmbH", contact_name=None, region=None, cc=None)
+    e.kununu_profile_uuid = "uuid-1"
+    profiles = {"uuid-1": ProfileInfo(name="Acme", country_code="de", score=2.5)}
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles=profiles)
+    assert r.kununu_score == 2.5
+
+
+def test_enrich_kununu_score_none_without_profile():
+    # No feed hit => no score => the live-scope gate fails closed downstream.
+    fc = FakeClient()
+    e = _extracted(company="Acme GmbH", contact_name=None, region=None, cc=None)
+    [r] = enrich_leads(fc, [e], SETTINGS, profiles={})
+    assert r.kununu_score is None
+
+
 def test_url_country_beats_feed_country():
     # Both kununu sources present but disagreeing: the URL country (task evidence
     # for THIS claim) wins over the feed's profile-level country.

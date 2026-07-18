@@ -29,6 +29,7 @@ class ProfileInfo:
     city: str | None = None
     country_code: str | None = None
     industry: str | None = None
+    score: float | None = None  # kununu profile score (feed `profile_score`); None = no reviews yet
 
 
 def base_slug(url: str | None) -> str | None:
@@ -62,6 +63,18 @@ def _company_names(record: dict) -> list[str]:
         if name and name.strip():
             names.append(name.strip())
     return names
+
+
+def _profile_score(record: dict) -> float | None:
+    """The feed's `profile_score` is stringly typed ('2.5', '1'); missing/empty/garbage
+    => None (a profile without reviews has no score at all)."""
+    raw = record.get("profile_score")
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
@@ -106,6 +119,7 @@ def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
                     city=d.get("profile_city"),
                     country_code=d.get("profile_country_code"),
                     industry=d.get("profile_industry_name_de"),
+                    score=_profile_score(d),
                 )
                 if uuid:
                     found.setdefault(uuid, info)

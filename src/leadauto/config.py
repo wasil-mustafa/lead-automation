@@ -209,6 +209,21 @@ class Settings:
         later score our own conversions as if a human had made them."""
         return bool(self.raw["pipeline"].get("record_predictions", True))
 
+    # --- Live scope (phased go-live gate; see live_scope.py) ---
+    @property
+    def live_max_kununu_score(self) -> float:
+        """Strict upper bound on the kununu profile score for live processing
+        (score < max qualifies; a missing score never does)."""
+        return float((self.raw["pipeline"].get("live_scope") or {})
+                     .get("max_kununu_score", 3.0))
+
+    @property
+    def live_decisions(self) -> list[str]:
+        """Match decisions eligible for live write-back + conversion. Widen the
+        rollout here (e.g. add 'link') — `skip`/`review` must never be listed."""
+        return list((self.raw["pipeline"].get("live_scope") or {})
+                    .get("decisions", ["create_new"]))
+
     @property
     def include_enriched_leads(self) -> bool:
         """True bypasses the already-enriched skip (kununu marker field set). One-off

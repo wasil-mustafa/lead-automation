@@ -13,12 +13,13 @@ from pathlib import Path
 
 from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import EnrichedLead, enrich_leads
+from ..live_scope import live_scope_reason
 from ..logging import get_logger
 from ..match import MatchResult, load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
 from ..qa_artifact import write_auto_approved_csv, write_workbook
 from ..state import REPO_ROOT, State, advance, compute_since, load_state, save_state
-from ..writeback import write_back
+from ..writeback import lead_field_payload, write_back
 
 
 # Enriched leads per load_existing_records call (same size the skipped-task backtest
@@ -80,17 +81,37 @@ def run_stage1(
         existing = load_existing_records(sf_client, batch, settings, logger=log)
         results += [match_lead(e, existing, settings) for e in batch]
 
-    wb = write_back(sf_client, enriched, dry_run=dry_run, logger=log)
+    # Live-scope gate (phased go-live): on a non-dry run only in-scope leads (see
+    # live_scope.py) are written back; everything else stays untouched in Salesforce.
+    # Dry runs keep writing back nothing but computing every payload (predictions
+    # need the field values).
+    reasons = [live_scope_reason(r, settings) for r in results]
+    if dry_run:
+        wb = write_back(sf_client, enriched, dry_run=True, logger=log)
+    else:
+        live_enriched = [r.enriched for r, reason in zip(results, reasons) if reason is None]
+        log.info("Live scope: %d of %d lead(s) pass the gate", len(live_enriched), len(results))
+        wb = write_back(sf_client, live_enriched, dry_run=False, logger=log)
     new_state = advance(state, extraction.processed_tasks)
 
     failures = wb.get("failures", [])
     if failures:
         log.warning("%d write-back failure(s) recorded in the QA Failures sheet", len(failures))
 
-    if dry_run and predictions_path is not None and settings.record_predictions:
-        stamp = (now or datetime.now(timezone.utc)).isoformat()
-        n = record_predictions(results, wb.get("payloads", []), stamp, predictions_path)
-        log.info("Recorded %d pending prediction(s) -> %s", n, predictions_path)
+    # Shadow predictions: on a dry run every lead is recorded (nothing was touched);
+    # on a live run only out-of-scope leads are — humans convert those, so they stay
+    # valid shadow evidence, while live-scope leads are converted by the pipeline
+    # itself and must never be scored as human decisions.
+    if predictions_path is not None and settings.record_predictions:
+        if dry_run:
+            shadow_results, shadow_payloads = results, wb.get("payloads", [])
+        else:
+            shadow_results = [r for r, reason in zip(results, reasons) if reason is not None]
+            shadow_payloads = [lead_field_payload(r.enriched) for r in shadow_results]
+        if shadow_results:
+            stamp = (now or datetime.now(timezone.utc)).isoformat()
+            n = record_predictions(shadow_results, shadow_payloads, stamp, predictions_path)
+            log.info("Recorded %d pending prediction(s) -> %s", n, predictions_path)
 
     qa_out: Path | None = None
     if qa_path is not None:
@@ -100,15 +121,17 @@ def run_stage1(
             "new_watermark": new_state.last_task_created,
             "dry_run": dry_run,
         }
-        qa_out = write_workbook(results, extraction.skipped, meta, qa_path, failures=failures)
+        qa_out = write_workbook(results, extraction.skipped, meta, qa_path,
+                                failures=failures, settings=settings)
         log.info("Wrote QA artifact -> %s", qa_out)
 
-    # Auto-approve (review_gate: false): live runs stage the link/create_new rows for
+    # Auto-approve (review_gate: false): live runs stage the live-scope rows for
     # Stage 2 without a human touching Approve?. Write-back failures are held back —
     # their lead fields would fail the conversion validation rules anyway.
     if not dry_run and not settings.review_gate:
         failed_ids = {f.get("lead_id") for f in failures}
-        auto_csv = write_auto_approved_csv(results, review_dir, exclude_lead_ids=failed_ids)
+        auto_csv = write_auto_approved_csv(results, review_dir, settings,
+                                           exclude_lead_ids=failed_ids)
         if auto_csv:
             log.info("Auto-approved conversion CSV -> %s", auto_csv)
 

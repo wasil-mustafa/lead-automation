@@ -145,12 +145,15 @@ def test_stage1_dry_run_writes_nothing_and_does_not_persist_state(tmp_path):
     assert not state_path.exists()           # watermark not persisted in dry-run
 
 
-def test_stage1_live_writes_back_and_persists_state(tmp_path):
-    sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
-                      accounts=[_account()], contacts=[_contact()])
+def test_stage1_live_writes_back_and_persists_state(tmp_path, monkeypatch):
+    # Live-scope pass required since the phased go-live: create_new + kununu score < 3.
+    _matched_enrich(monkeypatch)
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
     state_path = tmp_path / "watermark.json"
-    res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
-                     dry_run=False, qa_path=tmp_path / "qa.xlsx", state_path=state_path)
+    res = run_stage1(sf, object(), SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+                     dry_run=False, qa_path=tmp_path / "qa.xlsx", state_path=state_path,
+                     predictions_path=None)
+    assert res.results[0].decision == "create_new"
     assert len(sf.updates) == 1
     sobject, records = sf.updates[0]
     assert sobject == "Lead"
@@ -158,6 +161,51 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path):
     assert records[0]["KN_KununuLinkProfile__c"] == "https://www.kununu.com/de/hufeland-klinikum"
     assert state_path.exists()
     assert load_state(state_path).last_task_created == "2026-06-19T10:00:00.000+0000"
+
+
+def test_stage1_live_leaves_out_of_scope_leads_untouched(tmp_path):
+    # Phased go-live: a live run must NOT write back leads outside the live scope.
+    # lf_client=None -> no LF match -> terminal skip -> decision_skip exclusion; the
+    # lead's KN_* fields stay untouched, but the watermark still advances (the task
+    # is seen once, then left to humans).
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
+                      accounts=[_account()], contacts=[_contact()])
+    state_path = tmp_path / "watermark.json"
+    res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+                     dry_run=False, qa_path=None, state_path=state_path,
+                     predictions_path=None)
+    assert res.results[0].decision == "skip"
+    assert sf.updates == []                  # untouched in Salesforce
+    assert state_path.exists()               # but the task is consumed
+
+
+def test_stage1_live_records_shadow_predictions_for_out_of_scope(tmp_path):
+    # Out-of-scope leads on a LIVE run keep feeding the shadow backtest: humans will
+    # convert them, so the prediction is valid evidence for widening the rollout.
+    from leadauto.predictions import load_predictions
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
+                      accounts=[_account()], contacts=[_contact()])
+    p = tmp_path / "predictions.jsonl"
+    run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+               dry_run=False, qa_path=None, state_path=tmp_path / "wm.json",
+               predictions_path=p)
+    preds = load_predictions(p)
+    assert [q.lead_id for q in preds] == ["00Q1"]
+    assert preds[0].decision == "skip"
+
+
+def test_stage1_live_never_records_predictions_for_live_scope_rows(tmp_path, monkeypatch):
+    # Live-scope rows are converted by the pipeline itself — shadow-compare must never
+    # score our own conversions as human decisions.
+    _matched_enrich(monkeypatch)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")])
+    p = tmp_path / "predictions.jsonl"
+    run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
+               since="2026-05-01T00:00:00Z", dry_run=False,
+               qa_path=None, state_path=tmp_path / "wm.json",
+               review_dir=tmp_path / "review", predictions_path=p)
+    assert not p.exists()
 
 
 # --- Stage 2: approved -> targets --------------------------------------------
@@ -499,12 +547,13 @@ def _no_gate_settings():
 
 
 def _matched_enrich(monkeypatch):
-    """Make enrich_leads return an accepted LF match so the decision is create_new."""
+    """Make enrich_leads return an accepted LF match so the decision is create_new,
+    with a kununu score under the live-scope cap so the row passes the go-live gate."""
     from leadauto.leadfeeder.enrich import EnrichedLead
 
     def fake_enrich(lf, extracteds, settings, logger=None, **kw):
         return [EnrichedLead(extracted=e, matched=True, lf_company_id="123",
-                             matched_name=e.best_company, company={})
+                             matched_name=e.best_company, company={}, kununu_score=2.5)
                 for e in extracteds]
 
     monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)

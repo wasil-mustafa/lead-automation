@@ -264,11 +264,65 @@ def test_review_sheet_carries_cluster_and_conflict_keys():
     assert row[idx["kununu_profile_uuid"]] == "puid-123"
 
 
-# --- auto-approved CSV (review_gate: false, 2026-07-10) ------------------------
+# --- live-scope columns (phased go-live, 2026-07-18) ---------------------------
+
+def test_review_sheet_shows_kununu_score_and_live_scope_verdict():
+    # Reviewers calibrate the go-live gate from this sheet: the score and the gate
+    # verdict ("yes" / exclusion reason) sit on every row when settings are passed.
+    assert "kununu_score" in REVIEW_COLUMNS and "live_scope" in REVIEW_COLUMNS
+    passing = _result("00Q1", decision="create_new")
+    passing.enriched.kununu_score = 2.5
+    excluded = _result("00Q2", decision="link")
+    excluded.enriched.kununu_score = 2.5
+    unscored = _result("00Q3", decision="create_new")   # no feed hit -> fails closed
+    ws = build_workbook([passing, excluded, unscored], [], meta={},
+                        settings=_settings())["Review"]
+    idx = {h: i for i, h in enumerate(_headers(ws))}
+    rows = _rows(ws)
+    assert rows[0][idx["kununu_score"]] == 2.5
+    assert rows[0][idx["live_scope"]] == "yes"
+    assert rows[1][idx["live_scope"]] == "decision_link"
+    assert rows[2][idx["live_scope"]] == "score_missing"
+
+
+def test_review_live_scope_blank_without_settings():
+    # Legacy callers (no settings) keep working; the verdict column just stays blank.
+    res = _result(decision="create_new")
+    res.enriched.kununu_score = 2.5
+    ws = build_workbook([res], [], meta={})["Review"]
+    idx = {h: i for i, h in enumerate(_headers(ws))}
+    assert _rows(ws)[0][idx["live_scope"]] in (None, "")
+
+
+def test_summary_counts_live_scope_pass():
+    passing = _result("00Q1", decision="create_new")
+    passing.enriched.kununu_score = 1.9
+    excluded = _result("00Q2", decision="create_new")
+    excluded.enriched.kununu_score = 4.5
+    wb = build_workbook([passing, excluded], [], meta={}, settings=_settings())
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["live_scope_pass"] == 1
+
+
+def test_summary_omits_live_scope_pass_without_settings():
+    wb = build_workbook([_result()], [], meta={})
+    metrics = {r[0] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert "live_scope_pass" not in metrics
+
+
+# --- auto-approved CSV (review_gate: false, 2026-07-10; live-scope 2026-07-18) --
+
+def _settings(**live_scope):
+    from leadauto.config import Settings
+    s = Settings.load()
+    if live_scope:
+        s.raw["pipeline"] = dict(s.raw["pipeline"], live_scope=live_scope)
+    return s
+
 
 def _auto_results():
     from leadauto.match import AccountMatch
-    return [
+    results = [
         _result("00Q000000000001", decision="link",
                 account=AccountMatch(account_id="001000000000001", score=None,
                                      reason="name_address")),
@@ -276,45 +330,68 @@ def _auto_results():
         _result("00Q000000000003", decision="review"),
         _result("00Q000000000004", decision="skip"),
     ]
+    for r in results:
+        r.enriched.kununu_score = 2.5      # under the live-scope cap
+    return results
 
 
-def test_auto_approved_csv_holds_link_and_create_new_only(tmp_path):
+def test_auto_approved_csv_holds_live_scope_rows_only(tmp_path):
+    # Default live scope = create_new only: the link/review/skip rows stay out even
+    # though their kununu score is under the cap.
     import csv
     from leadauto.qa_artifact import write_auto_approved_csv
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review")
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", _settings())
     assert path is not None and path.name.startswith("approved_") and "auto" in path.name
     with path.open(newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
-    assert [r["lead_id"] for r in rows] == ["00Q000000000001", "00Q000000000002"]
+    assert [r["lead_id"] for r in rows] == ["00Q000000000002"]
     assert all(r["Approve?"] == "yes" for r in rows)
+    assert rows[0]["decision"] == "create_new"
+    assert rows[0]["live_scope"] == "yes"
+
+
+def test_auto_approved_csv_widened_decisions_include_link(tmp_path):
+    # Widening the rollout is a config change: decisions [create_new, link] pulls the
+    # link row in too (still score-gated).
+    import csv
+    from leadauto.qa_artifact import write_auto_approved_csv
+    settings = _settings(decisions=["create_new", "link"], max_kununu_score=3.0)
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", settings)
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["lead_id"] for r in rows] == ["00Q000000000001", "00Q000000000002"]
     assert rows[0]["account_match_id"] == "001000000000001"
-    assert rows[1]["decision"] == "create_new"
+
+
+def test_auto_approved_csv_excludes_score_at_or_over_cap_and_missing(tmp_path):
+    from leadauto.qa_artifact import write_auto_approved_csv
+    results = _auto_results()
+    results[1].enriched.kununu_score = 3.0     # boundary: 3.0 is NOT under the cap
+    assert write_auto_approved_csv(results, tmp_path / "review", _settings()) is None
+    results[1].enriched.kununu_score = None    # missing score fails closed
+    assert write_auto_approved_csv(results, tmp_path / "review", _settings()) is None
 
 
 def test_auto_approved_csv_excludes_writeback_failures(tmp_path):
-    import csv
     from leadauto.qa_artifact import write_auto_approved_csv
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review",
-                                   exclude_lead_ids={"00Q000000000001"})
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        rows = list(csv.DictReader(fh))
-    assert [r["lead_id"] for r in rows] == ["00Q000000000002"]
+    assert write_auto_approved_csv(_auto_results(), tmp_path / "review", _settings(),
+                                   exclude_lead_ids={"00Q000000000002"}) is None
 
 
 def test_auto_approved_csv_skipped_when_nothing_qualifies(tmp_path):
     from leadauto.qa_artifact import write_auto_approved_csv
     only_skips = [_result("00Q000000000004", decision="skip"),
                   _result("00Q000000000003", decision="review")]
-    assert write_auto_approved_csv(only_skips, tmp_path / "review") is None
+    assert write_auto_approved_csv(only_skips, tmp_path / "review", _settings()) is None
     assert not (tmp_path / "review").exists() or not list((tmp_path / "review").iterdir())
 
 
 def test_auto_approved_csv_roundtrips_through_stage2(tmp_path):
-    from leadauto.config import Settings
     from leadauto.pipeline.stage2_convert import read_approved, targets_from_approved
     from leadauto.qa_artifact import write_auto_approved_csv
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review")
-    targets = targets_from_approved(read_approved(path), Settings.load())
+    settings = _settings(decisions=["create_new", "link"], max_kununu_score=3.0)
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", settings)
+    targets = targets_from_approved(read_approved(path), settings)
     assert [t.lead_id for t in targets] == ["00Q000000000001", "00Q000000000002"]
     assert targets[0].account_id == "001000000000001"
     assert targets[1].account_id is None       # create_new stays create-new

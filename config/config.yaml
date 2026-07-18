@@ -7,8 +7,11 @@ salesforce:
   # Pinned converted LeadStatus: trusted as-is, no per-run LeadStatus SOQL.
   # Leave blank to fall back to querying the org's first converted status.
   converted_status: Qualified
-  # Owner to assign converted leads to. Reconcile with the real integration user.
-  owner_id: "005Mz00000XvtQzIAJ"
+  # Owner to assign converted leads to. Live scope is currently the no-sales-potential
+  # population (kununu score < 3, create_new) — converted Lead, new Account and new
+  # Contact all go to the 'Rohdaten Pool' user (Wasil, 2026-07-18). Revisit when the
+  # live scope widens beyond pool-quality leads (Wasil's user id: 005Mz00000XvtQzIAJ).
+  owner_id: "005Mz00000Xw0jjIAB"
   # 'Rohdaten Pool' user: linked Accounts owned by this user are raw data and get
   # overwrite-enriched at conversion time (Owner.Name = 'Rohdaten Pool').
   rohdaten_pool_owner_id: "005Mz00000Xw0jjIAB"
@@ -78,9 +81,20 @@ matching:
 
 pipeline:
   # false => live Stage-1 runs emit review/approved_<ts>_auto.csv with every
-  # link/create_new row pre-approved (skip/review never; write-back failures held
-  # back), so Stage 2 converts without a human filling Approve? (Wasil 2026-07-10).
+  # live-scope row pre-approved (see live_scope below; skip/review never; write-back
+  # failures held back), so Stage 2 converts without a human filling Approve?
+  # (Wasil 2026-07-10; narrowed to the live scope 2026-07-18).
   review_gate: true
   dry_run: true              # true => no SF writes/conversions (kept ON while validating vs control file)
   batch_limit: 0             # 0 = unlimited; >0 = LIMIT-scoped
-  task_lookback_days: 35     # overlap window around the watermark
+  # 90 days: sweeps the open-task backlog (oldest open lead-task 2026-04-24) on the
+  # first live run; processed_task_ids dedupes, so each task is only processed once.
+  task_lookback_days: 90
+  # Phased go-live gate (Wasil, 2026-07-18): on a non-dry run ONLY leads matching this
+  # scope are written back + staged for conversion; every other lead is left untouched
+  # (humans keep working it) and gets a shadow prediction instead. A missing kununu
+  # score (profile not in feed / no reviews) always fails the gate.
+  live_scope:
+    max_kununu_score: 3.0    # strict <; the score-3.0 boundary case stays with humans
+    decisions:               # widen the rollout here (e.g. add link); never skip/review
+      - create_new

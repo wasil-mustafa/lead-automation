@@ -97,3 +97,16 @@ def test_excluded_email_domains_normalizes_to_second_level_labels():
 def test_excluded_email_domains_defaults_empty_when_missing():
     s = Settings(raw={}, leadfeeder_api_key=None, sf_auth_url=None)
     assert s.excluded_email_domains == set()
+
+
+def test_live_scope_from_config_yaml():
+    # Phased go-live scope (2026-07-18): create_new under a strict score-3.0 cap.
+    s = Settings.load()
+    assert s.live_max_kununu_score == 3.0
+    assert s.live_decisions == ["create_new"]
+
+
+def test_live_scope_defaults_when_section_missing():
+    s = Settings(raw={"pipeline": {}}, leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.live_max_kununu_score == 3.0
+    assert s.live_decisions == ["create_new"]

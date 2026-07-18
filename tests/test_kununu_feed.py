@@ -106,6 +106,32 @@ def test_lookup_industry_absent_is_none(tmp_path):
     assert found["u1"].industry is None
 
 
+def test_lookup_parses_stringly_typed_profile_score(tmp_path):
+    # The DWH feed is stringly typed: profile_score arrives as '2.5' / '1'.
+    feed = _write_feed(tmp_path, [
+        _record(uuid="a", url="https://www.kununu.com/de/a", profile_score="2.5"),
+        _record(uuid="b", url="https://www.kununu.com/de/b", profile_score="1"),
+        _record(uuid="c", url="https://www.kununu.com/de/c", profile_score=3.7),
+    ])
+    found = lookup_profiles(feed, uuids={"a", "b", "c"}, slugs=set())
+    assert found["a"].score == 2.5
+    assert found["b"].score == 1.0
+    assert found["c"].score == 3.7
+
+
+def test_lookup_score_missing_empty_or_garbage_is_none(tmp_path):
+    # A profile without reviews has no score; empty/garbage values must degrade to
+    # None (the live-scope gate then fails closed), never raise.
+    feed = _write_feed(tmp_path, [
+        _record(uuid="a", url="https://www.kununu.com/de/a"),  # key absent
+        _record(uuid="b", url="https://www.kununu.com/de/b", profile_score=""),
+        _record(uuid="c", url="https://www.kununu.com/de/c", profile_score=None),
+        _record(uuid="d", url="https://www.kununu.com/de/d", profile_score="n/a"),
+    ])
+    found = lookup_profiles(feed, uuids={"a", "b", "c", "d"}, slugs=set())
+    assert [found[k].score for k in ("a", "b", "c", "d")] == [None, None, None, None]
+
+
 # --- ensure_feed + load_profiles_for_leads -----------------------------------
 
 def _settings(tmp_path, token="tok", enabled=True, max_age=24):

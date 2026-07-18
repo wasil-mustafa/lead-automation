@@ -60,6 +60,10 @@ jobs:
   enrich:
     needs: gate
     runs-on: ubuntu-latest
+    outputs:
+      # Path of the auto-approved CSV this run produced ('' when none) — the chained
+      # convert job below only fires when a live run staged live-scope rows.
+      auto_csv: ${{ steps.autocsv.outputs.path }}
     env:
       # Quiet the sf CLI's background async work — a source of intermittent
       # "unsettled top-level await" / Node exit-13 hangs on CI runners.
@@ -154,6 +158,15 @@ jobs:
           path: qa_artifact.xlsx
           if-no-files-found: warn
 
+      - name: Detect auto-approved CSV from this run
+        id: autocsv
+        # A fresh auto CSV is the only untracked review/*_auto.csv (previous ones are
+        # committed). Its path feeds the chained Stage-2 convert job.
+        run: |
+          NEW=$(git ls-files --others --exclude-standard -- 'review/approved_*_auto.csv' | head -1 || true)
+          echo "path=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Auto-approved CSV this run: '${NEW:-none}'"
+
       - name: Commit state (shadow files always; watermark only on live runs)
         run: |
           git config user.name "github-actions[bot]"
@@ -172,3 +185,23 @@ jobs:
             git commit -m "chore: update lead-automation state [skip ci]"
             git push
           fi
+
+  # Phased go-live (2026-07-18): a live Stage-1 run that staged live-scope rows
+  # (kununu score < 3, create_new — config `pipeline.live_scope`) converts them
+  # immediately. The CSV was committed by the step above; stage2.yml checks out the
+  # master HEAD, so it sees it. batch_size 3 = the live governor-limit ceiling.
+  convert:
+    needs: [gate, enrich]
+    if: needs.gate.outputs.dry_run != 'true' && needs.enrich.outputs.auto_csv != ''
+    concurrency:
+      group: lead-automation-stage2   # same brake as a manual Stage-2 dispatch
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    uses: ./.github/workflows/stage2.yml
+    with:
+      dry_run: false
+      batch_size: 3
+      approved: ${{ needs.enrich.outputs.auto_csv }}
+      config: ${{ inputs.config }}
+    secrets: inherit

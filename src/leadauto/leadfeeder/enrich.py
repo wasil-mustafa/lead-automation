@@ -32,6 +32,7 @@ class EnrichedLead:
     match_score: float | None = None
     feed_country_code: str | None = None  # kununu feed profile_country_code (sanity-gate evidence)
     feed_industry: str | None = None      # kununu feed profile_industry_name_de (write-back source)
+    kununu_score: float | None = None     # kununu feed profile_score (live-scope gate input)
     name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
     agreed_via: str | None = None  # which signal vouched: company_name / alt_name:<n> / email_domain
     alt_names: list[str] = field(default_factory=list)  # assigned-company names from the kununu feed
@@ -137,6 +138,7 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
             if info:
                 result.feed_country_code = info.country_code
                 result.feed_industry = info.industry
+                result.kununu_score = info.score
                 own = normalize_name(company_name)
                 alts = []
                 for n in info.companies:

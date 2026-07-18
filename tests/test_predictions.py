@@ -70,13 +70,17 @@ def test_stage1_records_predictions_on_dry_run(tmp_path, monkeypatch):
     assert [q.lead_id for q in preds] == ["00Q9"]
     assert preds[0].rule == "no_lf_match"     # lf_client=None -> unmatched -> review
 
-    # A NON-dry run must NOT write predictions, even when a path is given.
-    p2 = tmp_path / "none.jsonl"
+    # A NON-dry run records predictions for OUT-OF-SCOPE leads only (phased go-live):
+    # this skip-decision lead is outside the live scope, so it still lands in the
+    # shadow log — humans will convert it, keeping the backtest evidence flowing.
+    p2 = tmp_path / "live.jsonl"
     monkeypatch.setattr(s1, "write_back",
                         lambda *a, **k: {"payloads": [], "failures": []})
     s1.run_stage1(None, None, SETTINGS, state=State(), dry_run=False,
                   qa_path=None, state_path=None, predictions_path=p2)
-    assert not p2.exists()
+    preds = load_predictions(p2)
+    assert [q.lead_id for q in preds] == ["00Q9"]
+    assert preds[0].decision == "skip"
 
 
 def test_stage1_skips_predictions_when_config_disabled(tmp_path, monkeypatch):

@@ -17,12 +17,13 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from .convert.preflight import check_lead
+from .live_scope import live_scope_reason
 from .match import RULE_DECISIONS
 from .writeback import lead_field_payload
 
 REVIEW_COLUMNS = [
     "lead_id", "task_id", "task_type", "subject",
-    "company", "kununu_url", "kununu_profile_uuid", "region",
+    "company", "kununu_url", "kununu_profile_uuid", "region", "kununu_score",
     "contact_name", "contact_email",
     "lf_matched", "lf_matched_name", "lf_match_score", "lf_name_agreement", "lf_agreed_via",
     "lf_rejected",
@@ -32,7 +33,7 @@ REVIEW_COLUMNS = [
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
     "convert_blockers",
-    "decision", "Approve?",
+    "live_scope", "decision", "Approve?",
 ]
 CONTACT_FOUND_COLUMNS = [
     "lead_id", "company", "contact_name", "position",
@@ -76,16 +77,22 @@ def _convert_blockers(result) -> str:
     return "; ".join(f.check for f in fails)
 
 
-def _review_row(result) -> dict:
+def _review_row(result, settings=None) -> dict:
     e = result.enriched.extracted
     enr = result.enriched
     company = enr.company or {}
     acct = result.account
     con = result.contact
+    # live_scope: "yes" when the row would be processed live, else the exclusion
+    # reason (see live_scope.py). Blank when no settings were passed (legacy callers).
+    live = ""
+    if settings is not None:
+        live = live_scope_reason(result, settings) or "yes"
     return {
         "lead_id": e.lead_id, "task_id": e.task_id, "task_type": e.task_type,
         "subject": e.subject,
         "company": e.best_company, "kununu_url": e.kununu_url, "region": e.region,
+        "kununu_score": enr.kununu_score, "live_scope": live,
         "contact_name": e.contact_name, "contact_email": e.contact_email or e.lead_email,
         "lf_matched": _yn(enr.matched), "lf_matched_name": enr.matched_name,
         "lf_match_score": enr.match_score, "lf_name_agreement": enr.name_agreement,
@@ -126,7 +133,7 @@ def _add_sheet(wb: Workbook, title: str, columns: list[str], rows: list[list]) -
 
 
 def build_workbook(results: list, skipped: list, meta: dict | None = None,
-                   failures: list | None = None) -> Workbook:
+                   failures: list | None = None, settings=None) -> Workbook:
     """Assemble the QA workbook from match results + skip records + failures + run metadata."""
     meta = meta or {}
     failures = failures or []
@@ -134,7 +141,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     wb.remove(wb.active)  # drop the default empty sheet
 
     # Review
-    review_rows = [[_review_row(r).get(c) for c in REVIEW_COLUMNS] for r in results]
+    review_rows = [[_review_row(r, settings).get(c) for c in REVIEW_COLUMNS] for r in results]
     _add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
 
     # Contact split
@@ -178,26 +185,32 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         ["decision_skip", decisions.count("skip")],
         ["skipped", len(skipped)],
     ]
+    if settings is not None:
+        summary.append(["live_scope_pass", sum(
+            1 for r in results if live_scope_reason(r, settings) is None)])
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
     _add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     return wb
 
 
-def write_auto_approved_csv(results: list, review_dir: str | Path,
+def write_auto_approved_csv(results: list, review_dir: str | Path, settings,
                             exclude_lead_ids: set | frozenset = frozenset(),
                             now: datetime | None = None) -> Path | None:
-    """Auto-approved conversion CSV (`review_gate: false`, Wasil 2026-07-10).
+    """Auto-approved conversion CSV (`review_gate: false`, Wasil 2026-07-10; narrowed
+    to the live scope for the phased go-live, 2026-07-18).
 
-    Emits `review/approved_<UTCts>_auto.csv` holding exactly the Review rows with decision
-    `link` or `create_new`, `Approve?` pre-set — the same columns `targets_from_approved`
-    reads, so Stage 2 (preflight, clustering, pool gate) runs unchanged. `review`/`skip`
-    rows never qualify; leads in `exclude_lead_ids` (write-back failures — their fields
-    would fail conversion validation anyway) are held back for the next run. Returns None
-    without touching disk when nothing qualifies.
+    Emits `review/approved_<UTCts>_auto.csv` holding exactly the Review rows inside the
+    live scope (config `pipeline.live_scope`: eligible decision AND kununu score under
+    the cap — see live_scope.py), `Approve?` pre-set — the same columns
+    `targets_from_approved` reads, so Stage 2 (preflight, clustering, pool gate) runs
+    unchanged. `review`/`skip` rows never qualify; leads in `exclude_lead_ids`
+    (write-back failures — their fields would fail conversion validation anyway) are
+    held back for the next run. Returns None without touching disk when nothing
+    qualifies.
     """
-    rows = [_review_row(r) for r in results
-            if r.decision in ("link", "create_new")
+    rows = [_review_row(r, settings) for r in results
+            if live_scope_reason(r, settings) is None
             and r.enriched.extracted.lead_id not in exclude_lead_ids]
     if not rows:
         return None
@@ -213,8 +226,9 @@ def write_auto_approved_csv(results: list, review_dir: str | Path,
 
 
 def write_workbook(results: list, skipped: list, meta: dict | None = None,
-                   path: str | Path = "qa_artifact.xlsx", failures: list | None = None) -> Path:
+                   path: str | Path = "qa_artifact.xlsx", failures: list | None = None,
+                   settings=None) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    build_workbook(results, skipped, meta, failures).save(p)
+    build_workbook(results, skipped, meta, failures, settings=settings).save(p)
     return p
