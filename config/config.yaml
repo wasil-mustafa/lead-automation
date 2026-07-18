@@ -4,6 +4,8 @@
 salesforce:
   org_alias: headless
   api_version: "66.0"
+  # Pinned converted LeadStatus: trusted as-is, no per-run LeadStatus SOQL.
+  # Leave blank to fall back to querying the org's first converted status.
   converted_status: Qualified
   # Owner to assign converted leads to. Reconcile with the real integration user.
   owner_id: "005Mz00000XvtQzIAJ"

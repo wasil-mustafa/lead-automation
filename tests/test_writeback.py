@@ -1,7 +1,7 @@
 """Write-back tests (Module 3b).
 
 The field mapping is pure (EnrichedLead -> {Id, KN_*}); the bulk write goes through a
-FakeClient so we assert the dry-run rail (no call) and the live path (one update_bulk call)
+FakeClient so we assert the dry-run rail (no call) and the live path (one update_records call)
 without touching an org.
 """
 from datetime import date
@@ -127,7 +127,7 @@ class FakeClient:
     def __init__(self):
         self.calls: list[tuple] = []
 
-    def update_bulk(self, sobject, records):
+    def update_records(self, sobject, records):
         self.calls.append((sobject, records))
         return {"processed": len(records)}
 
@@ -143,7 +143,7 @@ def test_write_back_dry_run_makes_no_calls():
     assert result["payloads"][0]["KN_KununuLinkProfile__c"] == "https://www.kununu.com/de/acme"
 
 
-def test_write_back_live_calls_update_bulk_once():
+def test_write_back_live_calls_update_records_once():
     client = FakeClient()
     e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="claimer",
                       company_name="Acme GmbH")
@@ -156,7 +156,7 @@ def test_write_back_live_calls_update_bulk_once():
 
 
 class FailingClient:
-    def update_bulk(self, sobject, records):
+    def update_records(self, sobject, records):
         return {"processed": len(records), "failed": 1,
                 "failures": [{"id": records[0]["Id"], "error": "BAD_PICKLIST"}],
                 "confirmed": True}

@@ -85,7 +85,7 @@ class _FakeSf:
     def query(self, soql):
         return self._accounts if "FROM Account" in soql else self._leads
 
-    def update_bulk(self, sobject, records):
+    def update_records(self, sobject, records):
         self.updated = (sobject, records)
         return {"processed": len(records), "failed": 0, "failures": [], "confirmed": True}
 

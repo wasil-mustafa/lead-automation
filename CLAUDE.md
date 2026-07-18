@@ -116,6 +116,13 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   throw `System.SecurityException` (root-caused 2026-07-10; the CI CLI mangles it into empty
   `--json` output that mimics a flake). See `src/leadauto/convert/CLAUDE.md` — mechanics,
   safety model, duplicate/validation-rule gotchas, live-testing plan.
+- **Record updates run over REST sObject Collections** (`SfClient.update_records`, since
+  2026-07-18): one `PATCH /composite/sobjects` per ≤200 records (allOrNone=false, inline
+  per-row errors, one 401→auth-refresh retry) riding the CLI's cached token via `auth_info` —
+  replaced the `sf data update bulk` jobs (5-7 raw requests + polling each) at all three call
+  sites (Lead write-back, pool Accounts, Contact KN_Email2__c). The Stage 2 converted status
+  is likewise pinned (`salesforce.converted_status`); the per-run LeadStatus SOQL only runs
+  when the config value is blank.
 - **Write-back transforms are org-verified** (`writeback.py` header): revenue in millions ✓,
   uppercase ISO2 country ✓, `KN_Region__c` restricted picklist ✓, `KN_Employee__c` restricted
   picklist with the org's real 14 German-format bands (e.g. `751-1.000`, `> 100.000`) in
@@ -276,10 +283,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    duplicate rule, 6× "Private Mail" validation rule, 1× invalid LF email); the population
    had grown since the dry run (272 create_new / 30 link / 32 review). Two earlier dispatches
    (29430746090, 29497405506) crashed on the same write-back and were fixed by making
-   `update_bulk` survive partial bulk failures: `sf data update bulk --json` exits 1 on
-   row failures with a FailedRecordDetailsError envelope (job id only, NO inline
-   failedResults) — `SfClient` now fetches `sf data bulk results` and feeds the Failures
-   sheet (closes open item 5's shape question). NOTE: the run advanced+committed the shared
+   `update_bulk` survive partial bulk failures (that whole CLI bulk-job path — and its
+   FailedRecordDetailsError/`sf data bulk results` failure machinery — was RETIRED
+   2026-07-18 in favor of `SfClient.update_records`, one REST sObject-Collections PATCH
+   per ≤200 records with inline per-row errors; not yet live-proven, watch the next live
+   write-back). NOTE: the run advanced+committed the shared
    watermark to 2026-07-16T12:03 (newest closed backlog task), shrinking the scheduled dry
    runs' scan window. **Stage 2 backlog conversion DONE 2026-07-17:** dry run 29577236996
    (230/266 pass preflight; 36 drops: 22 employee_category, 17 address_create_new, 1 dbid_xor,
@@ -315,9 +323,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    the create_new side, which the backtest cannot validate.
 4. **Review shadow accuracy after a few days:** `shadow_comparison.xlsx` (Decisions = per-lead
    hit/miss vs the human-chosen account; Fields = enrichment agreement) — the go-live evidence.
-5. **Write-back idempotency (live-validation task):** confirm the real `sf data update bulk --json`
-   shape (the parser reports `confirmed=False` on unrecognized shapes → QA **Failures** sheet),
-   then decide watermark exclusion for failed rows vs. Failures sheet + overlap-window retry.
+5. **Write-back failure handling: RESOLVED 2026-07-18** — all record updates (Lead write-back,
+   pool Accounts, Contact KN_Email2__c) moved off CLI bulk jobs onto `SfClient.update_records`
+   (REST sObject Collections PATCH, ≤200 records/request, allOrNone=false): per-row errors are
+   inline in the one response, so the bulk-shape/`confirmed=False` question is gone. Still open
+   from the old item: watermark exclusion for failed rows vs. Failures sheet + overlap-window
+   retry. First live run should sanity-check the failures land in the QA Failures sheet as before.
 6. **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path; `stage2_convert`
    re-derives the auto-link predicate; `stage1.yml` push lacks rebase/retry (mitigated by the
    concurrency group); add `caplog` assertions to the LF chunk-failure tests.

@@ -7,6 +7,8 @@ boundary is a FakeSoapClient answering the LeadStatus/IsConverted SOQL and echoi
 success per conversion, so batching + reconciliation + aggregation run end to end
 with no live conversion.
 """
+import copy
+import dataclasses
 import logging
 
 import pytest
@@ -19,6 +21,13 @@ from leadauto.convert import (
 )
 
 SETTINGS = Settings.load()
+
+
+def _settings_without_status() -> Settings:
+    """Settings with a blank converted_status — forces the LeadStatus query fallback."""
+    raw = copy.deepcopy(SETTINGS.raw)
+    raw["salesforce"]["converted_status"] = ""
+    return dataclasses.replace(SETTINGS, raw=raw)
 
 
 class FakeSoapClient:
@@ -83,8 +92,8 @@ def test_convert_leads_batches_by_size():
     res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=50)
     assert len(client.convert_calls) == 3          # 50 + 50 + 20
     assert res["converted"] == 120
-    # the converted-status SOQL runs once for the whole run, not per batch
-    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 1
+    # the converted status is pinned in config — no LeadStatus SOQL at all
+    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 0
 
 
 def test_convert_leads_empty_is_noop():
@@ -94,21 +103,30 @@ def test_convert_leads_empty_is_noop():
     assert res["converted"] == 0 and res["planned"] == 0
 
 
-def test_convert_leads_prefers_configured_status_falls_back_to_first():
-    client = FakeSoapClient(statuses=("Closed - Converted", "Qualified"))
+def test_convert_leads_pinned_status_skips_leadstatus_query():
+    # The configured status is org config that never changes — it is trusted as-is,
+    # with NO LeadStatus SOQL (API-call reduction 2026-07-18). A wrong pin fails
+    # loudly org-side with an invalid-status conversion error, never silently.
+    client = FakeSoapClient(statuses=("Closed - Converted",))
     convert_leads(client, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
-    # config says Qualified and the org has it -> Qualified wins over the first row
-    assert client.convert_calls[0]["converted_status"] == "Qualified"
+    assert client.convert_calls[0]["converted_status"] == SETTINGS.converted_status
+    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 0
 
-    client2 = FakeSoapClient(statuses=("Closed - Converted",))
-    convert_leads(client2, [ConversionTarget("00Q1")], SETTINGS, dry_run=False)
-    assert client2.convert_calls[0]["converted_status"] == "Closed - Converted"
+
+def test_convert_leads_blank_config_falls_back_to_leadstatus_query():
+    # Only a blank config value asks the org, taking the first converted status
+    # by SortOrder.
+    client = FakeSoapClient(statuses=("Closed - Converted", "Qualified"))
+    convert_leads(client, [ConversionTarget("00Q1")],
+                  _settings_without_status(), dry_run=False)
+    assert client.convert_calls[0]["converted_status"] == "Closed - Converted"
+    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 1
 
 
 def test_convert_leads_no_converted_status_fails_all_without_converting():
     client = FakeSoapClient(statuses=())
     targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
-    res = convert_leads(client, targets, SETTINGS, dry_run=False)
+    res = convert_leads(client, targets, _settings_without_status(), dry_run=False)
     assert client.convert_calls == []
     assert res["failed"] == 2 and res["converted"] == 0 and res["missing"] == 0
     assert all("No converted LeadStatus" in r["errors"][0] for r in res["results"])
@@ -159,7 +177,7 @@ def test_convert_leads_preverified_skips_preconvert_queries():
     assert res["converted"] == 7
     assert sum(1 for q in client.queries
                if "FROM Lead " in q and "IsConverted = true" in q) == 0
-    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 1
+    assert client.queries == []        # pinned status: no LeadStatus SOQL either
 
 
 def test_convert_leads_default_keeps_per_batch_preconvert_query():
@@ -307,7 +325,7 @@ def test_convert_leads_orphan_secondary_when_primary_fails():
 # --- post-convert KN_Email2__c enrichment on NEW Contacts ---------------------
 
 class _Email2Client:
-    """query() answers the Contact SOQL; update_bulk records what would be written."""
+    """query() answers the Contact SOQL; update_records records what would be written."""
     def __init__(self, contacts):
         self.contacts = contacts
         self.queries: list[str] = []
@@ -317,7 +335,7 @@ class _Email2Client:
         self.queries.append(soql)
         return [dict(c) for c in self.contacts]
 
-    def update_bulk(self, sobject, records):
+    def update_records(self, sobject, records):
         self.updates.append((sobject, records))
         return {"processed": len(records), "failed": 0}
 

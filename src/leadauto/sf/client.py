@@ -1,5 +1,6 @@
-"""Wrapper over the `sf` CLI (SOQL queries, bulk field updates, anonymous Apex) plus a
-direct SOAP Partner API `convertLead()` call over HTTP for lead conversion.
+"""Wrapper over the `sf` CLI (SOQL queries, anonymous Apex) plus direct HTTP calls
+riding the CLI's cached session: REST sObject Collections for record updates and the
+SOAP Partner API `convertLead()` for lead conversion.
 
 Uses shell=True with a single command string (portable across Windows cmd and Linux
 bash: SOQL string literals use single quotes, so a double-quoted --query value is safe
@@ -7,7 +8,6 @@ on both). SOQL/Apex payloads that are large or multi-line are written to temp fi
 """
 from __future__ import annotations
 
-import csv
 import json
 import os
 import re
@@ -59,63 +59,11 @@ def guard_sf_id(value: str) -> str:
     return value
 
 
-def parse_bulk_update_result(stdout: str) -> dict:
-    """Parse `sf data update bulk --json` output into a failure summary.
-
-    Returns {failed: int, failures: [{id, error}], confirmed: bool}. `confirmed` is False
-    when the JSON shape is not recognized — callers must then NOT assume a clean success.
-
-    Shape below is the documented best-understanding of Bulk API 2.0 output; re-confirm it
-    against a live run before relying on row-level failure detail (see writeback/CLAUDE.md).
-    """
-    try:
-        data = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError):
-        return {"failed": 0, "failures": [], "confirmed": False}
-    if not isinstance(data, dict):
-        return {"failed": 0, "failures": [], "confirmed": False}
-    result = data.get("result", data)
-    if not isinstance(result, dict):
-        return {"failed": 0, "failures": [], "confirmed": False}
-
-    job = result.get("jobInfo") or {}
-    records = result.get("records") or {}
-    failed_results = records.get("failedResults") or result.get("failedResults") or []
-    failures = []
-    for r in failed_results:
-        if isinstance(r, dict):
-            failures.append({
-                "id": r.get("sf__Id") or r.get("id") or r.get("Id"),
-                "error": r.get("sf__Error") or r.get("error") or "",
-            })
-    confirmed = bool(job) or bool(records)
-    failed_count = job.get("numberRecordsFailed")
-    failed = int(failed_count) if failed_count is not None else len(failures)
-    return {"failed": failed, "failures": failures, "confirmed": confirmed}
-
-
-def parse_bulk_error_job_id(stdout: str) -> str | None:
-    """Job id from the CLI's exit-1 error envelope.
-
-    On partial failure `sf data update bulk --json` does NOT emit the success shape —
-    it emits an SfCommandError envelope ({"name": "FailedRecordDetailsError", ...,
-    "data": {"jobId": ..., "state": "JobComplete"}}; live-captured 2026-07-16, run
-    29497405506). The row-level detail must then be fetched with `sf data bulk results`.
-    """
-    try:
-        data = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    inner = data.get("data")
-    if not isinstance(inner, dict):
-        return None
-    return inner.get("jobId") or None
-
-
 # SOAP Partner API convertLead accepts at most 100 LeadConvert elements per call.
 _SOAP_CONVERT_MAX = 100
+
+# REST sObject Collections accepts at most 200 records per request.
+_COLLECTIONS_MAX = 200
 
 
 class SfClient:
@@ -189,91 +137,61 @@ class SfClient:
         return records
 
     # --- writes ---
-    def update_bulk(self, sobject: str, records: list[dict]) -> dict:
-        """Bulk-update existing records. Each dict must contain 'Id' plus fields to set.
+    def update_records(self, sobject: str, records: list[dict]) -> dict:
+        """Update existing records over REST sObject Collections (one PATCH per ≤200
+        records, allOrNone=false) — replaces the Bulk API job the CLI ran per update
+        (5-7 round trips + polling each; API-call reduction 2026-07-18).
 
-        Returns {processed, failed, failures, confirmed}. The CLI exits non-zero when the
-        job finishes with failed records (live-confirmed 2026-07-15, run 29430746090), so
-        stdout is parsed regardless of exit code: row-level failures become the returned
-        `failures` (-> QA Failures sheet). Only a non-zero exit WITHOUT row-level detail
-        (whole-job failure, unrecognized shape) raises — with stdout in the message,
-        because that is where the CLI puts its diagnostics (stderr only carries noise).
+        Each dict must contain 'Id' plus the fields to set. Returns
+        {processed, failed, failures: [{id, error}], confirmed} — the same contract
+        the retired update_bulk had; `confirmed` is always True because the response carries one
+        inline per-row result. Failed rows come back with a null id, so failures are
+        keyed to the request-order record Id. A 401 (stale cached CLI token) gets one
+        auth re-fetch + retry, like convert_lead.
         """
         if not records:
             return {"processed": 0, "failed": 0, "failures": [], "confirmed": True}
-        cols: list[str] = []
-        for r in records:
-            for k in r:
-                if k not in cols:
-                    cols.append(k)
-        if "Id" not in cols:
-            raise SfError("update_bulk requires 'Id' in every record")
-        # Unique temp file: a fixed name would collide if two runs overlap.
-        fd, tmp_name = tempfile.mkstemp(prefix=f"leadauto_update_{sobject}_", suffix=".csv")
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
-                writer = csv.DictWriter(fh, fieldnames=cols, lineterminator="\n")
-                writer.writeheader()
-                writer.writerows(records)
-            cmd = (
-                f'sf data update bulk --sobject {sobject} --file "{tmp}" '
-                f"--target-org {self.alias} --line-ending LF --wait 10 --json"
-            )
-            res = self._run(cmd, check=False)
-        finally:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        parsed = parse_bulk_update_result(res.stdout)
-        if res.returncode != 0 and not (parsed["confirmed"]
-                                        and (parsed["failed"] or parsed["failures"])):
-            job_id = parse_bulk_error_job_id(res.stdout)
-            failures = self._bulk_failed_rows(job_id) if job_id else []
-            if not failures:
-                raise SfError(
-                    f"sf command failed ({res.returncode}) with no row-level failure "
-                    f"detail:\n{cmd}\n{res.stderr}\n{res.stdout}"
-                )
-            parsed = {"failed": len(failures), "failures": failures, "confirmed": True}
-        return {
-            "processed": len(records), "failed": parsed["failed"],
-            "failures": parsed["failures"], "confirmed": parsed["confirmed"],
-        }
-
-    def _bulk_failed_rows(self, job_id: str) -> list[dict]:
-        """Row-level failures of a finished bulk job via `sf data bulk results`.
-
-        The command writes <jobid>-success-records.csv / <jobid>-failed-records.csv
-        into the CWD; both are removed after the failed rows are read. Returns
-        [{id, error}] — empty when nothing could be retrieved (callers must then
-        treat the job outcome as unverified).
-        """
-        cmd = (f"sf data bulk results --job-id {guard_sf_id(job_id)} "
-               f"--target-org {self.alias} --json")
-        res = self._run(cmd, check=False)
-        try:
-            result = json.loads(res.stdout).get("result", {})
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            return []
-        if not isinstance(result, dict):
-            return []
+        if any(not r.get("Id") for r in records):
+            raise SfError("update_records requires 'Id' in every record")
         failures: list[dict] = []
-        failed_path = result.get("failedFilePath")
-        if failed_path and Path(failed_path).exists():
-            with open(failed_path, newline="", encoding="utf-8") as fh:
-                for row in csv.DictReader(fh):
-                    failures.append({"id": row.get("sf__Id") or row.get("Id"),
-                                     "error": row.get("sf__Error", "")})
-        for key in ("successFilePath", "failedFilePath"):
-            path = result.get(key)
-            if path:
-                try:
-                    Path(path).unlink()
-                except OSError:
-                    pass
-        return failures
+        for start in range(0, len(records), _COLLECTIONS_MAX):
+            chunk = records[start:start + _COLLECTIONS_MAX]
+            payload = {"allOrNone": False,
+                       "records": [{"attributes": {"type": sobject}, **r} for r in chunk]}
+            rows = self._patch_collections(payload)
+            for rec, row in zip(chunk, rows):
+                if row.get("success"):
+                    continue
+                msg = "; ".join(f"{e.get('statusCode', '')}: {e.get('message', '')}"
+                                for e in row.get("errors") or []) or "unknown error"
+                failures.append({"id": row.get("id") or rec["Id"], "error": msg})
+        return {"processed": len(records), "failed": len(failures),
+                "failures": failures, "confirmed": True}
+
+    def _patch_collections(self, payload: dict) -> list[dict]:
+        """One sObject-Collections PATCH; retries once with fresh auth on HTTP 401."""
+        response = self._patch_once(payload, refresh=False)
+        if response.status_code == 401:
+            if self.log:
+                self.log.warning("Collections PATCH got 401; refreshing auth and retrying")
+            response = self._patch_once(payload, refresh=True)
+        if response.status_code >= 300:
+            raise SfError(f"sObject Collections PATCH failed "
+                          f"(HTTP {response.status_code}):\n{response.text[:2000]}")
+        rows = json.loads(response.text)
+        if not isinstance(rows, list):
+            raise SfError(f"Unexpected sObject Collections response shape:\n"
+                          f"{response.text[:2000]}")
+        return rows
+
+    def _patch_once(self, payload: dict, *, refresh: bool):
+        auth = self.auth_info(refresh=refresh)
+        url = (f"{auth['instance_url']}/services/data/v{self.api_version}"
+               "/composite/sobjects")
+        return requests.patch(url, data=json.dumps(payload), headers={
+            "Authorization": f"Bearer {auth['access_token']}",
+            "Content-Type": "application/json",
+        }, timeout=120)
 
     # --- SOAP conversion ---
     def auth_info(self, refresh: bool = False) -> dict:
@@ -349,7 +267,7 @@ class SfClient:
         error or an uncaught runtime exception raises SfError with the real problem instead
         of returning output that merely lacks whatever the caller expected to find in it.
         """
-        # Unique temp file (like update_bulk): a fixed name would collide on overlap.
+        # Unique temp file (like _query_bulk): a fixed name would collide on overlap.
         fd, tmp_name = tempfile.mkstemp(prefix="leadauto_apex_", suffix=".apex")
         tmp = Path(tmp_name)
         try:

@@ -101,7 +101,7 @@ def resolve_pool_links(client, link_targets, settings, *, dry_run=False, logger=
 
     if updates and not dry_run:
         try:
-            res = client.update_bulk("Account", updates)
+            res = client.update_records("Account", updates)
             log.info("Pool-account enrichment: %d updated, %d failed",
                      res["processed"], res["failed"])
         except Exception as exc:                      # best-effort; must not block convert

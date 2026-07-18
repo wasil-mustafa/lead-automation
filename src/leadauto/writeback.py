@@ -215,7 +215,7 @@ def write_back(client, enriched_leads: list[EnrichedLead], dry_run: bool = False
         log.info("Nothing to write back (%d lead(s) had no enrichment)", len(payloads))
         return {"processed": 0, "failed": 0, "failures": [], "payloads": payloads}
 
-    res = client.update_bulk("Lead", writable)
+    res = client.update_records("Lead", writable)
     failures = [{"lead_id": f.get("id"), "stage": "writeback", "error": f.get("error", "")}
                 for f in res.get("failures", [])]
     failed = res.get("failed", 0)

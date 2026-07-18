@@ -1,9 +1,5 @@
-"""Tests for the pure parsing in the sf client wrapper.
-
-`parse_bulk_update_result` decodes `sf data update bulk --json` output into a failure summary.
-The exact JSON shape is the documented best-understanding of Bulk API 2.0 output and must be
-re-confirmed against a live run; the parser is defensive and reports `confirmed=False` when it
-does not recognize the shape, so callers never assume an unverified success.
+"""Tests for the sf client wrapper: query routing, sObject-Collections updates,
+apex_run diagnostics/retry, auth_info and the SOAP convertLead path.
 """
 import json
 import re
@@ -11,160 +7,131 @@ import types
 
 import pytest
 
-from leadauto.sf.client import SfClient, SfError, parse_bulk_update_result
+from leadauto.sf.client import SfClient, SfError
 
 
-def test_parse_bulk_result_extracts_failures():
-    out = json.dumps({"status": 0, "result": {
-        "jobInfo": {"numberRecordsProcessed": 2, "numberRecordsFailed": 1},
-        "records": {
-            "failedResults": [{"sf__Id": "00Q1", "sf__Error": "BAD_PICKLIST: bad value"}],
-            "successfulResults": [{"sf__Id": "00Q2"}],
-        }}})
-    r = parse_bulk_update_result(out)
-    assert r["failed"] == 1
-    assert r["failures"][0]["id"] == "00Q1"
-    assert "BAD_PICKLIST" in r["failures"][0]["error"]
-    assert r["confirmed"] is True
+# --- update_records: REST sObject Collections PATCH ---------------------------
+# One request per <=200 records replaces the 5-7 round-trip Bulk API job the CLI
+# used to run per update (API-call reduction, 2026-07-18). Mock boundary is
+# requests.patch (the org HTTP boundary) + _run for auth_info.
+
+def _fake_patch(responder, capture):
+    def patch(url, data=None, headers=None, timeout=None):
+        body = json.loads(data)
+        capture.append({"url": url, "headers": headers, "body": body})
+        return responder(body, headers)
+    return patch
 
 
-def test_parse_bulk_result_all_success():
-    out = json.dumps({"status": 0, "result": {
-        "jobInfo": {"numberRecordsProcessed": 3, "numberRecordsFailed": 0},
-        "records": {"failedResults": []}}})
-    r = parse_bulk_update_result(out)
-    assert r["failed"] == 0
-    assert r["failures"] == []
-    assert r["confirmed"] is True
+def _collections_ok(body, headers):
+    return _FakeResponse(json.dumps(
+        [{"id": r["Id"], "success": True, "errors": []} for r in body["records"]]))
 
 
-def test_parse_bulk_result_unrecognized_is_unconfirmed():
-    r = parse_bulk_update_result("not json at all")
-    assert r["confirmed"] is False
-    assert r["failed"] == 0
-
-
-# --- update_bulk: partial row failures exit the CLI non-zero -------------------
-# `sf data update bulk --json` exits 1 when the job finishes with failed records
-# (live-hit 2026-07-15, run 29430746090: 626-row backlog write-back crashed with the
-# row errors discarded — they are on stdout, not stderr). update_bulk must parse
-# stdout regardless of exit code and only raise when no row-level detail is present.
-# subprocess.run is the mock boundary so the real _run/update_bulk interplay is tested.
-
-def _fake_subprocess(returncode, stdout, stderr=""):
-    def run(cmd, **kwargs):
-        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
-    return run
-
-
-def test_update_bulk_partial_failure_returns_row_failures(monkeypatch):
-    out = json.dumps({"status": 1, "result": {
-        "jobInfo": {"numberRecordsProcessed": 2, "numberRecordsFailed": 1},
-        "records": {
-            "failedResults": [{"sf__Id": "00Q1",
-                               "sf__Error": "FIELD_CUSTOM_VALIDATION_EXCEPTION: bad postal"}],
-            "successfulResults": [{"sf__Id": "00Q2"}],
-        }}})
-    monkeypatch.setattr("leadauto.sf.client.subprocess.run", _fake_subprocess(1, out))
-    client = SfClient("headless")
-    r = client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"},
-                                    {"Id": "00Q2", "Email": "c@d.e"}])
-    assert r["failed"] == 1
-    assert r["failures"][0]["id"] == "00Q1"
-    assert "FIELD_CUSTOM_VALIDATION_EXCEPTION" in r["failures"][0]["error"]
-    assert r["confirmed"] is True
-
-
-def _failed_details_error(job_id="750Mz00000z2eflIAA"):
-    # Real shape live-captured 2026-07-16 (run 29497405506): on partial failure the CLI
-    # emits an SfCommandError envelope with the job id, NOT the success shape.
-    return json.dumps({
-        "name": "FailedRecordDetailsError",
-        "message": "Job finished being processed but failed to process 36 records.",
-        "exitCode": 1,
-        "data": {"jobId": job_id, "state": "JobComplete"},
-        "code": "FailedRecordDetailsError",
-        "status": 1,
-    })
-
-
-def test_update_bulk_fetches_row_failures_via_bulk_results(monkeypatch, tmp_path):
-    failed_csv = tmp_path / "750Mz00000z2eflIAA-failed-records.csv"
-    failed_csv.write_text('"sf__Id","sf__Error","Id","Email"\n'
-                          '"00Q1","DUPLICATES_DETECTED:duplicate record:--","00Q1","a@b.c"\n',
-                          encoding="utf-8")
-    results_json = json.dumps({"status": 0, "result": {
-        "processedRecords": 2, "successfulRecords": 1, "failedRecords": 1,
-        "status": "JobComplete", "operation": "update", "object": "Lead",
-        "successFilePath": str(tmp_path / "success.csv"),
-        "failedFilePath": str(failed_csv)}})
-    cmds: list[str] = []
-
-    def run(cmd, **kwargs):
-        cmds.append(cmd)
-        if "data bulk results" in cmd:
-            return types.SimpleNamespace(returncode=0, stdout=results_json, stderr="")
-        return types.SimpleNamespace(returncode=1, stdout=_failed_details_error(), stderr="")
-    monkeypatch.setattr("leadauto.sf.client.subprocess.run", run)
-    client = SfClient("headless")
-    r = client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"},
-                                    {"Id": "00Q2", "Email": "c@d.e"}])
-    assert r["failed"] == 1
-    assert r["failures"] == [{"id": "00Q1",
-                              "error": "DUPLICATES_DETECTED:duplicate record:--"}]
-    assert r["confirmed"] is True
-    assert any("data bulk results" in c and "750Mz00000z2eflIAA" in c for c in cmds)
-
-
-def test_update_bulk_raises_when_bulk_results_yields_no_failures(monkeypatch, tmp_path):
-    # A job id but no retrievable row failures (e.g. whole-job death) must still raise —
-    # never report an unverified partial failure as handled.
-    empty_csv = tmp_path / "failed.csv"
-    empty_csv.write_text('"sf__Id","sf__Error"\n', encoding="utf-8")
-    results_json = json.dumps({"status": 0, "result": {
-        "failedRecords": 0, "status": "JobComplete",
-        "failedFilePath": str(empty_csv)}})
-
-    def run(cmd, **kwargs):
-        if "data bulk results" in cmd:
-            return types.SimpleNamespace(returncode=0, stdout=results_json, stderr="")
-        return types.SimpleNamespace(returncode=1, stdout=_failed_details_error(), stderr="")
-    monkeypatch.setattr("leadauto.sf.client.subprocess.run", run)
-    client = SfClient("headless")
-    with pytest.raises(SfError):
-        client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
-
-
-def test_update_bulk_nonzero_exit_without_row_detail_raises_with_stdout(monkeypatch):
-    # Whole-job failure (or unrecognized shape): raise, but keep the stdout payload in
-    # the error — that is where the CLI puts its diagnostics, stderr only carries noise.
-    monkeypatch.setattr("leadauto.sf.client.subprocess.run",
-                        _fake_subprocess(1, "boom: job aborted", "update warning"))
-    client = SfClient("headless")
-    with pytest.raises(SfError, match="boom: job aborted"):
-        client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
-
-
-def test_update_bulk_nonzero_exit_with_recognized_but_clean_result_raises(monkeypatch):
-    # Exit 1 with a recognized shape but zero row failures = job-level failure that
-    # must not be reported as success.
-    out = json.dumps({"status": 1, "result": {
-        "jobInfo": {"numberRecordsProcessed": 0, "numberRecordsFailed": 0},
-        "records": {"failedResults": []}}})
-    monkeypatch.setattr("leadauto.sf.client.subprocess.run", _fake_subprocess(1, out))
-    client = SfClient("headless")
-    with pytest.raises(SfError):
-        client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
-
-
-def test_update_bulk_clean_exit_still_returns_summary(monkeypatch):
-    out = json.dumps({"status": 0, "result": {
-        "jobInfo": {"numberRecordsProcessed": 1, "numberRecordsFailed": 0},
-        "records": {"failedResults": []}}})
-    monkeypatch.setattr("leadauto.sf.client.subprocess.run", _fake_subprocess(0, out))
-    client = SfClient("headless")
-    r = client.update_bulk("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+def test_update_records_patches_composite_sobjects(monkeypatch):
+    client = SfClient("headless", api_version="66.0")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    calls: list[dict] = []
+    monkeypatch.setattr("leadauto.sf.client.requests.patch",
+                        _fake_patch(_collections_ok, calls))
+    r = client.update_records("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
     assert r == {"processed": 1, "failed": 0, "failures": [], "confirmed": True}
+    call = calls[0]
+    assert call["url"] == ("https://kununu.my.salesforce.com"
+                           "/services/data/v66.0/composite/sobjects")
+    assert call["headers"]["Authorization"] == "Bearer TOK1"
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert call["body"]["allOrNone"] is False
+    assert call["body"]["records"] == [
+        {"attributes": {"type": "Lead"}, "Id": "00Q1", "Email": "a@b.c"}]
+
+
+def test_update_records_partial_failure_maps_errors_to_request_ids(monkeypatch):
+    # Failed rows come back with a null id — the failure must be keyed to the
+    # request-order record Id so it can land in the QA Failures sheet.
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+
+    def responder(body, headers):
+        return _FakeResponse(json.dumps([
+            {"id": "00Q1", "success": True, "errors": []},
+            {"id": None, "success": False, "errors": [
+                {"statusCode": "FIELD_CUSTOM_VALIDATION_EXCEPTION",
+                 "message": "bad postal", "fields": ["PostalCode"]}]},
+        ]))
+    monkeypatch.setattr("leadauto.sf.client.requests.patch",
+                        _fake_patch(responder, []))
+    r = client.update_records("Lead", [{"Id": "00Q1", "Email": "a@b.c"},
+                                       {"Id": "00Q2", "PostalCode": "1"}])
+    assert r["processed"] == 2 and r["failed"] == 1 and r["confirmed"] is True
+    assert r["failures"] == [{"id": "00Q2",
+                              "error": "FIELD_CUSTOM_VALIDATION_EXCEPTION: bad postal"}]
+
+
+def test_update_records_chunks_at_200(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    calls: list[dict] = []
+    monkeypatch.setattr("leadauto.sf.client.requests.patch",
+                        _fake_patch(_collections_ok, calls))
+    records = [{"Id": f"00Q{i:04d}", "Email": "a@b.c"} for i in range(450)]
+    r = client.update_records("Lead", records)
+    assert r["processed"] == 450 and r["failed"] == 0
+    assert [len(c["body"]["records"]) for c in calls] == [200, 200, 50]
+
+
+def test_update_records_empty_is_noop_without_patch(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr("leadauto.sf.client.requests.patch",
+                        lambda *a, **k: pytest.fail("must not PATCH"))
+    assert client.update_records("Lead", []) == {
+        "processed": 0, "failed": 0, "failures": [], "confirmed": True}
+
+
+def test_update_records_requires_id():
+    client = SfClient("headless")
+    with pytest.raises(SfError, match="Id"):
+        client.update_records("Lead", [{"Email": "a@b.c"}])
+
+
+def test_update_records_retries_once_on_invalid_session(monkeypatch):
+    # Same contract as convert_lead: a stale cached CLI token gets ONE auth
+    # re-fetch + retry; the fresh token must ride the second request.
+    client = SfClient("headless")
+    tokens = iter(["STALE", "FRESH"])
+    auth_calls: list[str] = []
+
+    def run(cmd, check=True):
+        auth_calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+            {"result": {"accessToken": next(tokens),
+                        "instanceUrl": "https://x.my.salesforce.com"}}), stderr="")
+    monkeypatch.setattr(client, "_run", run)
+    calls: list[dict] = []
+
+    def responder(body, headers):
+        if headers["Authorization"] == "Bearer STALE":
+            return _FakeResponse(json.dumps([{
+                "errorCode": "INVALID_SESSION_ID",
+                "message": "Session expired or invalid"}]), status_code=401)
+        return _collections_ok(body, headers)
+    monkeypatch.setattr("leadauto.sf.client.requests.patch",
+                        _fake_patch(responder, calls))
+    r = client.update_records("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+    assert r["failed"] == 0
+    assert len(calls) == 2 and len(auth_calls) == 2
+    assert calls[1]["headers"]["Authorization"] == "Bearer FRESH"
+
+
+def test_update_records_http_error_raises_with_body(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    monkeypatch.setattr("leadauto.sf.client.requests.patch", _fake_patch(
+        lambda body, headers: _FakeResponse(json.dumps([{
+            "errorCode": "INVALID_FIELD", "message": "No such column 'Nope'"}]),
+            status_code=400), []))
+    with pytest.raises(SfError, match="No such column"):
+        client.update_records("Lead", [{"Id": "00Q1", "Nope": "x"}])
 
 
 # --- query routing: REST for short queries, Bulk API for long ones -----------

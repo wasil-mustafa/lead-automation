@@ -50,9 +50,11 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    and validation/duplicate rules synchronously — and the SOAP call takes ≤100 LeadConverts).
    Each LeadConvert carries accountId/contactId when linked, `doNotCreateOpportunity=true`,
    `overwriteLeadSource=false`, `sendNotificationEmail=false`, `ownerId` = config owner_id.
-   Converted status is resolved ONCE per run by SOQL (`LeadStatus WHERE IsConverted = true
-   ORDER BY SortOrder NULLS LAST`): the configured label if the org has it, else the first; no
-   converted status in the org fails every lead without calling SOAP.
+   Converted status is PINNED in config (`salesforce.converted_status: Qualified`) and trusted
+   as-is — no per-run LeadStatus SOQL (API-call reduction 2026-07-18; a wrong pin fails loudly
+   org-side as an invalid-status conversion error). Only a blank config value falls back to
+   `LeadStatus WHERE IsConverted = true ORDER BY SortOrder NULLS LAST` (first label wins); no
+   converted status resolvable fails every lead without calling SOAP.
 6. Idempotency: already-converted inputs get an explicit `alreadyConverted` result row (so a
    re-run is a true no-op — counted `already_converted`, never `missing`). With preflight on
    (the default), `convert_leads` runs `preverified=True`: preflight's Lead query already

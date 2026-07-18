@@ -20,9 +20,9 @@ parses the envelope). Semantics are unchanged:
   * **reconciled** — every input lead must come back in the results; leads with no
     result row are counted `missing`, never silently dropped.
 
-The converted LeadStatus is resolved once per run by SOQL (prefer the configured
-label, else the org's first converted status by SortOrder); `dry_run` short-circuits
-before any org call.
+The converted LeadStatus is pinned in config (trusted without a per-run SOQL; a blank
+config value falls back to querying the org's first converted status by SortOrder);
+`dry_run` short-circuits before any org call.
 """
 from __future__ import annotations
 
@@ -59,14 +59,18 @@ class ConversionTarget:
 
 
 def _resolve_converted_status(client, settings) -> str | None:
-    """Prefer the configured converted-status label if the org has it, else the org's
-    first converted LeadStatus by SortOrder. None when the org has no converted status."""
+    """The configured converted-status label is trusted as-is — it is org config that
+    never changes, so no LeadStatus SOQL per run (API-call reduction 2026-07-18; a
+    wrong pin fails loudly org-side as an invalid-status conversion error). Only a
+    blank config value falls back to querying the org's first converted LeadStatus
+    by SortOrder. None when the org has no converted status."""
+    pinned = (settings.converted_status or "").strip()
+    if pinned:
+        return pinned
     rows = client.query(
         "SELECT MasterLabel FROM LeadStatus WHERE IsConverted = true "
         "ORDER BY SortOrder NULLS LAST")
     labels = [r.get("MasterLabel") for r in rows if r.get("MasterLabel")]
-    if settings.converted_status in labels:
-        return settings.converted_status
     return labels[0] if labels else None
 
 
@@ -114,7 +118,7 @@ def enrich_contact_email2(client, targets: list[ConversionTarget], results: list
             updates.append({"Id": c["Id"], "KN_Email2__c": lf_email})
         if not updates:
             return {"processed": 0, "failed": 0}
-        res = client.update_bulk("Contact", updates)
+        res = client.update_records("Contact", updates)
         log.info("KN_Email2__c enrichment: %d contact(s) updated, %d failed",
                  res.get("processed", 0), res.get("failed", 0))
         return {"processed": res.get("processed", 0), "failed": res.get("failed", 0)}
