@@ -147,6 +147,59 @@ def test_convert_leads_already_converted_matches_18_char_ids():
     assert res["already_converted"] == 1 and res["missing"] == 0
 
 
+def test_convert_leads_preverified_skips_preconvert_queries():
+    # Stage 2's preflight query already selects IsConverted and drops converted leads,
+    # so preverified=True makes the per-batch IsConverted pre-query redundant — only
+    # the once-per-run converted-status SOQL remains (was 77 extra queries on the
+    # 230-lead backlog run at batch_size 3).
+    client = FakeSoapClient()
+    targets = [ConversionTarget(f"00Q{i}") for i in range(7)]
+    res = convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=3,
+                        preverified=True)
+    assert res["converted"] == 7
+    assert sum(1 for q in client.queries
+               if "FROM Lead " in q and "IsConverted = true" in q) == 0
+    assert sum(1 for q in client.queries if "FROM LeadStatus" in q) == 1
+
+
+def test_convert_leads_default_keeps_per_batch_preconvert_query():
+    # Without preverification (the --no-preflight escape hatch), the per-batch
+    # idempotency pre-query must keep running.
+    client = FakeSoapClient()
+    targets = [ConversionTarget(f"00Q{i}") for i in range(7)]
+    convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=3)
+    assert sum(1 for q in client.queries
+               if "FROM Lead " in q and "IsConverted = true" in q) == 3
+
+
+def test_convert_leads_preverified_race_counts_already_converted(caplog):
+    # A lead converted (e.g. by a human) between preflight and the SOAP call comes
+    # back as a per-lead CANNOT_UPDATE_CONVERTED_LEAD error. The desired end state
+    # (lead converted) already holds — count it already_converted, keep the run green.
+    class _RacingClient(FakeSoapClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            rows = []
+            for c in conversions:
+                if c["lead_id"] == "00Q2":
+                    rows.append({"leadId": c["lead_id"], "success": False,
+                                 "errors": ["CANNOT_UPDATE_CONVERTED_LEAD: cannot "
+                                            "update a converted lead"]})
+                else:
+                    rows.append({"leadId": c["lead_id"], "success": True,
+                                 "accountId": "001NEW"})
+            return rows
+
+    client = _RacingClient()
+    targets = [ConversionTarget("00Q1"), ConversionTarget("00Q2")]
+    with caplog.at_level(logging.WARNING):
+        res = convert_leads(client, targets, SETTINGS, dry_run=False, preverified=True)
+    assert res["converted"] == 1
+    assert res["already_converted"] == 1
+    assert res["failed"] == 0 and res["missing"] == 0
+    assert any("00Q2" in r.message and "already converted" in r.message.lower()
+               for r in caplog.records)
+
+
 def test_convert_leads_reports_leads_missing_from_results():
     # A lead the SOAP call never returns a row for must surface as `missing`,
     # never silently drop from the counts.

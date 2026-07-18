@@ -53,9 +53,15 @@ Scope: the conversion path — this package (`convert/converter.py`), `pipeline/
    Converted status is resolved ONCE per run by SOQL (`LeadStatus WHERE IsConverted = true
    ORDER BY SortOrder NULLS LAST`): the configured label if the org has it, else the first; no
    converted status in the org fails every lead without calling SOAP.
-6. Per batch, a pre-query (`IsConverted = true`) gives already-converted inputs an explicit
-   `alreadyConverted` result row (so a re-run is a true no-op — counted `already_converted`,
-   never `missing`) and only the rest go to SOAP. `SfClient.convert_lead` returns one result
+6. Idempotency: already-converted inputs get an explicit `alreadyConverted` result row (so a
+   re-run is a true no-op — counted `already_converted`, never `missing`). With preflight on
+   (the default), `convert_leads` runs `preverified=True`: preflight's Lead query already
+   selects `IsConverted` and drops converted leads, so the converter skips its per-batch
+   `IsConverted = true` pre-query (saved ~⌈T/3⌉ queries — 77 on the 230-lead backlog run);
+   a lead converted in the preflight→SOAP window comes back as an already-converted SOAP
+   error (`CANNOT_UPDATE_CONVERTED_LEAD`-style) and is mapped back to `alreadyConverted`
+   (`converter._is_converted_race`). Under `--no-preflight` the per-batch pre-query still
+   runs. `SfClient.convert_lead` returns one result
    row per conversion in request order, backfilling a nil leadId (structural rejections) from
    that order, and retries ONCE on an `INVALID_SESSION_ID` fault after re-fetching auth
    (`SfClient.auth_info`, cached from `sf org display --json`). `convert_leads` still reconciles
@@ -87,10 +93,13 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   `sf.client.guard_sf_id`), so a malformed or malicious cell can neither inject nor crash a batch.
 - A contact link without an account link is dropped in `targets_from_approved` (LeadConvert
   requires `setAccountId` alongside `setContactId`; the lead converts create-new instead).
-- Idempotent: the per-batch pre-query routes `IsConverted = true` leads to an explicit
-  `alreadyConverted` row instead of the SOAP call, so re-running a batch (or an approved CSV
-  where some rows already converted) is a no-op that exits **green** — already-converted leads
-  count as `already_converted`, not `missing`/`failed`.
+- Idempotent: already-converted leads become explicit `alreadyConverted` rows instead of
+  failures, so re-running a batch (or an approved CSV where some rows already converted) is a
+  no-op that exits **green** — counted `already_converted`, not `missing`/`failed`. With
+  preflight on, preflight itself catches them (its query selects `IsConverted`) and the
+  converter trusts it (`preverified=True`, no per-batch pre-query); the race window is covered
+  by mapping the already-converted SOAP error to `alreadyConverted`. Under `--no-preflight`
+  the converter's own per-batch `IsConverted = true` pre-query still runs.
 - **No GitHub Environment gate** (resolved 2026-07-10): required-reviewers protection needs
   a paid plan on private repos (API returns 422 on this repo), so the `environment:`
   reference was REMOVED from `stage2.yml`. The conversion brake is that Stage 2 is

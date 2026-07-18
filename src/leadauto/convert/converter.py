@@ -10,9 +10,13 @@ parses the envelope). Semantics are unchanged:
 
   * **match-aware** — per-lead accountId/contactId from the approved match, so a
     matched Lead links to its existing Account/Contact instead of always creating new;
-  * **idempotent** — a pre-query finds `IsConverted = true` inputs and emits an explicit
-    `alreadyConverted` result row for each (never sent to SOAP), so a re-run is a true
-    no-op that stays green;
+  * **idempotent** — already-converted inputs become explicit `alreadyConverted` result
+    rows (never counted failed/missing), so a re-run is a true no-op that stays green.
+    With `preverified=True` (Stage 2 ran preflight, whose Lead query selects IsConverted
+    and drops converted leads) the per-batch `IsConverted = true` pre-query is skipped;
+    the preflight→SOAP race is covered by mapping the org's already-converted SOAP error
+    back to an `alreadyConverted` row. Without preverification the pre-query still runs
+    per batch;
   * **reconciled** — every input lead must come back in the results; leads with no
     result row are counted `missing`, never silently dropped.
 
@@ -145,20 +149,31 @@ def _already_converted(client, batch: list[ConversionTarget]) -> set[str]:
     return {_short_id(str(r.get("Id") or "")) for r in rows}
 
 
+def _is_converted_race(row: dict) -> bool:
+    """True when a failed SOAP row says the lead is ALREADY converted — the desired end
+    state holds, so the row is a no-op, not a failure (same semantics the IsConverted
+    pre-query gives; this covers the window between preflight/pre-query and the call)."""
+    return any("CONVERTED_LEAD" in e.upper() or "ALREADY CONVERTED" in e.upper()
+               for e in row.get("errors") or [])
+
+
 def _run_convert(client, targets, settings, batch_size, log, phase_label="",
-                 *, converted_status):
+                 *, converted_status, preverified: bool = False):
     """Convert one target list in batches; return (results, missing_ids).
 
     Per batch: (1) pre-query already-converted inputs and emit explicit
-    `alreadyConverted` rows (idempotent no-op, never `missing`); (2) SOAP-convert the
-    rest; (3) reconcile — any batch lead with no result row is reported `missing`.
+    `alreadyConverted` rows (idempotent no-op, never `missing`) — skipped when
+    `preverified` (preflight already proved IsConverted=false); (2) SOAP-convert the
+    rest, mapping an already-converted SOAP error (the race window) back to an
+    `alreadyConverted` row; (3) reconcile — any batch lead with no result row is
+    reported `missing`.
     """
     results: list[dict] = []
     missing_ids: list[str] = []
     for i in range(0, len(targets), batch_size):
         batch = targets[i:i + batch_size]
         rows: list[dict] = []
-        done = _already_converted(client, batch)
+        done = set() if preverified else _already_converted(client, batch)
         pending: list[ConversionTarget] = []
         for t in batch:
             if _short_id(t.lead_id) in done:
@@ -172,7 +187,13 @@ def _run_convert(client, targets, settings, batch_size, log, phase_label="",
                   "contact_id": t.contact_id} for t in pending],
                 converted_status=converted_status, owner_id=settings.owner_id))
         for r in rows:
-            if not r.get("success"):
+            if not r.get("success") and _is_converted_race(r):
+                log.warning("%sLead %s was already converted when SOAP ran (converted "
+                            "after the preflight/pre-query); counting as a no-op: %s",
+                            phase_label, r.get("leadId"), "; ".join(r.get("errors") or []))
+                r["success"] = True
+                r["alreadyConverted"] = True
+            elif not r.get("success"):
                 log.error("%sLead %s conversion failed: %s", phase_label,
                           r.get("leadId"), "; ".join(r.get("errors") or ["(no error detail)"]))
         returned = {_short_id(str(r.get("leadId") or "")) for r in rows}
@@ -188,9 +209,14 @@ def _run_convert(client, targets, settings, batch_size, log, phase_label="",
 
 def convert_leads(
     client, targets: list[ConversionTarget], settings, *,
-    dry_run: bool = False, batch_size: int = 10, logger=None,
+    dry_run: bool = False, batch_size: int = 10, preverified: bool = False, logger=None,
 ) -> dict:
     """Convert the targets in batches; aggregate per-lead results. No org call under dry_run.
+
+    `preverified=True` means the caller's preflight already queried every target's
+    IsConverted this run (Stage 2 with preflight on): the per-batch idempotency
+    pre-query is skipped and the preflight→SOAP race is handled via the SOAP error
+    mapping in `_run_convert`.
 
     Every input lead is reconciled against the returned results: leads already converted
     before this run come back as `already_converted` (the pre-query emits an explicit row
@@ -223,7 +249,7 @@ def convert_leads(
 
     results1, missing1 = _run_convert(
         client, existing_link + primaries, settings, batch_size, log, "phase1 ",
-        converted_status=converted_status)
+        converted_status=converted_status, preverified=preverified)
     acct_by_primary = {_short_id(str(r.get("leadId") or "")): r["accountId"]
                        for r in results1 if r.get("success") and r.get("accountId")}
 
@@ -243,7 +269,8 @@ def convert_leads(
                 for s in secondaries)
 
     results2, missing2 = ((_run_convert(client, phase2_targets, settings, batch_size, log,
-                                        "phase2 ", converted_status=converted_status))
+                                        "phase2 ", converted_status=converted_status,
+                                        preverified=preverified))
                           if phase2_targets else ([], []))
 
     all_results = results1 + results2 + orphan_results

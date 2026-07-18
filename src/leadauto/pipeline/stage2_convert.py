@@ -139,8 +139,11 @@ def run_stage2(
         log.warning("Routed %d lead(s) to review (kununu conflict)", len(review_failures))
     log.info("Stage 2: %d approved row(s) -> %d conversion target(s) (dry_run=%s)",
              len(rows), len(targets), dry_run)
-    result = convert_leads(sf_client, targets, settings,
-                           dry_run=dry_run, batch_size=batch_size, logger=log)
+    # preverified: preflight's Lead query already selects IsConverted and drops
+    # converted leads, so the converter can skip its per-batch idempotency pre-query
+    # (the preflight->SOAP race maps back to alreadyConverted from the SOAP error).
+    result = convert_leads(sf_client, targets, settings, dry_run=dry_run,
+                           batch_size=batch_size, preverified=preflight, logger=log)
     # Post-convert: LF contact email -> KN_Email2__c on NEW Contacts when it differs from
     # the primary (task) email. No-op under dry_run (convert_leads returns no results).
     result["email2"] = enrich_contact_email2(

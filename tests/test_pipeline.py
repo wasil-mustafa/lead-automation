@@ -300,6 +300,37 @@ def test_run_stage2_live_converts_approved(tmp_path):
     assert res.result["missing"] == 0     # the converted lead was reconciled in the results
 
 
+def test_run_stage2_preflight_preverifies_no_per_batch_isconverted_query(tmp_path):
+    # With preflight on, its Lead query already proves IsConverted=false for every
+    # surviving target — convert_leads must not re-query IsConverted per batch.
+    class _PreflightClient(FakeConvertClient):
+        def __init__(self):
+            super().__init__()
+            self.queries = []
+
+        def query(self, soql, bulk=False):
+            self.queries.append(soql)
+            if "FROM LeadStatus" in soql:
+                return [{"MasterLabel": "Qualified"}]
+            if "FROM Lead" in soql and "IsConverted," in soql:  # preflight field list
+                return [{"Id": LEAD1, "IsConverted": "false",
+                         "KN_Employee__c": "11-50", "KN_DBID__c": "",
+                         "KN_NoOwnDBID__c": "true", "KN_Language__c": "German",
+                         "Email": "jane@acme.de", "Phone": "", "Street": "Foo 1",
+                         "Country": "Germany", "PostalCode": "12345"}]
+            return []
+
+    p = tmp_path / "approved.csv"
+    _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
+                         "contact_score": "1.0", "Approve?": "yes"}])
+    client = _PreflightClient()
+    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=True)
+    assert res.result["converted"] == 1
+    assert res.preflight_failures == []
+    assert not any("FROM Lead " in q and "IsConverted = true" in q
+                   for q in client.queries)
+
+
 def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
     """Create-new conversion + LF contact email differing from the task email ->
     one Contact update setting KN_Email2__c."""
