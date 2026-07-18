@@ -84,7 +84,7 @@ pipeline:
   # live-scope row pre-approved (see live_scope below; skip/review never; write-back
   # failures held back), so Stage 2 converts without a human filling Approve?
   # (Wasil 2026-07-10; narrowed to the live scope 2026-07-18).
-  review_gate: true
+  review_gate: false         # off since go-live 2026-07-18: live runs auto-approve live-scope rows
   dry_run: true              # true => no SF writes/conversions (kept ON while validating vs control file)
   batch_limit: 0             # 0 = unlimited; >0 = LIMIT-scoped
   # 90 days: sweeps the open-task backlog (oldest open lead-task 2026-04-24) on the
