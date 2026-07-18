@@ -152,7 +152,7 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path, monkeypatch):
     state_path = tmp_path / "watermark.json"
     res = run_stage1(sf, object(), SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                      dry_run=False, qa_path=tmp_path / "qa.xlsx", state_path=state_path,
-                     predictions_path=None)
+                     review_dir=tmp_path / "review", predictions_path=None)
     assert res.results[0].decision == "create_new"
     assert len(sf.updates) == 1
     sobject, records = sf.updates[0]
@@ -173,7 +173,7 @@ def test_stage1_live_leaves_out_of_scope_leads_untouched(tmp_path):
     state_path = tmp_path / "watermark.json"
     res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                      dry_run=False, qa_path=None, state_path=state_path,
-                     predictions_path=None)
+                     review_dir=tmp_path / "review", predictions_path=None)
     assert res.results[0].decision == "skip"
     assert sf.updates == []                  # untouched in Salesforce
     assert state_path.exists()               # but the task is consumed
@@ -188,7 +188,7 @@ def test_stage1_live_records_shadow_predictions_for_out_of_scope(tmp_path):
     p = tmp_path / "predictions.jsonl"
     run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                dry_run=False, qa_path=None, state_path=tmp_path / "wm.json",
-               predictions_path=p)
+               review_dir=tmp_path / "review", predictions_path=p)
     preds = load_predictions(p)
     assert [q.lead_id for q in preds] == ["00Q1"]
     assert preds[0].decision == "skip"
