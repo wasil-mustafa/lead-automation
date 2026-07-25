@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/session_state.py\"",
+            "timeout": 20,
+            "statusMessage": "Reading pipeline state (watermark, config, shadow)"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard_sensitive_files.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking file against the secret/data/evidence guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard_bash.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking command for live writes / wrong org / API cost"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/run_offline_tests.py\"",
+            "timeout": 180,
+            "statusMessage": "Running the offline pytest suite"
+          },
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/check_config.py\"",
+            "timeout": 20,
+            "statusMessage": "Validating pipeline config"
+          }
+        ]
+      }
+    ]
+  }
+}

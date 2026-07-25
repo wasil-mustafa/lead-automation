@@ -10,9 +10,11 @@ Convert Leads/
 *.xlsx
 *.xlsm
 
-# kununu profile feed cache (updated daily, not committed)
-kununu_profiles.jsonl
-kununu_profiles.jsonl.part
+# kununu profile feed cache (updated daily, not committed). Wildcarded: dated manual
+# copies (kununu_profiles_21-07-26.jsonl) are the same ~551 MB DWH extract and were
+# showing up as untracked-but-not-ignored, one `git add -A` away from being committed.
+kununu_profiles*.jsonl
+kununu_profiles*.jsonl.part
 
 # Secrets & local env
 .env
