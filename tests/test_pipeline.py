@@ -56,6 +56,9 @@ class FakeSfClient:
             return [dict(c) for c in self._contacts]
         return []
 
+    def query_many(self, queries):
+        return {label: self.query(soql) for label, soql in queries.items()}
+
     def update_records(self, sobject, records):
         self.updates.append((sobject, records))
         return {"processed": len(records)}
@@ -300,6 +303,9 @@ class FakeConvertClient:
             return [{"MasterLabel": "Qualified"}]
         return []
 
+    def query_many(self, queries):
+        return {label: self.query(soql) for label, soql in queries.items()}
+
     def convert_lead(self, conversions, *, converted_status, owner_id):
         self.convert_calls.append(conversions)
         return [{"leadId": c["lead_id"], "success": True, "accountId": "001X"}
@@ -447,6 +453,9 @@ class _PreflightSfFake:
         if "IsConverted = true" in soql:
             return []
         return self.rows
+
+    def query_many(self, queries):
+        return {label: self.query(soql) for label, soql in queries.items()}
 
     def convert_lead(self, conversions, *, converted_status, owner_id):
         self.convert_calls.append(conversions)

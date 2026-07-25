@@ -85,6 +85,10 @@ class _FakeSf:
     def query(self, soql):
         return self._accounts if "FROM Account" in soql else self._leads
 
+    def query_many(self, queries):
+        # resolve_pool_links bundles its two independent reads into one /composite call.
+        return {label: self.query(soql) for label, soql in queries.items()}
+
     def update_records(self, sobject, records):
         self.updated = (sobject, records)
         return {"processed": len(records), "failed": 0, "failures": [], "confirmed": True}

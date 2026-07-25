@@ -2,12 +2,44 @@
 
 FakeClient routes by SObject name in the SOQL string, same idea as the matcher's
 loader tests."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from leadauto.predictions import Prediction, load_predictions, save_predictions
-from leadauto.shadow_compare import compare_fields, run_shadow_compare
+from leadauto.shadow_compare import (compare_fields, compare_is_due, last_compare_at,
+                                     record_compare_run, run_shadow_compare)
 
 NOW = datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc)
+
+
+# --- run gate: ~one compare per day, not one per Stage-1 dispatch -------------
+# A compare costs ~7-9 Salesforce requests and scores HUMAN conversions, which resolve
+# over days; Stage 1 is dispatched 4x/day. The gate reads a committed timestamp rather
+# than the wall-clock hour (an hour-based check silently skipped every run once).
+
+def test_compare_is_due_when_no_state_file(tmp_path):
+    assert compare_is_due(now=NOW, run_state_path=tmp_path / "shadow_state.json")
+
+
+def test_compare_not_due_inside_the_interval(tmp_path):
+    path = tmp_path / "shadow_state.json"
+    record_compare_run(now=NOW, run_state_path=path)
+    assert last_compare_at(path) == NOW
+    assert not compare_is_due(now=NOW + timedelta(hours=19), run_state_path=path)
+    assert compare_is_due(now=NOW + timedelta(hours=20), run_state_path=path)
+
+
+def test_compare_gate_fails_open_on_a_corrupt_state_file(tmp_path):
+    # A bad read must not quietly stop the go-live evidence from accumulating.
+    path = tmp_path / "shadow_state.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert last_compare_at(path) is None
+    assert compare_is_due(now=NOW, run_state_path=path)
+
+
+def test_compare_gate_can_be_forced(tmp_path):
+    path = tmp_path / "shadow_state.json"
+    record_compare_run(now=NOW, run_state_path=path)
+    assert compare_is_due(now=NOW, run_state_path=path, min_interval_hours=0)
 
 
 class FakeClient:
@@ -20,6 +52,11 @@ class FakeClient:
         if "FROM Account" in soql:
             return self.accounts
         return self.contacts
+
+    def query_many(self, queries):
+        # The account + contact reads ride ONE /composite call (they are independent).
+        self.bundled = list(queries)
+        return {label: self.query(soql) for label, soql in queries.items()}
 
 
 def _pred(lead_id="00Q1", decision="link", rule="name_address", account_id="001A",

@@ -125,6 +125,9 @@ jobs:
         continue-on-error: true   # a compare hiccup must not block enrichment
         env:
           PYTHONPATH: src
+        # Self-gating to ~once a day (state/shadow_state.json, committed below): a compare
+        # costs ~7-9 Salesforce requests and scores HUMAN conversions, which resolve over
+        # days — running it on all 4 daily dispatches re-read the same predictions.
         run: python -m leadauto shadow-compare
 
       - name: Upload shadow comparison
@@ -171,7 +174,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          for f in state/predictions.jsonl state/shadow_results.jsonl; do
+          for f in state/predictions.jsonl state/shadow_results.jsonl state/shadow_state.json; do
             [ -f "$f" ] && git add "$f"
           done
           if [ "${{ needs.gate.outputs.dry_run }}" != "true" ]; then

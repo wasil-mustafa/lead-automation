@@ -22,7 +22,14 @@ from .writeback import normalize_phone
 
 DEFAULT_RESULTS_PATH = REPO_ROOT / "state" / "shadow_results.jsonl"
 DEFAULT_XLSX_PATH = REPO_ROOT / "shadow_comparison.xlsx"
+DEFAULT_RUN_STATE_PATH = REPO_ROOT / "state" / "shadow_state.json"
 _EXPIRE_DAYS = 90
+
+# Stage 1 is dispatched 4×/day but a compare costs ~7-9 Salesforce requests and scores
+# HUMAN conversions, which resolve on a scale of days — three of those four runs re-read
+# the same unresolved predictions. 20h (not 24) so a fixed daily slot never drifts past
+# its own interval and silently skips a day.
+DEFAULT_MIN_INTERVAL_HOURS = 20
 
 DECISIONS_COLUMNS = [
     "lead_id", "rule", "decision", "predicted_account_id",
@@ -137,6 +144,51 @@ def classify_decision(pred, lead: dict, account: dict | None) -> tuple[str, str]
     return "observed", f"review case; human resolved to {kind}"
 
 
+def last_compare_at(run_state_path=None) -> datetime | None:
+    """When the last compare ran, from the committed run-state file. None if unknown.
+
+    A committed timestamp (not the run's wall-clock hour) is the gate's input on purpose:
+    dispatches arrive at whatever time the external scheduler manages, and an hour-based
+    check silently skipped every run once already (see CLAUDE.md, CI & scheduling).
+    """
+    path = Path(run_state_path) if run_state_path else DEFAULT_RUN_STATE_PATH
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")).get("last_run")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def compare_is_due(now=None, run_state_path=None,
+                   min_interval_hours: float = DEFAULT_MIN_INTERVAL_HOURS) -> bool:
+    """True when the last compare is older than `min_interval_hours` (or never ran).
+
+    Fails OPEN: an unreadable/absent state file means "run it" — skipping a compare on a
+    bad read would quietly stop the go-live evidence from accumulating.
+    """
+    if min_interval_hours <= 0:
+        return True
+    last = last_compare_at(run_state_path)
+    if last is None:
+        return True
+    return (now or datetime.now(timezone.utc)) - last >= timedelta(hours=min_interval_hours)
+
+
+def record_compare_run(now=None, run_state_path=None) -> Path:
+    """Stamp the run-state file (committed by the workflow) with this compare's time."""
+    path = Path(run_state_path) if run_state_path else DEFAULT_RUN_STATE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    path.write_text(json.dumps({"last_run": stamp}, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
                        xlsx_path=None, now=None, excluded_domains=None,
                        logger=None) -> dict:
@@ -157,12 +209,18 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
 
     leads = sf_client.query(soql.leads_shadow_status([p.lead_id for p in pending]))
     lead_by_id = {l["Id"]: l for l in leads}
+    # The account and contact reads both hang off the lead rows but not off each other,
+    # so they ride ONE /composite call instead of two (API-call reduction 2026-07-25).
     acct_ids = sorted({l["ConvertedAccountId"] for l in leads if l.get("ConvertedAccountId")})
-    accounts = sf_client.query(soql.accounts_by_ids(acct_ids)) if acct_ids else []
-    acct_by_id = {a["Id"]: a for a in accounts}
     contact_ids = sorted({l["ConvertedContactId"] for l in leads if l.get("ConvertedContactId")})
-    contacts = sf_client.query(soql.contacts_by_ids(contact_ids)) if contact_ids else []
-    contact_by_id = {c["Id"]: c for c in contacts}
+    reads = {}
+    if acct_ids:
+        reads["accounts"] = soql.accounts_by_ids(acct_ids)
+    if contact_ids:
+        reads["contacts"] = soql.contacts_by_ids(contact_ids)
+    fetched = sf_client.query_many(reads) if reads else {}
+    acct_by_id = {a["Id"]: a for a in fetched.get("accounts", [])}
+    contact_by_id = {c["Id"]: c for c in fetched.get("contacts", [])}
 
     new_results: list[dict] = []
     for pred in pending:

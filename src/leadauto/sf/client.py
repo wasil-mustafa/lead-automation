@@ -1,19 +1,27 @@
-"""Wrapper over the `sf` CLI (SOQL queries, anonymous Apex) plus direct HTTP calls
-riding the CLI's cached session: REST sObject Collections for record updates and the
-SOAP Partner API `convertLead()` for lead conversion.
+"""Wrapper over the `sf` CLI (short SOQL queries, anonymous Apex) plus direct HTTP calls
+riding the CLI's cached session: Bulk API 2.0 query jobs for large reads, `/composite`
+for bundled reads, REST sObject Collections for record updates and the SOAP Partner API
+`convertLead()` for lead conversion.
 
 Uses shell=True with a single command string (portable across Windows cmd and Linux
 bash: SOQL string literals use single quotes, so a double-quoted --query value is safe
 on both). SOQL/Apex payloads that are large or multi-line are written to temp files.
+
+API-call budget is the primary constraint on this module (the org's allocation is shared
+with business-critical integrations), so every transport here is the cheapest one that is
+still correct — see the per-method docstrings for the call cost.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import re
 import subprocess
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 import requests
@@ -41,8 +49,25 @@ _APEX_RUN_ATTEMPTS = 3
 _APEX_RETRY_DELAY_S = 10
 
 
+def _env_int(name: str, default: int) -> int:
+    """A positive int from the environment, else `default` (empty/garbage/<=0 ignored)."""
+    try:
+        value = int((os.environ.get(name) or "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 class SfError(RuntimeError):
     pass
+
+
+class _JobNotReady(SfError):
+    """A bulk query job's results were probed before it finished.
+
+    Raised only for the FIRST page of a job read without a prior status poll. Never
+    mid-pagination: retrying there would restart at page 1 and duplicate rows.
+    """
 
 
 # Last line of defense for ANY Id embedded in a generated SOQL literal or a SOAP
@@ -65,6 +90,23 @@ _SOAP_CONVERT_MAX = 100
 # REST sObject Collections accepts at most 200 records per request.
 _COLLECTIONS_MAX = 200
 
+# A /composite request carries at most 25 subrequests and — unlike /composite/batch,
+# which bills each subrequest — "the entire series of requests counts as a single call
+# toward your API limits". That is the whole point of query_many.
+_COMPOSITE_SUBREQUEST_MAX = 25
+
+# Bulk API 2.0 read transport (replaced `sf data export bulk` 2026-07-25). The CLI polls
+# job status on a hardcoded 5 s interval and every HTTP request counts as one API call,
+# so a job spent ~4-7 calls where 2 suffice. Here the job is created, awaited ONCE, and
+# its results are read directly — the results endpoint doubles as the completion check.
+# The initial wait is a latency/robustness knob only: a job that is not ready yet just
+# falls back to the polling loop, so a wrong guess never costs correctness.
+_BULK_POLL_INITIAL_S = _env_int("LEADAUTO_BULK_POLL_INITIAL", 5)
+_BULK_POLL_INTERVAL_S = _env_int("LEADAUTO_BULK_POLL_INTERVAL", 5)
+_BULK_TIMEOUT_S = _env_int("LEADAUTO_BULK_TIMEOUT", 900)
+
+_HTTP_TIMEOUT_S = 120
+
 
 class SfClient:
     def __init__(self, alias: str, api_version: str = "66.0", logger=None):
@@ -85,9 +127,10 @@ class SfClient:
     def query(self, soql: str, bulk: bool = False) -> list[dict]:
         """Run SOQL and return records as a list of dicts (attributes stripped).
 
-        Large queries (or `bulk=True`) go through Bulk API 2.0 to dodge the GET-URL/
+        Large queries (or `bulk=True`) go through a Bulk API 2.0 job to dodge the GET-URL/
         header limit that makes long IN(...) lists fail with HTTP 431; smaller queries
-        use the faster synchronous REST query.
+        use the faster synchronous REST query. Several INDEPENDENT short reads should go
+        through `query_many` instead — one /composite call for all of them.
         """
         soql = " ".join(soql.split())  # collapse whitespace/newlines
         if '"' in soql:
@@ -105,33 +148,167 @@ class SfClient:
         return records
 
     def _query_bulk(self, soql: str) -> list[dict]:
-        """Run SOQL via Bulk API 2.0 (`sf data export bulk`), reading records from a file.
+        """Run SOQL as a Bulk API 2.0 query job over direct HTTP (2 calls on the happy
+        path: create + one result page).
 
-        The query is written to a temp file (`--query-file`) so it never rides in the OS
-        command line or an HTTP header. `--result-format json` writes a bare JSON array of
-        record objects (no `attributes`, no `{result:{records}}` wrapper).
+        The query rides in the POST body, so it never hits the GET-URL header limit that
+        makes long `IN (...)` lists fail with HTTP 431. After one short wait the results
+        endpoint is read directly — a readable page IS proof the job completed, so no
+        status poll is spent. A job that is not ready yet (4xx on the first page) or that
+        returns an EMPTY body falls back to polling: an empty body is indistinguishable
+        from a zero-row result, and reporting "no rows" for a running job would be a wrong
+        answer, not a slow one.
+
+        Bulk results are CSV, so every value is a STRING and nulls arrive as '' — the same
+        stringly-typed contract the CLI path had ('false' is truthy!); callers coerce with
+        their own `_is_true`-style helpers.
         """
-        fd, q_name = tempfile.mkstemp(prefix="leadauto_query_", suffix=".soql")
-        q_path = Path(q_name)
-        out_path = Path(q_name + ".json")
+        job_id = self._create_query_job(soql)
+        if _BULK_POLL_INITIAL_S:
+            time.sleep(_BULK_POLL_INITIAL_S)
+        rows: list[dict] | None
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(soql)
-            cmd = (
-                f'sf data export bulk --query-file "{q_path}" --output-file "{out_path}" '
-                f"--result-format json --wait 10 --target-org {self.alias}"
-            )
-            self._run(cmd)
-            text = out_path.read_text(encoding="utf-8") if out_path.exists() else ""
-            records = json.loads(text) if text.strip() else []
-        finally:
-            for p in (q_path, out_path):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-        if not isinstance(records, list):
-            raise SfError(f"Unexpected bulk export output shape: {type(records).__name__}")
+            rows = self._download_job_rows(job_id, probe=True)
+        except _JobNotReady:
+            rows = None
+        if rows is not None and not rows and self._job_state(job_id) != "JobComplete":
+            rows = None
+        if rows is None:
+            self._wait_for_job(job_id)
+            rows = self._download_job_rows(job_id)
+        return rows
+
+    def _create_query_job(self, soql: str) -> str:
+        """POST a Bulk API 2.0 query job; returns its id. One API call, any row count."""
+        response = self._request("POST", self._data_path("/jobs/query"),
+                                 body=json.dumps({"operation": "query", "query": soql}))
+        self._raise_for_status(response, "create bulk query job")
+        job_id = (self._json_body(response, "create-job").get("id") or "").strip()
+        if not job_id:
+            raise SfError(f"Bulk create-job response carried no job id:\n"
+                          f"{response.text[:2000]}")
+        return job_id
+
+    def _job_state(self, job_id: str) -> str:
+        """Current job state ('InProgress' | 'JobComplete' | 'Failed' | ...). One call."""
+        response = self._request("GET", self._data_path(f"/jobs/query/{job_id}"))
+        self._raise_for_status(response, f"read state of bulk job {job_id}")
+        return (self._json_body(response, "job-status").get("state") or "").strip()
+
+    def _wait_for_job(self, job_id: str) -> None:
+        """Poll until the job completes; raise on Failed/Aborted or the deadline."""
+        deadline = time.monotonic() + _BULK_TIMEOUT_S
+        while True:
+            state = self._job_state(job_id)
+            if state == "JobComplete":
+                return
+            if state in ("Failed", "Aborted"):
+                raise SfError(f"Bulk query job {job_id} ended in state {state}")
+            if time.monotonic() >= deadline:
+                raise SfError(f"Bulk query job {job_id} did not finish within "
+                              f"{_BULK_TIMEOUT_S}s (last state: {state})")
+            time.sleep(_BULK_POLL_INTERVAL_S)
+
+    def _download_job_rows(self, job_id: str, probe: bool = False) -> list[dict]:
+        """Every result row of a completed query job, following `Sforce-Locator` pages.
+
+        `maxRecords` is deliberately never sent: it can only SHRINK the server's page,
+        which would raise the page count and therefore the API-call count. With
+        `probe=True` a 4xx on the FIRST page means "not finished yet" (_JobNotReady);
+        every later page keeps its failure fatal, because a retry mid-pagination would
+        restart at page 1 and duplicate rows.
+        """
+        rows: list[dict] = []
+        base = self._data_path(f"/jobs/query/{job_id}/results")
+        locator, first_page = "", True
+        while True:
+            path = f"{base}?locator={urllib.parse.quote(locator)}" if locator else base
+            response = self._request("GET", path, accept="text/csv")
+            if response.status_code >= 300:
+                if probe and first_page and 400 <= response.status_code < 500:
+                    raise _JobNotReady(f"bulk job {job_id} is not ready "
+                                       f"(HTTP {response.status_code})")
+                self._raise_for_status(response, f"read results of bulk job {job_id}")
+            first_page = False
+            text = response.content.decode("utf-8-sig", errors="replace")
+            if text.strip():
+                rows.extend(dict(r) for r in csv.DictReader(io.StringIO(text)))
+            locator = (response.headers.get("Sforce-Locator") or "").strip()
+            if not locator or locator == "null":
+                return rows
+
+    def query_many(self, queries: dict[str, str]) -> dict[str, list[dict]]:
+        """Run several INDEPENDENT SOQL reads and return {label: records}.
+
+        Short queries are bundled into one `/composite` request — up to 25 subrequests
+        bill as a SINGLE API call — so N independent reads cost 1 instead of N. Use this
+        only for reads that do not feed each other; a dependent read (e.g. contacts by the
+        accounts a previous query returned) must stay a separate call.
+
+        A query too long for a GET URL falls back to its own bulk job, exactly as
+        `query` would route it. A paginated subrequest (>2000 records) follows
+        `nextRecordsUrl`, one extra call per page — still cheaper than the split.
+        """
+        if not queries:
+            return {}
+        out: dict[str, list[dict]] = {}
+        bundleable: list[tuple[str, str]] = []
+        for label, soql in queries.items():
+            collapsed = " ".join(soql.split())
+            if '"' in collapsed:
+                raise SfError("SOQL must not contain double quotes "
+                              "(use single quotes for literals)")
+            if len(collapsed) > _BULK_QUERY_THRESHOLD:
+                out[label] = self._query_bulk(collapsed)   # own job; can't ride a GET URL
+            else:
+                bundleable.append((label, collapsed))
+        for start in range(0, len(bundleable), _COMPOSITE_SUBREQUEST_MAX):
+            out.update(self._composite_query(
+                bundleable[start:start + _COMPOSITE_SUBREQUEST_MAX]))
+        return out
+
+    def _composite_query(self, items: list[tuple[str, str]]) -> dict[str, list[dict]]:
+        """One /composite request carrying up to 25 SOQL GET subrequests."""
+        payload = {"allOrNone": False, "compositeRequest": [
+            {"method": "GET", "referenceId": f"q{i}",
+             "url": self._data_path(f"/query/?q={urllib.parse.quote(soql, safe='')}")}
+            for i, (_label, soql) in enumerate(items)]}
+        response = self._request("POST", self._data_path("/composite"),
+                                 body=json.dumps(payload))
+        self._raise_for_status(response, "composite query")
+        subresponses = self._json_body(response, "composite").get("compositeResponse")
+        if not isinstance(subresponses, list) or len(subresponses) != len(items):
+            raise SfError(f"Unexpected /composite response shape:\n{response.text[:2000]}")
+        out: dict[str, list[dict]] = {}
+        for (label, _soql), sub in zip(items, subresponses):
+            status = sub.get("httpStatusCode", 0)
+            body = sub.get("body")
+            if status >= 300 or not isinstance(body, dict):
+                raise SfError(f"Composite subrequest '{label}' failed "
+                              f"(HTTP {status}):\n{json.dumps(body)[:2000]}")
+            out[label] = self._collect_query_records(body, label)
+        return out
+
+    def _collect_query_records(self, body: dict, label: str) -> list[dict]:
+        """Records of a REST query body, following `nextRecordsUrl` to the last page.
+
+        `done == false` is never accepted as the whole answer — a truncated read is a
+        plausible-looking wrong answer, so the remaining pages are fetched (1 call each).
+        """
+        records: list[dict] = list(body.get("records") or [])
+        guard = 0
+        while not body.get("done", True):
+            next_url = body.get("nextRecordsUrl")
+            if not next_url:
+                raise SfError(f"Query '{label}' reported done=false with no "
+                              "nextRecordsUrl — refusing to return a truncated result")
+            guard += 1
+            if guard > 100:
+                raise SfError(f"Query '{label}' paginated more than 100 times; aborting")
+            response = self._request("GET", next_url)
+            self._raise_for_status(response, f"paginate query '{label}'")
+            body = self._json_body(response, f"query '{label}'")
+            records.extend(body.get("records") or [])
         for r in records:
             r.pop("attributes", None)
         return records
@@ -169,29 +346,63 @@ class SfClient:
                 "failures": failures, "confirmed": True}
 
     def _patch_collections(self, payload: dict) -> list[dict]:
-        """One sObject-Collections PATCH; retries once with fresh auth on HTTP 401."""
-        response = self._patch_once(payload, refresh=False)
-        if response.status_code == 401:
-            if self.log:
-                self.log.warning("Collections PATCH got 401; refreshing auth and retrying")
-            response = self._patch_once(payload, refresh=True)
-        if response.status_code >= 300:
-            raise SfError(f"sObject Collections PATCH failed "
-                          f"(HTTP {response.status_code}):\n{response.text[:2000]}")
+        """One sObject-Collections PATCH (1 API call for up to 200 records)."""
+        response = self._request("PATCH", self._data_path("/composite/sobjects"),
+                                 body=json.dumps(payload))
+        self._raise_for_status(response, "sObject Collections PATCH")
         rows = json.loads(response.text)
         if not isinstance(rows, list):
             raise SfError(f"Unexpected sObject Collections response shape:\n"
                           f"{response.text[:2000]}")
         return rows
 
-    def _patch_once(self, payload: dict, *, refresh: bool):
+    # --- direct HTTP transport (rides the CLI's cached session token) -------------
+    def _data_path(self, suffix: str) -> str:
+        """'/jobs/query' -> '/services/data/v66.0/jobs/query'."""
+        return f"/services/data/v{self.api_version}{suffix}"
+
+    def _request(self, method: str, path: str, *, body: str | None = None,
+                 accept: str = "application/json"):
+        """One authenticated request against an org path, retried ONCE with a refreshed
+        token on HTTP 401 (a run can outlive the CLI's cached access token).
+
+        Returns the response as-is — callers decide what a non-2xx means, because the
+        bulk results probe treats a first-page 4xx as "job not ready", not as failure.
+        """
+        response = self._request_once(method, path, body, accept, refresh=False)
+        if response.status_code == 401:
+            if self.log:
+                self.log.warning("%s %s got 401; refreshing auth and retrying",
+                                 method, path.split("?")[0])
+            response = self._request_once(method, path, body, accept, refresh=True)
+        return response
+
+    def _request_once(self, method: str, path: str, body: str | None,
+                      accept: str, *, refresh: bool):
         auth = self.auth_info(refresh=refresh)
-        url = (f"{auth['instance_url']}/services/data/v{self.api_version}"
-               "/composite/sobjects")
-        return requests.patch(url, data=json.dumps(payload), headers={
-            "Authorization": f"Bearer {auth['access_token']}",
-            "Content-Type": "application/json",
-        }, timeout=120)
+        headers = {"Authorization": f"Bearer {auth['access_token']}", "Accept": accept}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        return requests.request(method, f"{auth['instance_url']}{path}", data=body,
+                                headers=headers, timeout=_HTTP_TIMEOUT_S)
+
+    @staticmethod
+    def _raise_for_status(response, what: str) -> None:
+        if response.status_code >= 300:
+            raise SfError(f"Failed to {what} (HTTP {response.status_code}):\n"
+                          f"{response.text[:2000]}")
+
+    @staticmethod
+    def _json_body(response, what: str) -> dict:
+        try:
+            body = json.loads(response.text)
+        except ValueError as exc:
+            raise SfError(f"Could not parse the {what} response: {exc}\n"
+                          f"{response.text[:2000]}") from exc
+        if not isinstance(body, dict):
+            raise SfError(f"Unexpected {what} response shape: "
+                          f"{type(body).__name__}\n{response.text[:2000]}")
+        return body
 
     # --- SOAP conversion ---
     def auth_info(self, refresh: bool = False) -> dict:

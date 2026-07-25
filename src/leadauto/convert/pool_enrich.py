@@ -76,10 +76,16 @@ def resolve_pool_links(client, link_targets, settings, *, dry_run=False, logger=
         return list(link_targets), []
 
     from ..sf import soql
-    accounts = {a["Id"]: a for a in client.query(
-        soql.accounts_pool_fields(sorted({t.account_id for t in linked})))}
-    leads = {r["Id"]: r for r in client.query(
-        soql.leads_pool_enrich(sorted({t.lead_id for t in linked})))}
+    # Independent reads -> one /composite call instead of two (API-call reduction
+    # 2026-07-25). They are NOT bundled with the Stage-2 preflight query: preflight
+    # decides which targets survive, and pool enrichment WRITES to the accounts it
+    # reads, so reading ahead of that filter would touch dropped leads' accounts.
+    fetched = client.query_many({
+        "accounts": soql.accounts_pool_fields(sorted({t.account_id for t in linked})),
+        "leads": soql.leads_pool_enrich(sorted({t.lead_id for t in linked})),
+    })
+    accounts = {a["Id"]: a for a in fetched["accounts"]}
+    leads = {r["Id"]: r for r in fetched["leads"]}
 
     surviving, review, updates = [], [], []
     for t in link_targets:

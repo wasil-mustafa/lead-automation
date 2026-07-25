@@ -35,7 +35,10 @@ at the caller's job level (a called workflow's top-level `concurrency` is ignore
 3. run_preflight (convert/preflight.py) re-queries the approved leads' current state and drops
    any lead failing the "Conversion requirements" below — failures land in preflight_failures.csv
    (uploaded with the stage-2 log) and Stage2Result.preflight_failures; --no-preflight bypasses.
-4. `resolve_pool_links` (convert/pool_enrich.py) enriches linked Accounts owned by the pool
+4. `resolve_pool_links` (convert/pool_enrich.py) reads its Accounts and Leads in ONE
+   `SfClient.query_many` /composite call (2 → 1, 2026-07-25; deliberately NOT bundled with
+   preflight's read — preflight decides which targets survive, and this step WRITES to the
+   accounts it reads) and enriches linked Accounts owned by the pool
    (`Owner.Name='Rohdaten Pool'`, keyed by config `salesforce.rohdaten_pool_owner_id`). For each
    approved lead linking an Account it runs a two-part **kununu identity gate**, comparing the
    Account's stored identity to the values carried on the approved CSV: Account
@@ -67,12 +70,14 @@ at the caller's job level (a called workflow's top-level `concurrency` is ignore
 6. Idempotency: already-converted inputs get an explicit `alreadyConverted` result row (so a
    re-run is a true no-op — counted `already_converted`, never `missing`). With preflight on
    (the default), `convert_leads` runs `preverified=True`: preflight's Lead query already
-   selects `IsConverted` and drops converted leads, so the converter skips its per-batch
-   `IsConverted = true` pre-query (saved ~⌈T/3⌉ queries — 77 on the 230-lead backlog run);
-   a lead converted in the preflight→SOAP window comes back as an already-converted SOAP
+   selects `IsConverted` and drops converted leads, so the converter skips the
+   `IsConverted = true` pre-query entirely (saved ~⌈T/3⌉ queries — 77 on the 230-lead backlog
+   run); a lead converted in the preflight→SOAP window comes back as an already-converted SOAP
    error (`CANNOT_UPDATE_CONVERTED_LEAD`-style) and is mapped back to `alreadyConverted`
-   (`converter._is_converted_race`). Under `--no-preflight` the per-batch pre-query still
-   runs. `SfClient.convert_lead` returns one result
+   (`converter._is_converted_race`). Under `--no-preflight` the pre-query still runs, but
+   ONCE per `_run_convert` phase over the whole target list (chunked at
+   `_CONVERTED_PROBE_CHUNK` = 500 Ids), not once per batch — at the live `--batch-size 3`
+   that was ⌈N/3⌉ calls (API-call reduction 2026-07-25). `SfClient.convert_lead` returns one result
    row per conversion in request order, backfilling a nil leadId (structural rejections) from
    that order, and retries ONCE on an `INVALID_SESSION_ID` fault after re-fetching auth
    (`SfClient.auth_info`, cached from `sf org display --json`). `convert_leads` still reconciles
@@ -108,9 +113,9 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   failures, so re-running a batch (or an approved CSV where some rows already converted) is a
   no-op that exits **green** — counted `already_converted`, not `missing`/`failed`. With
   preflight on, preflight itself catches them (its query selects `IsConverted`) and the
-  converter trusts it (`preverified=True`, no per-batch pre-query); the race window is covered
+  converter trusts it (`preverified=True`, no pre-query at all); the race window is covered
   by mapping the already-converted SOAP error to `alreadyConverted`. Under `--no-preflight`
-  the converter's own per-batch `IsConverted = true` pre-query still runs.
+  the converter's own `IsConverted = true` pre-query still runs — once per phase, not per batch.
 - **No GitHub Environment gate** (resolved 2026-07-10): required-reviewers protection needs
   a paid plan on private repos (API returns 422 on this repo), so the `environment:`
   reference was REMOVED from `stage2.yml`. The conversion brakes: on **manual dispatch** the

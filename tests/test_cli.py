@@ -4,6 +4,7 @@ The command bodies are thin glue over the already-tested stage functions and con
 clients, so we don't invoke them here. We test the pure helper (`find_latest_approved`) and
 that the Typer app exposes the stage1/stage2 commands (via --help, which never touches an org).
 """
+import pytest
 from typer.testing import CliRunner
 
 from leadauto.cli import app, find_latest_approved
@@ -37,16 +38,42 @@ def test_stage1_help_lists_flags():
     assert "--limit" in result.stdout
 
 
-def test_shadow_compare_command(monkeypatch):
-    import leadauto.cli as cli
+def _stub_shadow_compare(monkeypatch, cli):
+    """Stub the org call + the run-state stamp (which would touch the repo's state/)."""
+    stamped: list[bool] = []
     monkeypatch.setattr(cli, "_build_sf_client", lambda s, log: object())
+    monkeypatch.setattr(cli, "record_compare_run", lambda: stamped.append(True))
     monkeypatch.setattr(cli, "run_shadow_compare", lambda sf, excluded_domains, logger: {
         "checked": 3, "resolved": 2, "hits": 1, "misses": 1, "observed": 0,
         "expired": 0, "excluded": 1, "pending": 1, "xlsx": "shadow_comparison.xlsx"})
+    return stamped
+
+
+def test_shadow_compare_command(monkeypatch):
+    import leadauto.cli as cli
+    stamped = _stub_shadow_compare(monkeypatch, cli)
+    monkeypatch.setattr(cli, "compare_is_due", lambda min_interval_hours: True)
     result = CliRunner().invoke(cli.app, ["shadow-compare"])
     assert result.exit_code == 0
     assert "resolved=2" in result.output and "hits=1" in result.output
     assert "excluded=1" in result.output
+    assert stamped == [True]           # run-state stamped for the next dispatch's gate
+
+
+def test_shadow_compare_skips_when_not_due(monkeypatch):
+    # Stage 1 is dispatched 4x/day and a compare costs ~7-9 Salesforce requests, so a
+    # too-recent compare must skip WITHOUT touching the org (and still exit green).
+    import leadauto.cli as cli
+    from datetime import datetime, timezone
+    stamped = _stub_shadow_compare(monkeypatch, cli)
+    monkeypatch.setattr(cli, "_build_sf_client",
+                        lambda s, log: pytest.fail("must not reach the org"))
+    monkeypatch.setattr(cli, "compare_is_due", lambda min_interval_hours: False)
+    monkeypatch.setattr(cli, "last_compare_at",
+                        lambda: datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc))
+    result = CliRunner().invoke(cli.app, ["shadow-compare"])
+    assert result.exit_code == 0
+    assert "skipped" in result.output and stamped == []
 
 
 def test_stage2_cli_reports_preflight_skips(monkeypatch, tmp_path):

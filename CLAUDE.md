@@ -69,7 +69,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   run (`workflow_call`, see the go-live bullet).
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `pipeline.dry_run: true`
   (local-run default; CI takes the dispatch input), `review_gate: false` (since go-live),
-  `task_lookback_days: 90` (sweeps the open-task backlog; processed_task_ids dedupes), and the
+  `task_lookback_days: 14` (was 90 for the initial backlog sweep, which is done; the window is a
+  BACKWARD overlap off the watermark, so shrinking it can't miss new tasks), and the
   **live-scope gate** `pipeline.live_scope` — see next bullet.
 - **LIVE-PROVEN end to end (2026-07-10):** first live write-back (3 test leads, KN_* fields
   org-verified) AND first live conversion — stage2 run 29126789599 converted
@@ -178,15 +179,33 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Task Description; existing Accounts/Contacts carry them.
 - **SOQL:** `Task` not allowed in reverse semi-joins (query Tasks first, then Leads by `WhoId`);
   `Subject` filterable but not groupable; `Description` is long-text → not LIKE-filterable.
-- **`sf` is wrapped** in `sf/client.py` via `subprocess(shell=True)` with double-quoted `--query`.
-  Payloads go to temp files for apex/bulk. **Large SOQL auto-routes to Bulk API 2.0:** a plain
-  `sf data query` puts SOQL in the GET URL, so long `IN(...)` lists overflow the header limit →
-  HTTP 431; `SfClient.query` routes SOQL over 2000 chars through `sf data export bulk --query-file`.
-  (`sf data query` has no `--bulk`/`--wait` flags.) **Bulk-export records are stringly typed** even
-  with `--result-format json`: booleans arrive as `'true'`/`'false'` strings (`'false'` is truthy!)
-  and nulls as `''` — coerce with an `_is_true`-style helper (see `extract/parsers.py`,
-  `convert/preflight.py`, `shadow_compare.py`); live-proven 2026-07-06 when 299 pending
-  predictions all "resolved" as misses.
+- **`sf` is wrapped** in `sf/client.py` via `subprocess(shell=True)` with double-quoted `--query`
+  (short SOQL + apex only; apex payloads go to temp files). **Large SOQL auto-routes to Bulk API
+  2.0:** a plain `sf data query` puts SOQL in the GET URL, so long `IN(...)` lists overflow the
+  header limit → HTTP 431; `SfClient.query` routes SOQL over 2000 chars to a **direct** Bulk
+  query job (`_query_bulk`, since 2026-07-25 — the `sf data export bulk` shell-out polled status
+  every 5 s and cost ~4-7 requests where 2 do). Its rules, do NOT re-tune without re-measuring:
+  read `/results` as the completion probe (no status poll on the happy path); page via
+  `Sforce-Locator`; NEVER send `maxRecords` (it only shrinks the page ⇒ more calls); a first-page
+  4xx means "not ready" but a mid-pagination failure stays fatal (a retry restarts at page 1 and
+  duplicates rows); an EMPTY body is confirmed with a state poll, never trusted as "no rows".
+  **Bulk records are stringly typed** (the results are CSV): booleans arrive as `'true'`/`'false'`
+  strings (`'false'` is truthy!) and nulls as `''` — coerce with an `_is_true`-style helper (see
+  `extract/parsers.py`, `convert/preflight.py`, `shadow_compare.py`); live-proven 2026-07-06 when
+  299 pending predictions all "resolved" as misses.
+- **Several INDEPENDENT reads go through `SfClient.query_many`**, which bundles them into one
+  `/composite` request — ≤25 subrequests bill as a **single** API call (unlike `/composite/batch`,
+  which bills each). Used by `shadow_compare` (accounts + contacts) and `convert/pool_enrich`
+  (accounts + leads). A dependent read must stay its own call, and a query over 2000 chars falls
+  back to its own bulk job. `done == false` is never returned as the answer — `nextRecordsUrl` is
+  followed, because a truncated read is a plausible-looking wrong answer.
+- **API-call budget is a standing constraint** (the org's allocation is shared with other teams'
+  integrations): state the cost of any new query/write before adding it, prefer direct HTTP on the
+  cached CLI token > `sf` CLI, `/composite` > N reads, one batched `IN (...)` > per-record loops,
+  and never put a query inside a per-batch loop. The reusable reviewer for this is the
+  **`api-budget-auditor` subagent** in the sibling repo
+  (`../Main-Profile-Account/.claude/agents/`), whose `common/sf_bulk.py` is the prior art the
+  bulk transport above was ported from.
 
 ### CI & scheduling
 
@@ -285,6 +304,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (`PostalCode`/`City`/`CountryCode` vs the converted account's Billing address,
   `FirstName`/`Phone` vs the converted Contact, `KN_Employee__c` vs the lead); legacy
   `KN_DB*` payload keys still score in-flight pre-KN_DB-removal predictions.
+  **The compare self-gates to ~once a day** (`--min-interval-hours`, default 20; `0` forces it):
+  it costs ~7-9 Salesforce requests and scores HUMAN conversions, which resolve over days, so
+  running it on all 4 daily dispatches re-read the same predictions. The gate reads a committed
+  timestamp (`state/shadow_state.json`, written by `record_compare_run`, committed by
+  `stage1.yml`) — NOT the wall-clock hour, which silently skipped every run once (see CI &
+  scheduling) — and fails OPEN on an unreadable file.
 
 ### Repo layout
 

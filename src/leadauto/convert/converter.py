@@ -32,6 +32,11 @@ from ..logging import get_logger
 from ..sf.client import guard_sf_id
 
 
+# Lead Ids per already-converted probe statement (~500 × 20 chars stays far inside the
+# 100k-char SOQL limit; `SfClient.query` routes the long ones to a bulk job itself).
+_CONVERTED_PROBE_CHUNK = 500
+
+
 def _id_in_list(ids) -> str:
     """Comma-joined quoted SOQL literals, each re-guarded to a bare Salesforce Id."""
     return ", ".join(f"'{guard_sf_id(i)}'" for i in ids)
@@ -145,12 +150,22 @@ def _cluster_by_company(targets: list[ConversionTarget]) -> list[list[Conversion
     return [groups[k] for k in order] + singletons
 
 
-def _already_converted(client, batch: list[ConversionTarget]) -> set[str]:
-    """15-char prefixes of batch leads the org already holds as IsConverted=true."""
-    id_list = _id_in_list(t.lead_id for t in batch)
-    rows = client.query(
-        f"SELECT Id FROM Lead WHERE Id IN ({id_list}) AND IsConverted = true")
-    return {_short_id(str(r.get("Id") or "")) for r in rows}
+def _already_converted(client, targets: list[ConversionTarget]) -> set[str]:
+    """15-char prefixes of the given leads the org already holds as IsConverted=true.
+
+    Queried ONCE for the whole target list (chunked at 500 Ids to keep each statement
+    well inside the 100k-char SOQL limit), not once per conversion batch: with the live
+    `--batch-size 3` ceiling, per-batch querying cost ⌈N/3⌉ calls — 77 on a 230-lead
+    backlog — where 1 does. Long chunks route themselves to a bulk job in `SfClient.query`.
+    """
+    done: set[str] = set()
+    ids = [t.lead_id for t in targets]
+    for start in range(0, len(ids), _CONVERTED_PROBE_CHUNK):
+        id_list = _id_in_list(ids[start:start + _CONVERTED_PROBE_CHUNK])
+        rows = client.query(
+            f"SELECT Id FROM Lead WHERE Id IN ({id_list}) AND IsConverted = true")
+        done |= {_short_id(str(r.get("Id") or "")) for r in rows}
+    return done
 
 
 def _is_converted_race(row: dict) -> bool:
@@ -165,19 +180,19 @@ def _run_convert(client, targets, settings, batch_size, log, phase_label="",
                  *, converted_status, preverified: bool = False):
     """Convert one target list in batches; return (results, missing_ids).
 
-    Per batch: (1) pre-query already-converted inputs and emit explicit
-    `alreadyConverted` rows (idempotent no-op, never `missing`) — skipped when
-    `preverified` (preflight already proved IsConverted=false); (2) SOAP-convert the
-    rest, mapping an already-converted SOAP error (the race window) back to an
-    `alreadyConverted` row; (3) reconcile — any batch lead with no result row is
-    reported `missing`.
+    Up front: (1) ONE pre-query of the already-converted inputs, so they get explicit
+    `alreadyConverted` rows (idempotent no-op, never `missing`) — skipped entirely when
+    `preverified` (preflight already proved IsConverted=false). Then per batch:
+    (2) SOAP-convert the rest, mapping an already-converted SOAP error (the race window)
+    back to an `alreadyConverted` row; (3) reconcile — any batch lead with no result row
+    is reported `missing`.
     """
     results: list[dict] = []
     missing_ids: list[str] = []
+    done = set() if preverified else _already_converted(client, targets)
     for i in range(0, len(targets), batch_size):
         batch = targets[i:i + batch_size]
         rows: list[dict] = []
-        done = set() if preverified else _already_converted(client, batch)
         pending: list[ConversionTarget] = []
         for t in batch:
             if _short_id(t.lead_id) in done:

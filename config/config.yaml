@@ -87,9 +87,11 @@ pipeline:
   review_gate: false         # off since go-live 2026-07-18: live runs auto-approve live-scope rows
   dry_run: true              # true => no SF writes/conversions (kept ON while validating vs control file)
   batch_limit: 0             # 0 = unlimited; >0 = LIMIT-scoped
-  # 90 days: sweeps the open-task backlog (oldest open lead-task 2026-04-24) on the
-  # first live run; processed_task_ids dedupes, so each task is only processed once.
-  task_lookback_days: 90
+  # 14 days (was 90 for the initial backlog sweep, which is done): the window only has to
+  # cover the gap between runs plus a safety margin, and every extra day re-reads tasks
+  # processed_task_ids already dedupes — 646 rows/run at 90 days, and past 2000 rows the
+  # scan starts paying extra queryMore calls (API-call reduction 2026-07-25).
+  task_lookback_days: 14
   # Phased go-live gate (Wasil, 2026-07-18): on a non-dry run ONLY leads matching this
   # scope are written back + staged for conversion; every other lead is left untouched
   # (humans keep working it) and gets a shadow prediction instead. A missing kununu

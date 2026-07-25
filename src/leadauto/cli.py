@@ -17,7 +17,8 @@ from .leadfeeder.client import LeadfeederClient
 from .logging import get_logger
 from .pipeline.stage1_enrich import run_stage1
 from .pipeline.stage2_convert import run_stage2
-from .shadow_compare import run_shadow_compare
+from .shadow_compare import (DEFAULT_MIN_INTERVAL_HOURS, compare_is_due,
+                             last_compare_at, record_compare_run, run_shadow_compare)
 from .sf.auth import ensure_org
 from .sf.client import SfClient
 from .state import DEFAULT_STATE_PATH, REPO_ROOT
@@ -163,12 +164,22 @@ def backtest_skipped(
 @app.command("shadow-compare")
 def shadow_compare(
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
+    min_interval_hours: float = typer.Option(
+        DEFAULT_MIN_INTERVAL_HOURS, "--min-interval-hours",
+        help="Skip if a compare already ran this recently (0 = always run). Stage 1 is "
+             "dispatched 4x/day; human conversions resolve over days."),
 ) -> None:
     """Score pending dry-run predictions against human conversions in the org."""
     log = get_logger("cli.shadow")
+    if not compare_is_due(min_interval_hours=min_interval_hours):
+        last = last_compare_at()
+        typer.echo(f"Shadow compare skipped: last run {last.isoformat()} is younger "
+                   f"than {min_interval_hours}h (--min-interval-hours 0 to force).")
+        return
     settings = Settings.load(config)
     sf = _build_sf_client(settings, log)
     res = run_shadow_compare(sf, excluded_domains=settings.excluded_email_domains, logger=log)
+    record_compare_run()
     typer.echo(
         f"Shadow compare done: checked={res['checked']} resolved={res['resolved']} "
         f"hits={res['hits']} misses={res['misses']} observed={res['observed']} "

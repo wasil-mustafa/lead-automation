@@ -180,14 +180,31 @@ def test_convert_leads_preverified_skips_preconvert_queries():
     assert client.queries == []        # pinned status: no LeadStatus SOQL either
 
 
-def test_convert_leads_default_keeps_per_batch_preconvert_query():
-    # Without preverification (the --no-preflight escape hatch), the per-batch
-    # idempotency pre-query must keep running.
+def test_convert_leads_default_probes_converted_once_for_all_batches():
+    # Without preverification (the --no-preflight escape hatch) the idempotency
+    # pre-query must still run — but ONCE for the whole target list, not once per
+    # batch: at the live batch_size 3 that was ⌈N/3⌉ calls (77 on the 230-lead backlog).
     client = FakeSoapClient()
     targets = [ConversionTarget(f"00Q{i}") for i in range(7)]
     convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=3)
-    assert sum(1 for q in client.queries
-               if "FROM Lead " in q and "IsConverted = true" in q) == 3
+    probes = [q for q in client.queries
+              if "FROM Lead " in q and "IsConverted = true" in q]
+    assert len(probes) == 1
+    assert all(f"'00Q{i}'" in probes[0] for i in range(7))   # every target covered
+
+
+def test_convert_leads_converted_probe_chunks_long_id_lists(monkeypatch):
+    # The single probe is chunked so one statement can never approach the 100k-char
+    # SOQL limit; every target must still appear in exactly one chunk.
+    monkeypatch.setattr("leadauto.convert.converter._CONVERTED_PROBE_CHUNK", 2)
+    client = FakeSoapClient()
+    targets = [ConversionTarget(f"00Q{i}") for i in range(5)]
+    convert_leads(client, targets, SETTINGS, dry_run=False, batch_size=5)
+    probes = [q for q in client.queries
+              if "FROM Lead " in q and "IsConverted = true" in q]
+    assert len(probes) == 3                                   # 2 + 2 + 1
+    for i in range(5):
+        assert sum(1 for p in probes if f"'00Q{i}'" in p) == 1
 
 
 def test_convert_leads_preverified_race_counts_already_converted(caplog):
