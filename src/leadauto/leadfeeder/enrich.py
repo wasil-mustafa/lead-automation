@@ -18,7 +18,7 @@ from ..extract.models import ExtractedLead
 from ..kununu_feed import base_slug, load_profiles_for_leads
 from ..logging import get_logger
 from ..textnorm import alnum, country_iso2, email_domain, normalize_host, normalize_name
-from .client import flatten_company, flatten_contact_details
+from .client import flatten_company, flatten_contact_details, match_email
 
 
 @dataclass
@@ -132,7 +132,12 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
             # No country/country_code: LF's country filter suppresses good matches
             # (2026-07-03 control probe: 59 candidates regained without it, all
             # correct). The name-agreement gate is what guards wrong-company.
-            payload = {"company_name": company_name, "email": email or ""}
+            # `email` stays out of the payload unless it is a real address: LF 400s on a
+            # blank/garbage one and a 400 fails the whole chunk (client.match_api_payload
+            # enforces this at the boundary too — this keeps the payload honest at source).
+            payload = {"company_name": company_name}
+            if match_email(email):
+                payload["email"] = email
             info = (profiles.get(e.kununu_profile_uuid or "")
                     or profiles.get(base_slug(e.kununu_url) or ""))
             if info:

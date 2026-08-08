@@ -12,6 +12,7 @@ from leadauto.leadfeeder.client import (
     LeadfeederError,
     flatten_company,
     flatten_contact_details,
+    match_email,
 )
 
 
@@ -287,6 +288,78 @@ def test_alt_names_are_stripped_from_post_body():
     client = _client(routes, min_match_score=0.70)
     client.match_companies([{"company_name": "Acme", "alt_names": ["Acme Sub GmbH"]}])
     assert all("alt_names" not in c for c in seen["companies"])
+
+
+# --- the `email` key: LF 400s on a blank/garbage one, and a 400 fails the WHOLE
+# chunk (verified live 2026-08-08), so one bad address would degrade up to 200
+# companies to "no match" — indistinguishable downstream from a real no-match.
+
+@pytest.mark.parametrize("value", ["", None, "   ", "n/a", "kein", "info@", "@acme.de",
+                                   "info@acme", "a b@acme.de"])
+def test_match_email_rejects_non_addresses(value):
+    assert match_email(value) is None
+
+
+@pytest.mark.parametrize("value", ["info@acme.de", " Info@Acme.de ", "a.b+c@sub.acme.co.uk"])
+def test_match_email_keeps_real_addresses(value):
+    assert match_email(value) == value.strip()
+
+
+def test_blank_email_is_omitted_from_post_body():
+    seen = {}
+    def handler(params, body):
+        seen.update(body)
+        return _match_payload([("c1", 0.95, "Acme GmbH")])
+    routes = {("POST", "/companies/match"): handler}
+    client = _client(routes, min_match_score=0.70)
+    client.match_companies([{"company_name": "Acme", "email": ""}])
+    assert seen["companies"] == [{"company_name": "Acme"}]
+
+
+def test_garbage_email_is_omitted_from_post_body():
+    seen = {}
+    def handler(params, body):
+        seen.update(body)
+        return _match_payload([("c1", 0.95, "Acme GmbH")])
+    routes = {("POST", "/companies/match"): handler}
+    client = _client(routes, min_match_score=0.70)
+    client.match_companies([{"company_name": "Acme", "email": "n/a"}])
+    assert seen["companies"] == [{"company_name": "Acme"}]
+
+
+def test_valid_email_is_still_sent():
+    seen = {}
+    def handler(params, body):
+        seen.update(body)
+        return _match_payload([("c1", 0.95, "Acme GmbH")])
+    routes = {("POST", "/companies/match"): handler}
+    client = _client(routes, min_match_score=0.70)
+    client.match_companies([{"company_name": "Acme", "email": "info@acme.de"}])
+    assert seen["companies"] == [{"company_name": "Acme", "email": "info@acme.de"}]
+
+
+def test_one_blank_email_does_not_strip_its_neighbours_emails():
+    # The sanitizer is per-company: a bad address must not cost the rest of the chunk
+    # its email signal (nor, before the fix, the whole chunk its answer).
+    seen = {}
+    def handler(params, body):
+        seen.update(body)
+        return {"data": [[], []]}
+    routes = {("POST", "/companies/match"): handler}
+    client = _client(routes, min_match_score=0.70)
+    client.match_companies([{"company_name": "Acme", "email": ""},
+                            {"company_name": "Beta", "email": "info@beta.de"}])
+    assert seen["companies"] == [{"company_name": "Acme"},
+                                 {"company_name": "Beta", "email": "info@beta.de"}]
+
+
+def test_blank_email_still_feeds_the_local_gate_unchanged():
+    # Stripping is transport-only: the gate still scores against the original payload.
+    routes = {("POST", "/companies/match"): _match_payload([("c1", 0.90, "digitaleformate")])}
+    client = _client(routes, min_match_score=0.70)
+    match = client.match_companies([{"company_name": "Digifom GmbH",
+                                     "email": "kontakt@digitaleformate.de"}])[0]
+    assert match["agreed_via"] == "email_domain"
 
 
 # --- search_contact cascade --------------------------------------------------

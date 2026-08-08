@@ -9,6 +9,7 @@ details and company retrieve cost 1 credit each.
 """
 from __future__ import annotations
 
+import re
 import time
 
 import requests
@@ -20,10 +21,43 @@ from ..textnorm import alnum, domain_root, normalize_name
 DEFAULT_BASE_URL = "https://api.leadfeeder.com/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _PHONE_EXCLUDE_TYPES = {"fax"}
+# Keys the gate uses locally that the match endpoint must never receive.
+_LOCAL_ONLY_MATCH_KEYS = {"alt_names"}
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class LeadfeederError(RuntimeError):
     pass
+
+
+# --- match payload sanitizing -------------------------------------------------
+
+def match_email(value: str | None) -> str | None:
+    """An address safe to send as the match payload's `email`, else None (= omit the key).
+
+    LeadFeeder answers `"email": ""` — and anything else that is not an address — with
+    `400 invalid_parameter: The 'email' field must contain a valid email address.`
+    Omitting the key is accepted. Verified live 2026-08-08.
+    """
+    v = (value or "").strip()
+    return v if _EMAIL_RE.match(v) else None
+
+
+def match_api_payload(payload: dict) -> dict:
+    """A per-company match payload as the endpoint accepts it.
+
+    Drops the local-only gate inputs (`alt_names` never leaves this process) and omits
+    `email` unless it is a real address. This runs at the transport boundary on purpose:
+    a 400 fails the WHOLE chunk, so ONE lead with a blank or garbage email would degrade
+    up to 200 companies to "no match" — which reads downstream as "LeadFeeder knew none
+    of them" (terminal `skip`), not as an API error. Callers must not be able to poison
+    a batch by passing `email or ''`.
+    """
+    out = {k: v for k, v in payload.items() if k not in _LOCAL_ONLY_MATCH_KEYS}
+    email = match_email(out.pop("email", None))
+    if email:
+        out["email"] = email
+    return out
 
 
 # --- pure flatteners ---------------------------------------------------------
@@ -311,7 +345,7 @@ class LeadfeederClient:
         results: list[dict | None] = []
         for i in range(0, len(payloads), self.match_batch):
             chunk = payloads[i:i + self.match_batch]
-            api_chunk = [{k: v for k, v in p.items() if k != "alt_names"} for p in chunk]
+            api_chunk = [match_api_payload(p) for p in chunk]
             try:
                 data = self.api_post(
                     "/companies/match", payload={"companies": api_chunk},
@@ -329,7 +363,7 @@ class LeadfeederClient:
 
     def match_company(self, company_name: str, email: str | None = None,
                       country: str | None = None, country_code: str | None = None) -> dict | None:
-        payload = {"company_name": company_name, "email": email or ""}
+        payload = {"company_name": company_name, "email": email}
         if country:
             payload["country"] = country
         if country_code:
