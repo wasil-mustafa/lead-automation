@@ -28,14 +28,10 @@ Code lives under `src/leadauto/`. Each module is independently runnable.
 3. **Lead enrichment + conversion** (`match.py`, `writeback.py`, `convert/`) — rule-based match
    vs existing Accounts/Contacts → write-back to `KN_*` fields → gated, match-aware LeadConvert.
 
-Cross-cutting: `config.py`, `logging.py`, `state.py` (file watermark), `qa_artifact.py`,
-`live_scope.py` (phased go-live gate), `pipeline/stage1_enrich.py` + `stage2_convert.py`,
-`cli.py`, `.github/workflows/`.
-
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 489 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 524 pass
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -55,7 +51,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 489 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 524 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
@@ -226,6 +222,16 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   explicit `"name": null` entries — drop falsy items before joining lists. Match `country`/
   `country_code` filters SUPPRESS good matches → we deliberately send only `company_name`/`email`
   (+ alt names); `country_code` must be uppercase if ever reintroduced.
+- **Never send a blank/garbage `email` in a match payload — one poisons the whole chunk.**
+  LF answers `"email": ""` (and any non-address) with `400 invalid_parameter: The 'email'
+  field must contain a valid email address.`; omitting the key is accepted. Because
+  `match_companies` degrades a failed chunk to `None`, a single such lead turned **up to
+  200** leads into `no_lf_match` → the rule engine's terminal `skip` — a batch-scale silent
+  wrong answer that looks exactly like "LF knew none of them". Found + fixed 2026-08-08
+  (probed live; `enrich.py` had shipped `email or ""` since the start). `client.match_email`
+  /`match_api_payload` now sanitize at the transport boundary, so no caller can reintroduce
+  it; the local name-agreement gate still scores against the ORIGINAL payload, so stripping
+  costs no matching signal.
 - **LF match acceptance:** `match_score` alone is untrustworthy (0.9+ on wrong companies, <0.2 on
   exact-name hits). The name-agreement gate (`client._name_agreement`/`_best_match`) accepts on
   score ≥ floor AND name-agree ≥ 85, or rescues on name-agree ≥ 90 (token_set on suffix-normalized
@@ -275,27 +281,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (demoted VAT/DBID/host/email-domain/fuzzy hits are review evidence only). `name_address` =
   normalized name + `BillingPostalCode` + `BillingCity`; `kununu_agree` splits on
   `matching.dedupe_name_agree_min` (85). QA Review sheet: `match_rule`/`match_evidence`.
-- **Skipped-task backtest (2026-07-08, Actions run 28937405531):** Salesforce **re-parents a
-  converted Lead's open Tasks onto the new Contact**, so Stage-1 "lead not found or already
-  converted" skips are contact-WhoId (`003…`) tasks — of 283: 47 traced to converted Leads
-  (`Lead.ConvertedContactId`, truth = `ConvertedAccountId`), 236 logged directly on existing
-  Contacts (no Lead ever; truth = `Contact.AccountId`). `python -m leadauto backtest-skipped`
-  (+ dispatch-only `backtest-skipped.yml`) replays them through the real enrich→match path,
-  spending LF **company** credits only (`enrich_leads(include_contacts=False)`). Results:
-  LF match 269/283 (95%); correct account 245/283 (87%: 235 link + 10 review-surfaced);
-  contact re-found 236/283. Of 24 misses: **14 = rule order** (truth sat in evidence as
-  `kununu_profile_uuid→…` but `name_address`/`name_vat` fired first on an org-duplicate;
-  humans follow the profile-UUID account — candidate fix: kununu-identity disagreement with
-  the name-rule target ⇒ review), 4 = engine linked the profile-carrying account while the
-  human chose another duplicate (defensible), 1 = **candidate-recall gap**:
-  `accounts_by_signals` matched `Name IN (…)` exactly, so normalized-equal spelling variants
-  ("GmbH & Co.KG." vs "Gmbh & Co. Kg") never entered the pool — CLOSED 2026-07-10: the
-  account query now also carries a prefix-anchored `Name LIKE` per name
-  (`textnorm.name_like_pattern`: normalized base tokens `%`-joined, skipped for bases
-  <4 chars); precision untouched (name rules re-compare normalized names). Caveat: population is
-  link-biased (accounts existed — that's why they were skipped); validates dedupe, NOT
-  create_new. Gotcha: ~280 leads in one match batch blow the **100k-char SOQL limit** in
-  `accounts_by_signals` — the backtest chunks `load_existing_records` in batches of 40.
+- **Skipped-task backtest (2026-07-08):** the rule engine scored **87% correct account on 283**
+  contact-reparented (link-biased) cases — validates dedupe, NOT `create_new`. Gotcha: ~280 leads
+  in one match batch blow the **100k-char SOQL limit** in `accounts_by_signals` — chunk
+  `load_existing_records` in batches of 40. Full record (population breakdown, per-miss analysis,
+  `backtest-skipped` mechanics): `docs/skipped-task-backtest-2026-07-08.md`.
 - **Shadow backtest:** every DRY stage-1 run appends predictions to committed
   `state/predictions.jsonl`; `python -m leadauto shadow-compare` (in the scheduled workflow,
   read-only) scores them against real human conversions into `state/shadow_results.jsonl` +
@@ -320,34 +310,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Open items (resume here)
 
-0. **Closed-task backlog conversion IN FLIGHT (2026-07-15):** converting the 626 leads behind
-   closed claimer/EBP tasks — create_new only (266 rows,
-   `review/approved_20260715_backlog_createnew.csv`), converted records owned by Rohdaten
-   Pool via `config/config.backlog.yaml` (new flags `include_enriched_leads`,
-   `record_predictions`; workflows take a `config` input; reader + stage-1 match phase now
-   chunk for the 100k-char SOQL limit). Dry run 29425910623 ✓ (266 create_new / 301 skip /
-   32 review / 27 link). Stage 1 LIVE write-back: DONE 2026-07-16, run 29499738399 green —
-   639 leads, 603 written, 36 row failures in the QA Failures sheet (29× DUPLICATES_DETECTED
-   duplicate rule, 6× "Private Mail" validation rule, 1× invalid LF email); the population
-   had grown since the dry run (272 create_new / 30 link / 32 review). Two earlier dispatches
-   (29430746090, 29497405506) crashed on the same write-back and were fixed by making
-   `update_bulk` survive partial bulk failures (that whole CLI bulk-job path — and its
-   FailedRecordDetailsError/`sf data bulk results` failure machinery — was RETIRED
-   2026-07-18 in favor of `SfClient.update_records`, one REST sObject-Collections PATCH
-   per ≤200 records with inline per-row errors; not yet live-proven, watch the next live
-   write-back). NOTE: the run advanced+committed the shared
-   watermark to 2026-07-16T12:03 (newest closed backlog task), shrinking the scheduled dry
-   runs' scan window. **Stage 2 backlog conversion DONE 2026-07-17:** dry run 29577236996
-   (230/266 pass preflight; 36 drops: 22 employee_category, 17 address_create_new, 1 dbid_xor,
-   1 freemail), then live run 29578167853 converted 115 but FAILED the other 115 — in every
-   10-lead batch exactly the first 5 converted and the last 5 failed: **batched SOAP
-   convertLead() runs one transaction per call and ~5 conversions' cascaded triggers/flows
-   exhaust a per-transaction governor limit** (the 3-lead July test sat under it). Per-lead
-   SOAP errors were being discarded (fixed in 37bce35 — now logged at ERROR). Retry run
-   29579163559 with `batch_size=3` converted the remaining 115/115 (0 failed/missing;
-   org-verified: 230/230 targets IsConverted, owner Rohdaten Pool, no Opportunities,
-   KN_Email2__c on 28+25 contacts). **Keep `--batch-size` ≤3 for live conversions.**
-   Remaining follow-up batches: 36 preflight drops + 32 review + 27 link rows.
+0. **Closed-task backlog conversion: DONE 2026-07-17** (230 leads converted; full record in
+   `docs/backlog-conversion-2026-07.md`). Two standing consequences: **keep `--batch-size` ≤3 for
+   live conversions** (batched SOAP `convertLead()` runs one transaction per call and ~5
+   conversions' cascaded triggers/flows exhaust a per-transaction governor limit), and the
+   remaining follow-up batches are 36 preflight drops + 32 review + 27 link rows.
 
 1. **Phased go-live: DONE 2026-07-18** (see Status GO-LIVE bullet) — `review_gate: false`
    committed, live-scope gate shipped, first automated E2E run converted 3/3. **The one
@@ -392,10 +359,5 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 ## Git
 
 Remote `github.com/wasil-mustafa/lead-automation` (private). **Default branch `master` is what the
-scheduler runs** — fixes must land there; no active feature branch. PR history (#1–#22: LF
-throttle/batching, Bulk-API 431 fix, CI login hardening, name-agreement gate, alt-names gate,
-country-drop, employee bins, LF null-crash fix, queue scope + schedule, rule engine + shadow,
-Task-status freshness, scheduled-gate fix, write-back gaps + Stage 2 preflight, own-company email
-exclusion, Stage 2 conversion hardening, pool-account enrichment + same-company dedup, terminal
-no_lf_match skip, name_corroborated + duplicate rules) lives in git log/GitHub — don't re-document
-it here.
+scheduler runs** — fixes must land there; no active feature branch. PR history lives in
+git log/GitHub — don't re-document it here.
