@@ -116,8 +116,14 @@ class SfClient:
         self._auth: dict | None = None
 
     def _run(self, cmd: str, check: bool = True) -> subprocess.CompletedProcess:
+        # encoding/errors are REQUIRED, not cosmetic: `text=True` alone decodes with the
+        # locale codec (cp1252 on Windows), which dies with UnicodeDecodeError as soon as a
+        # German company name appears in stdout or stderr. CI (Linux/UTF-8) never sees it;
+        # every local Windows run does. Hit live 2026-08-09 by Contact Presence Check's
+        # dept_pilot on a pool-account query.
         res = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, env=_ENV
+            cmd, shell=True, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=_ENV
         )
         if check and res.returncode != 0:
             raise SfError(f"sf command failed ({res.returncode}):\n{cmd}\n{res.stderr}")
