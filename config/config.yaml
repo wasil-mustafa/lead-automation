@@ -32,13 +32,19 @@ leadfeeder:
   find_details_timeout: 180  # seconds to wait for the async job before degrading
   find_details_poll: 10      # job-status poll interval (seconds)
 
-# kununu DWH profile feed: resolves a lead's profile to its assigned-company names,
-# which widen the LF name-agreement gate's evidence. Harmless without credentials
-# (KUNUNU_API_TOKEN or KUNUNU_API_USER/KUNUNU_API_PASSWORD env) — the gate then
-# behaves exactly as before.
+# kununu DWH profile feed: resolves a lead's profile to its assigned-company names
+# (which widen the LF name-agreement gate's evidence) and its profile_score (the
+# live-scope gate's input, so no feed => nothing converts). Harmless without
+# credentials (KUNUNU_API_PASSWORD) — the gate then behaves exactly as before.
+#
+# The ENDPOINT, the CACHE PATH and the PARSER come from `common.kununu_feed` in the
+# Main-Profile-Account repo (see src/leadauto/mpa_bridge.py). `url` and `cache_path`
+# are intentionally absent: both used to be hardcoded here to `profiles.jsonl`, which
+# has 404'd since kununu switched the feed to CSV on 2026-08-06, and cache_path put a
+# ~200 MB file inside the OneDrive-synced checkout. Override with the KUNUNU_FEED_URL
+# and KUNUNU_CACHE env vars, which `common` reads at call time.
 kununu_feed:
   enabled: true
-  cache_path: kununu_profiles.jsonl   # gitignored; ~530 MB when downloaded
   max_age_hours: 24                   # daily freshness (confirmed requirement)
 
 # Task Subjects the pipeline processes, mapped to their parser key.

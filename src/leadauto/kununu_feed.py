@@ -2,24 +2,33 @@
 
 A kununu *main profile* can have several legal entities ("assigned companies") under
 it. Their names are additional truthful identities for a lead and widen the LF
-name-agreement gate's evidence (see the 2026-07-03 spec). The bulk feed (~530 MB
-JSONL) is cached locally and refreshed daily; each run streams it ONCE, keeping only
-the batch's profiles. Every failure path returns an empty result — the pipeline
-degrades to pre-feed behavior, never blocks.
+name-agreement gate's evidence (see the 2026-07-03 spec). The profile's `profile_score`
+from the same records is the live-scope gate's input. The bulk feed (~200 MB) is cached
+locally and refreshed daily; each run streams it ONCE, keeping only the batch's
+profiles. Every failure path returns an empty result — the pipeline degrades to
+pre-feed behavior, never blocks, and the live-scope gate then fails CLOSED.
+
+THE ENDPOINT, THE CACHE PATH AND THE PARSER ARE NOT OWNED HERE (since 2026-08-17).
+They come from `common.kununu_feed` in the Main-Profile-Account repo, reached through
+`mpa_bridge`. This module keeps only what is Lead-Automation policy: the ProfileInfo
+projection, slug-keyed lookup, and degrade-never-block.
+
+Why: kununu switched the feed from JSONL to CSV on 2026-08-06. The private reader that
+used to live here requested a hardcoded `profiles.jsonl` that has 404'd ever since, and
+because every failure path here returns {}, eleven days of runs logged one WARNING and
+carried on with no alt names and no profile scores. `common.kununu_feed` had followed
+the switchover the same day and sniffs CSV vs JSONL from the file CONTENT. One reader,
+one endpoint, one cache — a second copy is what made a dead feed look like a quiet one.
 """
 from __future__ import annotations
 
-import base64
-import json
-import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import requests
-
 from .logging import get_logger
+from .mpa_bridge import MpaBridgeError, common_kununu_feed
 
 
 @dataclass
@@ -83,101 +92,90 @@ def lookup_profiles(feed_path: str | Path, uuids: set, slugs: set,
 
     Slug keys can be ambiguous across a dedup group (siemens, siemens1, ...): the
     first record wins, which is fine for alt-names — the group is one employer family.
+
+    Records come from `common.kununu_feed.iter_feed_records`, which sniffs CSV vs JSONL
+    from the file content and normalises both into the same record shape — so
+    `profile_score` and `assigned_companies` resolve identically on either format. It
+    yields the uuid already lowercased, so UUIDs are compared lowercased on both sides
+    (Salesforce and the feed disagree on casing, and an exact compare silently drops
+    the match).
+
+    It streams EVERY record rather than pre-filtering on uuid, because a lead may be
+    keyed only by URL slug and the reader filters on uuid alone.
     """
     log = logger or get_logger("kununu_feed")
-    uuids = {u for u in uuids if u}
+    uuids = {u.strip().lower() for u in uuids if u and str(u).strip()}
     slugs = {s for s in slugs if s}
     if not uuids and not slugs:
         return {}
     found: dict[str, ProfileInfo] = {}
-    bad = 0
     try:
-        with open(feed_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    bad += 1
-                    continue
-                uuid = d.get("profile_uuid")
-                slug = base_slug(d.get("profile_url"))
-                if uuid not in uuids and slug not in slugs:
-                    continue
-                companies = _company_names(d)
-                if not companies:
-                    log.debug(
-                        "kununu feed: profile %s matched but no assigned-company names "
-                        "found (unconfirmed feed field name? see _company_names)",
-                        uuid or slug,
-                    )
-                info = ProfileInfo(
-                    name=(d.get("profile_name") or "").strip(),
-                    companies=companies,
-                    city=d.get("profile_city"),
-                    country_code=d.get("profile_country_code"),
-                    industry=d.get("profile_industry_name_de"),
-                    score=_profile_score(d),
-                )
-                if uuid:
-                    found.setdefault(uuid, info)
-                if slug:
-                    found.setdefault(slug, info)
-    except OSError as err:
+        feed_mod = common_kununu_feed()
+        for uuid, d in feed_mod.iter_feed_records(str(feed_path)):
+            slug = base_slug(d.get("profile_url"))
+            if uuid not in uuids and slug not in slugs:
+                continue
+            companies = _company_names(d)
+            if not companies:
+                log.debug("kununu feed: profile %s matched but carries no assigned-company "
+                          "names", uuid or slug)
+            info = ProfileInfo(
+                name=(d.get("profile_name") or "").strip(),
+                companies=companies,
+                city=d.get("profile_city"),
+                country_code=d.get("profile_country_code"),
+                industry=d.get("profile_industry_name_de"),
+                score=_profile_score(d),
+            )
+            if uuid:
+                found.setdefault(uuid, info)
+            if slug:
+                found.setdefault(slug, info)
+    except (OSError, MpaBridgeError) as err:
         log.warning("kununu feed unreadable (%s); profile lookup skipped", err)
         return {}
-    if bad:
-        log.warning("kununu feed: skipped %d malformed line(s)", bad)
     return found
 
 
-def _auth_headers(settings) -> dict | None:
-    if settings.kununu_api_token:
-        return {"Authorization": f"Bearer {settings.kununu_api_token}"}
-    if settings.kununu_api_password is not None:
-        cred = base64.b64encode(
-            f"{settings.kununu_api_user or ''}:{settings.kununu_api_password}".encode()
-        ).decode()
-        return {"Authorization": f"Basic {cred}"}
-    return None
+def feed_cache_path(settings, logger=None) -> Path:
+    """Where the feed is cached. `kununu_feed.cache_path` in config.yaml wins when set;
+    otherwise `common.kununu_feed` decides (KUNUNU_CACHE, else a filename derived from
+    the feed URL, so a CSV feed can never be read out of a cache written as JSONL).
 
-
-def _download(url: str, dest: Path, headers: dict, log) -> None:
-    log.info("Downloading kununu profile feed -> %s", dest)
-    tmp = Path(f"{dest}.part")
-    try:
-        with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
-            resp.raise_for_status()
-            with open(tmp, "wb") as out:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    out.write(chunk)
-        os.replace(tmp, dest)
-    finally:
-        tmp.unlink(missing_ok=True)  # no-op after successful os.replace
+    Config no longer carries a default, because the old one (`kununu_profiles.jsonl` at
+    the repo root) named a format the endpoint stopped serving AND put a ~200 MB file
+    inside the OneDrive-synced checkout.
+    """
+    configured = settings.kununu_feed_cache_path
+    if configured is not None:
+        return configured
+    return Path(common_kununu_feed()._kununu_cache_path())
 
 
 def ensure_feed(settings, logger=None) -> Path | None:
     """Cached feed path, refreshed when older than max_age_hours. None => no feed
-    available this run (missing credentials / failed download with no cache)."""
+    available this run (missing credentials / failed download with no cache).
+
+    The URL, the auth header and the atomic .part download all belong to
+    `common.kununu_feed.download_feed`; only the staleness policy is decided here.
+    """
     log = logger or get_logger("kununu_feed")
-    path = settings.kununu_feed_cache_path
+    try:
+        feed_mod = common_kununu_feed()
+        path = feed_cache_path(settings, logger=log)
+    except MpaBridgeError as err:
+        log.warning("kununu feed unavailable (%s); profile lookup skipped", err)
+        return None
     max_age = settings.kununu_feed_max_age_hours * 3600
     if path.exists() and (time.time() - path.stat().st_mtime) < max_age:
         return path
-    headers = _auth_headers(settings)
-    if headers is None:
-        if path.exists():
-            log.warning("kununu feed credentials missing; using stale cache %s", path)
-            return path
-        log.warning("kununu feed credentials missing and no cache; profile lookup skipped")
-        return None
+    log.info("Downloading kununu profile feed -> %s", path)
     try:
-        _download(settings.kununu_feed_url, path, headers, log)
-    except requests.exceptions.RequestException as err:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        feed_mod.download_feed(str(path))
+    except Exception as err:  # RuntimeError (no creds), URLError, OSError
         if path.exists():
-            log.warning("kununu feed download failed (%s); using stale cache", err)
+            log.warning("kununu feed download failed (%s); using stale cache %s", err, path)
             return path
         log.warning("kununu feed download failed (%s) and no cache; lookup skipped", err)
         return None
@@ -200,5 +198,12 @@ def load_profiles_for_leads(extracteds, settings, logger=None) -> dict[str, Prof
     except Exception as err:  # never let feed parsing sink the pipeline
         log.warning("kununu feed: profile lookup failed (%s); skipped", err)
         return {}
-    log.info("kununu feed: resolved %d of %d profile key(s)", len(found), len(uuids | slugs))
+    # lookup_profiles keys UUIDs lowercased (the feed and Salesforce disagree on casing);
+    # alias each caller's ORIGINAL spelling back in so `profiles.get(lead.uuid)` still hits.
+    for original in uuids:
+        info = found.get(str(original).strip().lower())
+        if info is not None:
+            found.setdefault(original, info)
+    log.info("kununu feed: resolved %d of %d profile key(s)",
+             len({id(v) for v in found.values()}), len(uuids | slugs))
     return found

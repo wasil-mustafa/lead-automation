@@ -52,7 +52,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 546 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 552 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
@@ -286,7 +286,25 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (single token ≤3 chars, or 4-char uppercase) and neither lead-email-domain ↔ company
   website/email domain nor VAT equality corroborates — acronym name agreement is tautological
   since LF searched on the acronym we sent.
-- **kununu profile feed** (`kununu_feed.py`): daily-cached DWH bulk file (551 MB;
+- **THE FEED ENDPOINT, CACHE PATH AND PARSER ARE NOT OWNED HERE (since 2026-08-17).** They come
+  from `common.kununu_feed` in the Main-Profile-Account repo, reached through
+  `src/leadauto/mpa_bridge.py` (`MPA_ROOT` env, else the sibling `../Main-Profile-Account`;
+  raises `MpaBridgeError`, never falls back to a local copy). **kununu switched the feed from
+  JSONL to CSV on 2026-08-06 and the private reader here never followed** — it requested a
+  hardcoded `profiles.jsonl` that has 404'd ever since, and because every failure path returns
+  `{}` the pipeline logged ONE warning and ran eleven days with no alt names and, worse, **no
+  `profile_score`, so the live-scope gate failed closed and nothing could have converted even
+  with `dry_run: false`**. `common` had followed the switchover the same day and sniffs CSV vs
+  JSONL from the file CONTENT. Two consequences to keep: `url` and `cache_path` are **absent**
+  from `config.yaml` on purpose (a default is how this drifts again — override with
+  `KUNUNU_FEED_URL` / `KUNUNU_CACHE`, which `common` reads at call time), and the old
+  `cache_path` default also wrote ~200 MB into the OneDrive-synced checkout. **UUID lookup is
+  now case-insensitive** — the feed lowercases, Salesforce does not, and the old exact compare
+  silently dropped those matches.
+  **CI has no Main-Profile-Account checkout, so the feed is still unavailable there** (same as
+  the 404 state, no regression): `stage1.yml` needs a checkout step plus a PAT for the private
+  repo, and its `actions/cache` block still names `kununu_profiles.jsonl`.
+- **kununu profile feed** (`kununu_feed.py`): daily-cached DWH bulk file (~200 MB CSV;
   `assigned_companies` = list of `{company_uuid, company_name}`) supplies alt names AND
   `profile_score` (stringly typed; missing/garbage → None), the live-scope gate's input —
   a feed outage therefore fails the gate closed (no scores ⇒ nothing converts, safe); joins on

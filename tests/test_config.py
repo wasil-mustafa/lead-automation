@@ -33,9 +33,13 @@ def test_leadfeeder_throttle_and_batch_defaults():
 def test_kununu_feed_settings_from_config_yaml():
     s = Settings.load()  # config.yaml enables the feed with defaults
     assert s.kununu_feed_enabled is True
-    assert s.kununu_feed_cache_path.name == "kununu_profiles.jsonl"
     assert s.kununu_feed_max_age_hours == 24
-    assert s.kununu_feed_url.startswith("https://api.data.kununu.com/")
+    # The endpoint and the cache path are NOT configured here any more — they belong to
+    # `common.kununu_feed`. Both used to be hardcoded to `profiles.jsonl`, which has 404'd
+    # since kununu switched the feed to CSV on 2026-08-06, and every run degraded to "no
+    # profiles" behind one WARNING. A default here is how that drifts again.
+    assert s.kununu_feed_cache_path is None
+    assert s.kununu_feed_url is None
 
 
 def test_kununu_feed_defaults_when_section_missing():

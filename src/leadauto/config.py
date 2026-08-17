@@ -120,18 +120,31 @@ class Settings:
         return bool(self.raw.get("kununu_feed", {}).get("enabled", False))
 
     @property
-    def kununu_feed_cache_path(self) -> Path:
-        rel = self.raw.get("kununu_feed", {}).get("cache_path", "kununu_profiles.jsonl")
-        return REPO_ROOT / rel
+    def kununu_feed_cache_path(self) -> Path | None:
+        """Explicit cache-path override, or None to let `common.kununu_feed` decide.
+
+        There is deliberately NO default any more. The old one, `kununu_profiles.jsonl`
+        at the repo root, was wrong twice over: it named JSONL after kununu switched the
+        feed to CSV on 2026-08-06, and it put a ~200 MB file inside the OneDrive-synced
+        checkout. `common` derives the filename from the feed URL and honours KUNUNU_CACHE.
+        """
+        rel = self.raw.get("kununu_feed", {}).get("cache_path")
+        return REPO_ROOT / rel if rel else None
 
     @property
     def kununu_feed_max_age_hours(self) -> int:
         return int(self.raw.get("kununu_feed", {}).get("max_age_hours", 24))
 
     @property
-    def kununu_feed_url(self) -> str:
-        return self.raw.get("kununu_feed", {}).get(
-            "url", "https://api.data.kununu.com/v1/feeds/data-management/profiles.jsonl")
+    def kununu_feed_url(self) -> str | None:
+        """Explicit endpoint override, or None to use `common.kununu_feed`'s.
+
+        The old hardcoded default pointed at `profiles.jsonl`, which has returned 404
+        since the 2026-08-06 switchover to CSV — for eleven days every run degraded to
+        "no profiles" behind a single WARNING. Override the endpoint with the
+        KUNUNU_FEED_URL env var, which `common` reads at call time, rather than here.
+        """
+        return self.raw.get("kununu_feed", {}).get("url")
 
     # --- Task routing ---
     @property

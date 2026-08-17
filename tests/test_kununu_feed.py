@@ -134,22 +134,48 @@ def test_lookup_score_missing_empty_or_garbage_is_none(tmp_path):
 
 # --- ensure_feed + load_profiles_for_leads -----------------------------------
 
-def _settings(tmp_path, token="tok", enabled=True, max_age=24):
+def _settings(tmp_path, token="tok", enabled=True, max_age=24, cache="profiles.jsonl"):
     return SimpleNamespace(
         kununu_feed_enabled=enabled,
-        kununu_feed_cache_path=tmp_path / "profiles.jsonl",
+        kununu_feed_cache_path=(tmp_path / cache) if cache else None,
         kununu_feed_max_age_hours=max_age,
-        kununu_feed_url="https://feed.example/profiles.jsonl",
+        kununu_feed_url=None,
         kununu_api_token=token, kununu_api_user=None, kununu_api_password=None,
     )
+
+
+class FakeCommonFeed:
+    """Stand-in for `common.kununu_feed` — the ONE module that owns the endpoint,
+    the cache location and the CSV/JSONL parser (see leadauto/mpa_bridge.py)."""
+
+    def __init__(self, cache_path="/somewhere/profiles.csv", fail=None):
+        self._cache_path = str(cache_path)
+        self.fail = fail
+        self.downloads = []
+
+    def _kununu_cache_path(self):
+        return self._cache_path
+
+    def download_feed(self, dest):
+        self.downloads.append(dest)
+        if self.fail:
+            raise self.fail
+
+    def iter_feed_records(self, path, needed=None):
+        return iter(())
+
+
+def _patch_common(monkeypatch, fake):
+    monkeypatch.setattr(kununu_feed, "common_kununu_feed", lambda: fake)
+    return fake
 
 
 def test_ensure_feed_fresh_cache_skips_download(tmp_path, monkeypatch):
     s = _settings(tmp_path)
     s.kununu_feed_cache_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(kununu_feed, "_download",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("downloaded")))
+    fake = _patch_common(monkeypatch, FakeCommonFeed())
     assert ensure_feed(s) == s.kununu_feed_cache_path
+    assert fake.downloads == []
 
 
 def test_ensure_feed_stale_cache_triggers_download(tmp_path, monkeypatch):
@@ -158,10 +184,9 @@ def test_ensure_feed_stale_cache_triggers_download(tmp_path, monkeypatch):
     old = time.time() - 25 * 3600
     import os
     os.utime(s.kununu_feed_cache_path, (old, old))
-    called = {}
-    monkeypatch.setattr(kununu_feed, "_download", lambda url, dest, hdr, log: called.update(url=url))
+    fake = _patch_common(monkeypatch, FakeCommonFeed())
     assert ensure_feed(s) == s.kununu_feed_cache_path
-    assert called["url"] == s.kununu_feed_url
+    assert fake.downloads == [str(s.kununu_feed_cache_path)]
 
 
 def test_ensure_feed_download_failure_falls_back_to_stale(tmp_path, monkeypatch):
@@ -170,14 +195,58 @@ def test_ensure_feed_download_failure_falls_back_to_stale(tmp_path, monkeypatch)
     old = time.time() - 25 * 3600
     import os
     os.utime(s.kununu_feed_cache_path, (old, old))
-    def boom(*a, **k):
-        raise requests.exceptions.ConnectionError("down")
-    monkeypatch.setattr(kununu_feed, "_download", boom)
+    _patch_common(monkeypatch, FakeCommonFeed(fail=OSError("down")))
     assert ensure_feed(s) == s.kununu_feed_cache_path  # stale beats nothing
 
 
-def test_ensure_feed_no_credentials_no_cache_returns_none(tmp_path):
+def test_ensure_feed_no_credentials_no_cache_returns_none(tmp_path, monkeypatch):
+    # common.download_feed raises RuntimeError when KUNUNU_API_PASSWORD is unset.
+    _patch_common(monkeypatch, FakeCommonFeed(fail=RuntimeError("no kununu credentials")))
     assert ensure_feed(_settings(tmp_path, token=None)) is None
+
+
+def test_cache_path_defers_to_common_when_config_has_none(tmp_path, monkeypatch):
+    """No config override => `common` decides, so the filename follows the feed URL and
+    KUNUNU_CACHE is honoured. The old hardcoded default named a format the endpoint
+    stopped serving AND wrote ~200 MB into the OneDrive-synced checkout."""
+    fake = _patch_common(monkeypatch, FakeCommonFeed(cache_path=tmp_path / "profiles.csv"))
+    s = _settings(tmp_path, cache=None)
+    assert kununu_feed.feed_cache_path(s) == tmp_path / "profiles.csv"
+    assert s.kununu_feed_cache_path is None
+    ensure_feed(s)
+    assert fake.downloads == [str(tmp_path / "profiles.csv")]
+
+
+def test_cache_path_config_override_wins(tmp_path, monkeypatch):
+    _patch_common(monkeypatch, FakeCommonFeed(cache_path=tmp_path / "from_common.csv"))
+    s = _settings(tmp_path, cache="explicit.csv")
+    assert kununu_feed.feed_cache_path(s) == tmp_path / "explicit.csv"
+
+
+def test_missing_bridge_degrades_instead_of_crashing(tmp_path, monkeypatch):
+    """No Main-Profile-Account checkout => no feed, a WARNING, and the pipeline carries
+    on (the live-scope gate then fails closed). It must NOT fall back to a local parser."""
+    def boom():
+        raise kununu_feed.MpaBridgeError("Main-Profile-Account not found")
+    monkeypatch.setattr(kununu_feed, "common_kununu_feed", boom)
+    assert ensure_feed(_settings(tmp_path)) is None
+    lead = ExtractedLead(lead_id="1", task_id="T1", task_type="claimer",
+                         kununu_profile_uuid="u1")
+    assert load_profiles_for_leads([lead], _settings(tmp_path)) == {}
+
+
+def test_uuid_lookup_is_case_insensitive(tmp_path):
+    """Salesforce and the feed disagree on UUID casing; an exact compare silently
+    dropped the match. The caller's ORIGINAL spelling still resolves."""
+    s = _settings(tmp_path)
+    s.kununu_feed_cache_path.write_text(
+        json.dumps(_record(uuid="abc-DEF", name="Acme", companies=["Acme GmbH"])),
+        encoding="utf-8")
+    lead = ExtractedLead(lead_id="1", task_id="T1", task_type="claimer",
+                         kununu_profile_uuid="ABC-def")
+    found = load_profiles_for_leads([lead], s)
+    assert found["ABC-def"].companies == ["Acme GmbH"]
+    assert found["abc-def"].name == "Acme"
 
 
 def test_load_profiles_for_leads_short_circuits_without_keys(tmp_path, monkeypatch):
@@ -206,23 +275,11 @@ def test_load_profiles_for_leads_resolves_uuid_and_slug(tmp_path):
     assert found["acme"].name == "Acme"
 
 
-def test_download_failure_cleans_up_part_file(tmp_path, monkeypatch):
-    s = _settings(tmp_path)
-
-    class FakeResp:
-        def raise_for_status(self):
-            pass
-        def iter_content(self, chunk_size):
-            yield b"data"
-            raise requests.exceptions.ChunkedEncodingError("dropped")
-        def __enter__(self):
-            return self
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(kununu_feed.requests, "get", lambda *a, **k: FakeResp())
-    assert ensure_feed(s) is None  # no pre-existing cache to fall back to
-    assert not (tmp_path / "profiles.jsonl.part").exists()
+def test_download_failure_without_cache_returns_none(tmp_path, monkeypatch):
+    # The atomic .part temp file is `common.download_feed`'s concern now, and pinned by
+    # Main-Profile-Account's own tests; here only the degradation contract matters.
+    _patch_common(monkeypatch, FakeCommonFeed(fail=OSError("dropped")))
+    assert ensure_feed(_settings(tmp_path)) is None  # no pre-existing cache to fall back to
 
 
 def test_load_profiles_for_leads_swallows_lookup_errors(tmp_path, monkeypatch):
