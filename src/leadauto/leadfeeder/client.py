@@ -27,6 +27,12 @@ RETRYABLE_TRANSPORT = (
     requests.exceptions.Timeout,
     requests.exceptions.ChunkedEncodingError,
 )
+# (connect, read) seconds. WITHOUT this `requests` waits forever, so a stalled — as opposed
+# to dropped — socket hangs the process and RETRYABLE_TRANSPORT's `Timeout` arm is dead code:
+# nothing raises it. Measured 2026-08-17: a backtest sat 26 minutes on one established
+# connection to api.leadfeeder.com at 0% CPU before it was killed by hand. The read budget is
+# generous because `/companies/match` with 200 companies is genuinely slow.
+DEFAULT_TIMEOUT = (10, 180)
 _PHONE_EXCLUDE_TYPES = {"fax"}
 # Keys the gate uses locally that the match endpoint must never receive.
 _LOCAL_ONLY_MATCH_KEYS = {"alt_names"}
@@ -176,6 +182,7 @@ class LeadfeederClient:
         max_requests_per_min: int = 95,
         max_retries: int = 4,
         backoff_base: float = 1.0,
+        timeout=DEFAULT_TIMEOUT,
         sleep_fn=time.sleep,
         clock=time.monotonic,
         logger=None,
@@ -192,6 +199,7 @@ class LeadfeederClient:
         self.match_batch = match_batch
         self.max_retries = max_retries
         self.backoff_base = backoff_base
+        self.timeout = timeout
         self._sleep_fn = sleep_fn
         self._clock = clock
         self._min_interval = 60.0 / max_requests_per_min if max_requests_per_min else 0.0
@@ -227,10 +235,11 @@ class LeadfeederClient:
             self._throttle()
             try:
                 if kind == "GET":
-                    resp = self.session.get(url, headers=self._headers(), params=params)
+                    resp = self.session.get(url, headers=self._headers(), params=params,
+                                            timeout=self.timeout)
                 else:
                     resp = self.session.post(url, headers=self._headers(), json=json,
-                                             params=params)
+                                             params=params, timeout=self.timeout)
             except RETRYABLE_TRANSPORT as exc:
                 # A dropped socket raises here instead of returning a response, so before
                 # 2026-08-17 it bypassed the status retry below entirely and killed the run

@@ -40,11 +40,14 @@ class FakeSession:
     def __init__(self, routes):
         self._routes = routes
         self.calls = []  # (method, url, params, body)
+        self.timeouts = []  # the `timeout=` every call was issued with
 
-    def get(self, url, headers=None, params=None):
+    def get(self, url, headers=None, params=None, timeout=None):
+        self.timeouts.append(timeout)
         return self._respond("GET", url, params, None)
 
-    def post(self, url, headers=None, json=None, params=None):
+    def post(self, url, headers=None, json=None, params=None, timeout=None):
+        self.timeouts.append(timeout)
         return self._respond("POST", url, params, json)
 
     def _respond(self, method, url, params, body):
@@ -574,6 +577,24 @@ def test_retries_on_500_without_retry_after_header():
     routes = {("GET", "/x"): [FakeResponse({}, status=500), FakeResponse({"data": []})]}
     client = _client(routes)
     assert client.api_get("/x") == {"data": []}
+
+
+def test_every_request_carries_a_timeout():
+    """Without one, requests waits forever: a stalled socket hangs the whole run and
+    RETRYABLE_TRANSPORT's Timeout arm can never fire. Measured 2026-08-17 — a backtest
+    sat 26 minutes on one open connection to api.leadfeeder.com at 0% CPU."""
+    from leadauto.leadfeeder.client import DEFAULT_TIMEOUT
+    client = _client({("GET", "/x"): {"data": []}, ("POST", "/y"): {"data": []}})
+    client.api_get("/x")
+    client.api_post("/y", payload={})
+    assert client.session.timeouts == [DEFAULT_TIMEOUT, DEFAULT_TIMEOUT]
+    assert all(t is not None for t in client.session.timeouts)
+
+
+def test_timeout_is_overridable():
+    client = _client({("GET", "/x"): {"data": []}}, timeout=7)
+    client.api_get("/x")
+    assert client.session.timeouts == [7]
 
 
 # --- transport-level retry (dropped socket, no response object at all) --------

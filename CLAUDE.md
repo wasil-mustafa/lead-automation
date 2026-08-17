@@ -270,6 +270,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   exactly as before. Found by `Contact Presence Check`, whose `enrich_pilot.get_with_retry` is
   the prior art — a `WinError 10053` killed a 50-minute run there AFTER 485 retrieve credits
   were spent, with 9 more drops recovered in the same run.
+  **Half of that fix was dead on arrival without `DEFAULT_TIMEOUT = (10, 180)`** (same day,
+  measured): `requests` with no `timeout=` waits forever, so nothing ever raised `Timeout` and
+  a STALLED socket — as opposed to a dropped one — hung the process instead of retrying. A
+  backtest sat 26 minutes on one established connection to `api.leadfeeder.com` at 0% CPU
+  before it was killed by hand; the read budget is 180 s because a 200-company
+  `/companies/match` is genuinely slow. `SfClient` has had `_HTTP_TIMEOUT_S = 120` all along —
+  the LF client was the outlier. It earned its keep on the next run, where a
+  `POST /companies/<id>/lists` timed out, logged, was not retried, and the run continued.
 - **Post-retrieve match sanity gate** (`enrich._match_sanity_reason`, 2026-07-09, from the live
   "SNG"→France miss): after the phase-2 company retrieve (match responses carry no country/domain),
   an accepted match is degraded to unmatched (→ terminal skip; reason in `EnrichedLead.lf_rejected`
