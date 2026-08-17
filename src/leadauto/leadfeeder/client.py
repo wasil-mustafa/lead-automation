@@ -20,6 +20,13 @@ from ..textnorm import alnum, domain_root, normalize_name
 
 DEFAULT_BASE_URL = "https://api.leadfeeder.com/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# Failures that never produce a response object, so the status check below cannot see them.
+# `ConnectTimeout` subclasses both ConnectionError and Timeout; listing both is harmless.
+RETRYABLE_TRANSPORT = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
 _PHONE_EXCLUDE_TYPES = {"fax"}
 # Keys the gate uses locally that the match endpoint must never receive.
 _LOCAL_ONLY_MATCH_KEYS = {"alt_names"}
@@ -218,10 +225,34 @@ class LeadfeederClient:
         url = f"{self.base_url}{path}"
         for attempt in range(self.max_retries + 1):
             self._throttle()
-            if kind == "GET":
-                resp = self.session.get(url, headers=self._headers(), params=params)
-            else:
-                resp = self.session.post(url, headers=self._headers(), json=json, params=params)
+            try:
+                if kind == "GET":
+                    resp = self.session.get(url, headers=self._headers(), params=params)
+                else:
+                    resp = self.session.post(url, headers=self._headers(), json=json,
+                                             params=params)
+            except RETRYABLE_TRANSPORT as exc:
+                # A dropped socket raises here instead of returning a response, so before
+                # 2026-08-17 it bypassed the status retry below entirely and killed the run
+                # mid-sweep. Ported from `Contact Presence Check`'s `enrich_pilot.get_with_retry`
+                # (2026-08-11), where a `WinError 10053` ended a 50-minute run AFTER 485
+                # retrieve credits were spent. GET ONLY, deliberately: POST
+                # `/contacts/find-contact-data-jobs` is not idempotent and a blind re-POST
+                # would bill the credits twice.
+                if kind != "GET":
+                    self.log.warning("LeadFeeder POST %s transport error (%s); not retried "
+                                     "(a POST may have been applied server-side)",
+                                     path, type(exc).__name__)
+                    raise
+                if attempt >= self.max_retries:
+                    self.log.warning("LeadFeeder GET %s transport error (%s); retries exhausted",
+                                     path, type(exc).__name__)
+                    raise
+                delay = self._retry_delay(None, attempt)
+                self.log.warning("LeadFeeder GET %s transport error (%s); retry %d/%d in %.1fs",
+                                 path, type(exc).__name__, attempt + 1, self.max_retries, delay)
+                self._sleep_fn(delay)
+                continue
             status = getattr(resp, "status_code", 200)
             if status in RETRYABLE_STATUS and attempt < self.max_retries:
                 delay = self._retry_delay(resp, attempt)
@@ -387,13 +418,6 @@ class LeadfeederClient:
             return self.api_post("/contacts/search", payload=payload,
                                  params={"account_id": account_id, "page[size]": 5}).get("data", [])
 
-        # Attempt 1: full name as a single term
-        contacts = _post([name])
-
-        # Attempt 2: split into separate terms
-        if not contacts and len(parts) > 1:
-            contacts = _post(parts)
-
         # A hyphenated name part also counts as matched via one of its segments:
         # the lead may carry "Kothe-Spies" while LF stores just "Kothe" (or vice versa).
         def _segments(part):
@@ -405,14 +429,53 @@ class LeadfeederClient:
             p = part.lower()
             return p in full or any(s.lower() in full for s in _segments(part))
 
-        def _first_name_ok(c):
-            full = (c.get("attributes", {}).get("full_name", "") or "").lower()
-            return parts[0].lower() in full
+        def _all_parts_ok(c):
+            """The searched name's FIRST and LAST parts both appear in the returned name.
 
-        # Attempt 3: last name only (then its hyphen segments), verify first name locally
+            Attempts 1 and 2 originally returned `contacts[0]` UNVERIFIED, which is wrong
+            for two compounding reasons (measured 2026-08-10 over a 100-contact sample:
+            13 of 64 hits, 20%, were a different person):
+
+              * `/contacts/search` ORs multiple `search_terms`, so attempt 2's
+                ["Christian", "Etscher"] matches anyone sharing EITHER name — it returned
+                "Christina Zepf". The API doc states the OR; this is not a quirk.
+              * taking [0] ignored the other candidates on the page, and the ordering is
+                not stable — replaying "Peter Schmidt" returned "Tim Schmidt" where the
+                first run had returned "Roland Schmid".
+
+            Filtering (rather than checking [0] and giving up) also repairs the cascade:
+            an attempt whose candidates are all wrong now leaves `contacts` empty, so the
+            `if not contacts` guards below correctly fall through to attempts 3 and 4
+            instead of stopping on a stranger.
+
+            All four attempts apply this same test. Attempt 3 used to check only the FIRST
+            name, on the assumption that searching the surname server-side had already
+            constrained the surname — but `search_terms` is fuzzy (and matches the title
+            field too), so it does not. Measured live: searching "Hübner" returns "Markus
+            Huber", and "Weidemann" returns "Paul Weimann". Under the old check a lead
+            named "Paul Weidemann" would therefore have been accepted as "Paul Weimann".
+
+            MIDDLE parts are ignored on purpose: the two systems disagree about them
+            constantly, in both directions. Requiring every part cost a real match on
+            2026-08-10 — Salesforce "Peter Sven Mitterhuemer" against LF "Peter
+            Mitterhuemer" — while requiring only the first and last names accepts that and
+            still rejects every wrong-person case above, since those differ on a first or
+            last name, never on a middle one.
+            """
+            full = (c.get("attributes", {}).get("full_name", "") or "").lower()
+            return _part_in(parts[0], full) and _part_in(parts[-1], full)
+
+        # Attempt 1: full name as a single term
+        contacts = [c for c in _post([name]) if _all_parts_ok(c)]
+
+        # Attempt 2: split into separate terms
+        if not contacts and len(parts) > 1:
+            contacts = [c for c in _post(parts) if _all_parts_ok(c)]
+
+        # Attempt 3: last name only (then its hyphen segments), verify the name locally
         if not contacts and len(parts) > 1:
             for term in [parts[-1]] + _segments(parts[-1]):
-                contacts = [c for c in _post([term]) if _first_name_ok(c)]
+                contacts = [c for c in _post([term]) if _all_parts_ok(c)]
                 if contacts:
                     break
 
@@ -422,8 +485,7 @@ class LeadfeederClient:
                 resp = self.api_post("/contacts/search", payload={"company_ids": [company_id]},
                                      params={"account_id": account_id, "page[size]": 50})
                 for c in resp.get("data", []):
-                    full = (c.get("attributes", {}).get("full_name", "") or "").lower()
-                    if all(_part_in(p, full) for p in parts):
+                    if _all_parts_ok(c):
                         contacts = [c]
                         break
             except requests.exceptions.HTTPError:

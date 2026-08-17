@@ -33,7 +33,9 @@ class FakeResponse:
 
 class FakeSession:
     """Routes by (method, url-fragment). Values may be a payload dict, a queue (list,
-    popped per call), or a callable(params, body)->payload. Longest fragment wins."""
+    popped per call), or a callable(params, body)->payload. Longest fragment wins.
+    An Exception instance (in a queue or standalone) is RAISED instead of returned —
+    that is how a transport failure, which never yields a response, is modelled."""
 
     def __init__(self, routes):
         self._routes = routes
@@ -58,6 +60,8 @@ class FakeSession:
             value = value(params, body)
         elif isinstance(value, list):
             value = value.pop(0) if value else {"data": []}
+        if isinstance(value, BaseException):
+            raise value
         return value if isinstance(value, FakeResponse) else FakeResponse(value)
 
     def posts_to(self, fragment):
@@ -389,6 +393,87 @@ def test_search_contact_returns_none_when_all_attempts_empty():
     assert client.search_contact("Jane Doe", "c1") is None
 
 
+def _hit(cid, full_name):
+    return {"id": cid, "attributes": {"full_name": full_name}}
+
+
+# Attempts 1 and 2 used to return contacts[0] unverified. Measured 2026-08-10 on a
+# 100-contact sample: 13 of 64 hits (20%) were a DIFFERENT person. Every name pair below
+# is a real one from that run. This matters beyond a wrong label — enrich.py feeds the hit
+# to retrieve_contacts(), which spends a credit and writes that person's email/phone onto
+# a Salesforce Lead.
+@pytest.mark.parametrize("searched,lf_name", [
+    ("Christian Etscher", "Christina Zepf"),      # both names differ
+    ("Grit Weidemann", "Paul Weimann"),
+    ("Karen Dabow", "Karan Bruellau"),
+    ("Peter Schmidt", "Roland Schmid"),           # surname one edit apart
+    ("Julia Eberhardt", "Georg Eberhardt"),       # surname exact, first name differs
+    ("Verena Schepperheyn", "Ann-Katrin Schepperheyn"),
+    ("Barbara Meierhoefer", "Barbara Ehrmann"),   # first name exact, surname differs
+    ("Marie Amberg", "Marie Ulm"),
+    ("Katharina Huebner", "Katharina Landes"),
+    ("Sabrina Friedrichs", "Sabrina Heidler"),
+])
+def test_search_contact_rejects_a_different_person(searched, lf_name):
+    # Every attempt returns the same wrong person; none may be accepted.
+    routes = {("POST", "/contacts/search"): {"data": [_hit("k1", lf_name)]}}
+    client = _client(routes)
+    assert client.search_contact(searched, "c1") is None
+
+
+def test_search_contact_scans_the_page_instead_of_taking_the_first_hit():
+    # The OR'd search returns namesakes first; the real person is further down the page.
+    routes = {("POST", "/contacts/search"):
+              {"data": [_hit("k1", "Christian Wiesinger"),
+                        _hit("k2", "Christina Zepf"),
+                        _hit("k3", "Christian Etscher")]}}
+    client = _client(routes)
+    assert client.search_contact("Christian Etscher", "c1")["contact_id"] == "k3"
+
+
+def test_a_wrong_hit_does_not_short_circuit_the_later_attempts():
+    # Attempt 2 returning a stranger must NOT stop the cascade: attempt 3 still runs and
+    # finds the real person. Before the fix, `contacts` was non-empty and 3 and 4 were
+    # skipped entirely.
+    def handler(params, body):
+        terms = body.get("search_terms")
+        if terms == ["Peter Schmidt"]:
+            return {"data": []}
+        if terms == ["Peter", "Schmidt"]:
+            return {"data": [_hit("wrong", "Roland Schmid")]}     # OR'd namesake
+        if terms == ["Schmidt"]:
+            return {"data": [_hit("right", "Peter Schmidt")]}     # attempt 3
+        return {"data": []}
+    client = _client({("POST", "/contacts/search"): handler})
+    assert client.search_contact("Peter Schmidt", "c1") == {"contact_id": "right",
+                                                            "full_name": "Peter Schmidt"}
+
+
+def test_search_contact_accepts_a_middle_name_in_the_lf_record():
+    routes = {("POST", "/contacts/search"):
+              {"data": [_hit("k1", "Anna Maria Berger")]}}
+    client = _client(routes)
+    assert client.search_contact("Anna Berger", "c1")["contact_id"] == "k1"
+
+
+def test_search_contact_accepts_a_middle_name_in_the_SEARCHED_name():
+    # The mirror case, and a real live miss (2026-08-10): Salesforce carries "Peter Sven
+    # Mitterhuemer", LeadFeeder stores "Peter Mitterhuemer". Requiring every part to
+    # appear rejected the right person; first + last is the test that matters.
+    routes = {("POST", "/contacts/search"):
+              {"data": [_hit("k1", "Peter Mitterhuemer")]}}
+    client = _client(routes)
+    assert client.search_contact("Peter Sven Mitterhuemer", "c1")["contact_id"] == "k1"
+
+
+def test_middle_name_tolerance_does_not_readmit_a_different_person():
+    # Ignoring middles must not loosen the first/last check.
+    routes = {("POST", "/contacts/search"):
+              {"data": [_hit("k1", "Peter Sven Schmidhuber")]}}
+    client = _client(routes)
+    assert client.search_contact("Peter Sven Mitterhuemer", "c1") is None
+
+
 def test_search_contact_tries_hyphen_segments_of_surname():
     # Live miss 2026-07-09: task name "Susann Kothe-Spies", LF stores "Susann Kothe" —
     # searching the unsplit surname can never hit. Segment searches must be tried.
@@ -489,6 +574,58 @@ def test_retries_on_500_without_retry_after_header():
     routes = {("GET", "/x"): [FakeResponse({}, status=500), FakeResponse({"data": []})]}
     client = _client(routes)
     assert client.api_get("/x") == {"data": []}
+
+
+# --- transport-level retry (dropped socket, no response object at all) --------
+
+@pytest.mark.parametrize("exc_name", ["ConnectionError", "Timeout", "ChunkedEncodingError"])
+def test_get_retries_on_transport_error_then_succeeds(exc_name):
+    import requests
+    exc = getattr(requests.exceptions, exc_name)("socket died")
+    sleeps = []
+    routes = {("GET", "/x"): [exc, FakeResponse({"data": ["ok"]})]}
+    client = _client(routes, sleep_fn=sleeps.append, backoff_base=1.0)
+    assert client.api_get("/x") == {"data": ["ok"]}
+    assert sleeps == [1.0]  # backoff_base * 2**0; no Retry-After header exists to honor
+
+
+def test_get_transport_retry_backs_off_exponentially():
+    import requests
+    sleeps = []
+    routes = {("GET", "/x"): [requests.exceptions.ConnectionError("drop") for _ in range(3)]
+                             + [FakeResponse({"data": []})]}
+    client = _client(routes, sleep_fn=sleeps.append, backoff_base=1.0, max_retries=4)
+    client.api_get("/x")
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_get_transport_error_exhausts_retries_and_reraises():
+    import requests
+    routes = {("GET", "/x"): [requests.exceptions.ConnectionError("drop") for _ in range(10)]}
+    client = _client(routes, max_retries=2)
+    with pytest.raises(requests.exceptions.ConnectionError):
+        client.api_get("/x")
+    # 1 initial attempt + 2 retries, and the original exception type survives so the
+    # per-chunk `except RequestException` handlers still degrade instead of crashing.
+    assert len(client.session.calls) == 3
+
+
+def test_post_transport_error_is_not_retried():
+    """A re-POSTed /contacts/find-contact-data-jobs would bill the credits twice."""
+    import requests
+    routes = {("POST", "/x"): [requests.exceptions.ConnectionError("drop"),
+                               FakeResponse({"data": ["would-have-succeeded"]})]}
+    client = _client(routes, max_retries=4)
+    with pytest.raises(requests.exceptions.ConnectionError):
+        client.api_post("/x", payload={})
+    assert len(client.session.calls) == 1
+
+
+def test_match_chunk_still_degrades_after_transport_retries_are_exhausted():
+    import requests
+    routes = {("POST", "/companies/match"): requests.exceptions.ConnectionError("drop")}
+    client = _client(routes, max_retries=2)
+    assert client.match_companies([{"company_name": "A"}, {"company_name": "B"}]) == [None, None]
 
 
 # --- match_companies (batch) -------------------------------------------------

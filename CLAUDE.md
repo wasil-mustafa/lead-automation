@@ -22,7 +22,8 @@ Code lives under `src/leadauto/`. Each module is independently runnable.
    `Subject → parser registry` (`extract/parsers.py`) routes each Task type to its own parser,
    emitting a normalized `ExtractedLead` (`extract/models.py`).
 2. **LeadFeeder** (`leadfeeder/`) — match/contact/company-enrichment client. `client.py` centralizes a
-   throttle (~95/min) + `429`/`5xx` retry (Retry-After/backoff) in `api_get`/`api_post`, and batches
+   throttle (~95/min) + `429`/`5xx` retry (Retry-After/backoff) + a GET-only transport retry in
+   `api_get`/`api_post`, and batches
    `match_companies` (≤200) / `retrieve_contacts` (≤100). `enrich.py` does one batched match (phase 1)
    and one batched contact retrieve (phase 3). Tunables in `config.yaml` `leadfeeder:`.
 3. **Lead enrichment + conversion** (`match.py`, `writeback.py`, `convert/`) — rule-based match
@@ -51,7 +52,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 524 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; 546 tests green.
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
@@ -239,6 +240,36 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Agreement is the max across profile name / feed alt names / email-domain root; `agreed_via` and
   `name_agreement` flow into the QA Review sheet. Normalizers live in `textnorm.py` — do NOT import
   `match.py` from the LF client (import cycle via `enrich`).
+- **Contact-search cascade returns only NAME-VERIFIED hits (fixed 2026-08-10).** All four
+  attempts of `client.search_contact` now filter candidates through one predicate
+  (`_all_parts_ok`: every part of the searched name must appear in LF's `full_name`, hyphen
+  segments counted). Three bugs of one class were removed: (a) attempts 1-2 returned
+  `contacts[0]` **unverified**, and attempt 2 ORs the name parts, so it matched anyone sharing
+  *either* name; (b) `[0]` was taken instead of scanning the page, and LF's ordering is **not
+  stable** (replaying "Peter Schmidt" returned "Tim Schmidt" where the previous run gave
+  "Roland Schmid"); (c) attempt 3 verified only the FIRST name, assuming its server-side
+  surname search was exact — **it is fuzzy and also matches the title field**: searching
+  "Hübner" returns "Markus Huber", "Weidemann" returns "Paul Weimann", so a lead named "Paul
+  Weidemann" was accepted as "Paul Weimann". Measured by `Contact Presence Check` over 100
+  contacts: **13 of 64 hits (20%) were a different person**. This is not just a mislabel here —
+  `enrich.py` feeds the hit to `retrieve_contacts`, which spends a credit and writes that
+  person's email/phone onto a real Lead. Because a filtered attempt leaves `contacts` empty,
+  the `if not contacts:` guards now fall through to the later attempts instead of stopping on
+  a stranger. Recall cost measured at **zero** (all 13 rejected people are genuinely absent
+  from LF). Regression tests use the real name pairs; do not loosen the predicate to an
+  edit-distance rule — "Schmidt"/"Schmid" and "Christian"/"Christina" are each one edit from a
+  *wrong* person.
+- **A dropped socket is retried on GETs ONLY (fixed 2026-08-17).** `_request` retried
+  `RETRYABLE_STATUS` and nothing else, so a `ConnectionError`/`Timeout`/`ChunkedEncodingError`
+  raised out of `session.get` before the status check ever ran — fatal to a long run, or a
+  200-record chunk silently written off by the per-chunk `except RequestException` handlers.
+  `RETRYABLE_TRANSPORT` now feeds the same `_retry_delay` + `sleep_fn` backoff. **GET only, and
+  do not "fix" that**: POST `/contacts/find-contact-data-jobs` is not idempotent and a blind
+  re-POST bills the credits twice; a POST logs and re-raises on the first failure. Exhaustion
+  re-raises the ORIGINAL exception, not `LeadfeederError`, so the chunk handlers still degrade
+  exactly as before. Found by `Contact Presence Check`, whose `enrich_pilot.get_with_retry` is
+  the prior art — a `WinError 10053` killed a 50-minute run there AFTER 485 retrieve credits
+  were spent, with 9 more drops recovered in the same run.
 - **Post-retrieve match sanity gate** (`enrich._match_sanity_reason`, 2026-07-09, from the live
   "SNG"→France miss): after the phase-2 company retrieve (match responses carry no country/domain),
   an accepted match is degraded to unmatched (→ terminal skip; reason in `EnrichedLead.lf_rejected`
