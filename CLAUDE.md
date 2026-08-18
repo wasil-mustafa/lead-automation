@@ -13,7 +13,8 @@ into a scheduled GitHub Actions job:
 `~/.claude/projects/C--Users-wasil-OneDrive---kununu-Lead-Automation/memory/` (+ older org facts under
 the `...-Scripts` project path) · **Stage 2 (conversion) has its own guide:
 `src/leadauto/convert/CLAUDE.md`** — read it for anything touching conversion, the review gate,
-or `stage2.yml` · legacy manual-conversion lessons `docs/legacy/convert-leads/`.
+or `stage2.yml` · legacy manual-conversion lessons `docs/legacy/convert-leads/` ·
+**task auto-close (standalone, read-only, propose-only): `autoclose/CLAUDE.md`**.
 
 ## Architecture — three object-centric modules
 
