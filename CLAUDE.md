@@ -298,8 +298,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   since LF searched on the acronym we sent.
 - **THE FEED ENDPOINT, CACHE PATH AND PARSER ARE NOT OWNED HERE (since 2026-08-17).** They come
   from `common.kununu_feed` in the Main-Profile-Account repo, reached through
-  `src/leadauto/mpa_bridge.py` (`MPA_ROOT` env, else the sibling `../Main-Profile-Account`;
-  raises `MpaBridgeError`, never falls back to a local copy). **kununu switched the feed from
+  `src/leadauto/mpa_bridge.py` (`MPA_ROOT` env, else the sibling `../Main-Profile-Account`,
+  else the vendored snapshot — see the CI bullet below). **kununu switched the feed from
   JSONL to CSV on 2026-08-06 and the private reader here never followed** — it requested a
   hardcoded `profiles.jsonl` that has 404'd ever since, and because every failure path returns
   `{}` the pipeline logged ONE warning and ran eleven days with no alt names and, worse, **no
@@ -311,16 +311,27 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `cache_path` default also wrote ~200 MB into the OneDrive-synced checkout. **UUID lookup is
   now case-insensitive** — the feed lowercases, Salesforce does not, and the old exact compare
   silently dropped those matches.
-  **CI can now reach the feed, but only once the `MPA_PAT` secret exists** (wired 2026-08-19 in
-  `stage1.yml`, `enriching.yml`, `backtest-skipped.yml`): each does a sparse `common`-only
-  checkout of `Nicolaus-Pichorner/Main-Profile-Account` into `mpa/` and points `MPA_ROOT` at it,
-  gated on a job-level `HAS_MPA` boolean so the step is SKIPPED — not failed — while the secret
-  is absent, and `continue-on-error: true` so a WRONG or expired PAT degrades the same way
-  (without it a present-but-invalid secret is worse than none: it flips the gate on and hard-fails
-  the checkout, breaking the scheduled pipeline). The `MPA_ROOT` step keys off
-  `steps.mpa.outcome == 'success'`, so the bridge is never pointed at a checkout that did not
-  happen. Until the secret is set, CI keeps running in the degraded no-alt-names/no-score state.
-  Two other CI bugs went with it: the workflows passed **`KUNUNU_API_TOKEN`**, which
+  **CI reads the feed off a VENDORED SNAPSHOT of `common/`** (Wasil's call, 2026-08-19):
+  `src/leadauto/_vendor/common/{__init__,kununu_feed}.py` are byte-identical copies, because the
+  reader lives in another private repo and the `GITHUB_TOKEN` Actions injects is scoped to this
+  one — the alternatives were a classic PAT (read on every repo its owner can see) or a deploy
+  key on someone else's repo. **This deliberately relaxes the global "import it, never vendor
+  it" rule, so do not treat the guards as optional:** `common_kununu_feed()` still prefers the
+  REAL checkout and only falls back, at WARNING level, so every local run and any CI run with
+  `MPA_PAT` set executes the canonical module; a checkout that is PRESENT but broken raises
+  instead of falling back (different fault, different fix); and `tests/test_mpa_vendor.py` hashes
+  the snapshot against the live files (CRLF-normalised) and FAILS on drift, skipping only where
+  Main-Profile-Account is absent — i.e. it fires on the machines where the suite is actually run.
+  **Never edit the copies** — fix upstream and re-sync per `_vendor/PROVENANCE.md` (source commit
+  `4824f09`, snapshot 2026-08-19). Two traps it carries: on the snapshot `common`'s default cache
+  anchors on ITS `REPO_ROOT` = `_vendor/`, i.e. ~200 MB back inside the OneDrive checkout, so
+  `feed_cache_path` redirects to the temp dir when `KUNUNU_CACHE` is unset (CI sets it); and only
+  two files are vendored because `kununu_feed` imports nothing else from its package (`from .
+  import REPO_ROOT`) — a test pins that, and a new intra-package import must be vendored with it.
+  The optional sparse `MPA_PAT` checkout stays wired in all three workflows (`HAS_MPA` gate,
+  `continue-on-error`, `MPA_ROOT` set only on `steps.mpa.outcome == 'success'`) so a token, if it
+  ever exists, silently upgrades CI to the canonical reader.
+  Two other CI bugs were fixed alongside: the workflows passed **`KUNUNU_API_TOKEN`**, which
   `common.kununu_feed` refuses by design (the feed is Basic, not Bearer) so the feed was
   unauthenticated even with a checkout — the secret of that name holds the password and is now
   mapped to `KUNUNU_API_PASSWORD`; and the `actions/cache` block still named

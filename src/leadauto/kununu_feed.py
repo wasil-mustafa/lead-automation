@@ -22,13 +22,15 @@ one endpoint, one cache — a second copy is what made a dead feed look like a q
 """
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .logging import get_logger
-from .mpa_bridge import MpaBridgeError, common_kununu_feed
+from .mpa_bridge import MpaBridgeError, common_kununu_feed, feed_source
 
 
 @dataclass
@@ -145,11 +147,22 @@ def feed_cache_path(settings, logger=None) -> Path:
     Config no longer carries a default, because the old one (`kununu_profiles.jsonl` at
     the repo root) named a format the endpoint stopped serving AND put a ~200 MB file
     inside the OneDrive-synced checkout.
+
+    One case is overridden rather than delegated: on the VENDORED snapshot with no
+    `KUNUNU_CACHE`, `common`'s default anchors on its own `REPO_ROOT`, which for the
+    snapshot is `leadauto/_vendor/` — i.e. ~200 MB back inside the synced checkout,
+    the exact trap the config default was removed to close. The filename still comes
+    from `common` (it follows the feed URL, so a CSV feed can never be read out of a
+    JSONL cache); only the directory is replaced, with the system temp dir. CI sets
+    `KUNUNU_CACHE` explicitly and never reaches this branch.
     """
     configured = settings.kununu_feed_cache_path
     if configured is not None:
         return configured
-    return Path(common_kununu_feed()._kununu_cache_path())
+    default = Path(common_kununu_feed()._kununu_cache_path())
+    if feed_source() == "vendored" and not os.environ.get("KUNUNU_CACHE"):
+        return Path(tempfile.gettempdir()) / "kununu-feed" / default.name
+    return default
 
 
 def ensure_feed(settings, logger=None) -> Path | None:
