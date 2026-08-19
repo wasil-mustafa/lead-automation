@@ -72,6 +72,13 @@ jobs:
         # no profile_score and no kununu industry (the Industry column then falls back
         # to LeadFeeder). That is the same state CI has always run in — so the step is
         # skipped, not failed, when no PAT for the private repo is configured.
+        id: mpa
+        # NEVER fail the run on this: a wrong, expired or revoked PAT must
+        # degrade to the no-feed state (which is how CI ran until 2026-08-19),
+        # not break the scheduled pipeline. Without this a present-but-invalid
+        # MPA_PAT is WORSE than an absent one - an absent secret skips the step,
+        # while a bad one flips HAS_MPA true and hard-fails the checkout.
+        continue-on-error: true
         if: env.HAS_MPA == 'true'
         uses: actions/checkout@v4
         with:
@@ -82,7 +89,7 @@ jobs:
           sparse-checkout-cone-mode: true
 
       - name: Point the bridge at that checkout
-        if: env.HAS_MPA == 'true'
+        if: steps.mpa.outcome == 'success'
         run: echo "MPA_ROOT=${{ github.workspace }}/mpa" >> "$GITHUB_ENV"
 
       - name: Set up Python

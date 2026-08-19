@@ -315,7 +315,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `stage1.yml`, `enriching.yml`, `backtest-skipped.yml`): each does a sparse `common`-only
   checkout of `Nicolaus-Pichorner/Main-Profile-Account` into `mpa/` and points `MPA_ROOT` at it,
   gated on a job-level `HAS_MPA` boolean so the step is SKIPPED — not failed — while the secret
-  is absent. Until it is set, CI keeps running in the degraded no-alt-names/no-score state.
+  is absent, and `continue-on-error: true` so a WRONG or expired PAT degrades the same way
+  (without it a present-but-invalid secret is worse than none: it flips the gate on and hard-fails
+  the checkout, breaking the scheduled pipeline). The `MPA_ROOT` step keys off
+  `steps.mpa.outcome == 'success'`, so the bridge is never pointed at a checkout that did not
+  happen. Until the secret is set, CI keeps running in the degraded no-alt-names/no-score state.
   Two other CI bugs went with it: the workflows passed **`KUNUNU_API_TOKEN`**, which
   `common.kununu_feed` refuses by design (the feed is Basic, not Bearer) so the feed was
   unauthenticated even with a checkout — the secret of that name holds the password and is now

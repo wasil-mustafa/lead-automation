@@ -23,9 +23,32 @@ jobs:
     env:
       SF_AUTOUPDATE_DISABLE: "true"
       SF_DISABLE_TELEMETRY: "true"
+      # Feed env — identical to stage1.yml, see its comments: the ~200 MB CSV is kept
+      # out of the checkout, and the gate is a boolean so the PAT never enters the env.
+      KUNUNU_CACHE: ${{ runner.temp }}/kununu/profiles.csv
+      HAS_MPA: ${{ secrets.MPA_PAT != '' }}
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
+
+      - name: Check out Main-Profile-Account (optional — owns the kununu feed reader)
+        # Alt names matter here too: this job scores the rule engine, and without the
+        # feed it scores a weaker matcher than production runs. Fail-safe and sparse for
+        # the same reasons as stage1.yml.
+        id: mpa
+        continue-on-error: true
+        if: env.HAS_MPA == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Nicolaus-Pichorner/Main-Profile-Account
+          token: ${{ secrets.MPA_PAT }}
+          path: mpa
+          sparse-checkout: common
+          sparse-checkout-cone-mode: true
+
+      - name: Point the bridge at that checkout
+        if: steps.mpa.outcome == 'success'
+        run: echo "MPA_ROOT=${{ github.workspace }}/mpa" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
