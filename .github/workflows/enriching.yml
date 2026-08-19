@@ -78,6 +78,8 @@ jobs:
           repository: Nicolaus-Pichorner/Main-Profile-Account
           token: ${{ secrets.MPA_PAT }}
           path: mpa
+          sparse-checkout: common
+          sparse-checkout-cone-mode: true
 
       - name: Point the bridge at that checkout
         if: env.HAS_MPA == 'true'

@@ -220,10 +220,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Import (Lead / Update / id field Id). `--dry-run` is hardwired (no input to get wrong), it
   commits NOTHING (no watermark, no state, no approval CSV, `contents: read`) and skips
   shadow-compare so it cannot spend that once-a-day gate. It shares **stage1's concurrency
-  group** on purpose: the LF rate limit and credit quota are per API key. It also carries the
-  two fixes stage1.yml still lacks — an optional `Main-Profile-Account` checkout (`MPA_PAT`
-  secret, skipped when absent ⇒ the usual degraded no-feed run) and the kununu secret mapped to
-  **`KUNUNU_API_PASSWORD`**, since `common.kununu_feed` refuses `KUNUNU_API_TOKEN` by design.
+  group** on purpose: the LF rate limit and credit quota are per API key. Feed access (the
+  optional `MPA_PAT` checkout + `KUNUNU_API_PASSWORD` mapping) is the same in all three
+  workflows — see the kununu-feed section.
 
 ### LeadFeeder & kununu feed
 
@@ -312,9 +311,17 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `cache_path` default also wrote ~200 MB into the OneDrive-synced checkout. **UUID lookup is
   now case-insensitive** — the feed lowercases, Salesforce does not, and the old exact compare
   silently dropped those matches.
-  **CI has no Main-Profile-Account checkout, so the feed is still unavailable there** (same as
-  the 404 state, no regression): `stage1.yml` needs a checkout step plus a PAT for the private
-  repo, and its `actions/cache` block still names `kununu_profiles.jsonl`.
+  **CI can now reach the feed, but only once the `MPA_PAT` secret exists** (wired 2026-08-19 in
+  `stage1.yml`, `enriching.yml`, `backtest-skipped.yml`): each does a sparse `common`-only
+  checkout of `Nicolaus-Pichorner/Main-Profile-Account` into `mpa/` and points `MPA_ROOT` at it,
+  gated on a job-level `HAS_MPA` boolean so the step is SKIPPED — not failed — while the secret
+  is absent. Until it is set, CI keeps running in the degraded no-alt-names/no-score state.
+  Two other CI bugs went with it: the workflows passed **`KUNUNU_API_TOKEN`**, which
+  `common.kununu_feed` refuses by design (the feed is Basic, not Bearer) so the feed was
+  unauthenticated even with a checkout — the secret of that name holds the password and is now
+  mapped to `KUNUNU_API_PASSWORD`; and the `actions/cache` block still named
+  `kununu_profiles.jsonl`, so it cached a path nothing writes — it now caches the `KUNUNU_CACHE`
+  dir under `runner.temp` (`profiles.csv`, key `kununu-feed-csv-<date>`), out of the checkout.
 - **kununu profile feed** (`kununu_feed.py`): daily-cached DWH bulk file (~200 MB CSV;
   `assigned_companies` = list of `{company_uuid, company_name}`) supplies alt names AND
   `profile_score` (stringly typed; missing/garbage → None), the live-scope gate's input —

@@ -47,9 +47,9 @@ jobs:
       - name: Cache kununu profile feed
         uses: actions/cache@v4
         with:
-          path: kununu_profiles.jsonl
-          key: kununu-feed-${{ steps.feedkey.outputs.date }}
-          restore-keys: kununu-feed-
+          path: ${{ runner.temp }}/kununu
+          key: kununu-feed-csv-${{ steps.feedkey.outputs.date }}
+          restore-keys: kununu-feed-csv-
 
       - name: Authenticate to Salesforce
         env:
@@ -73,7 +73,8 @@ jobs:
         env:
           PYTHONPATH: src
           LEADFEEDER_API_KEY: ${{ secrets.LEADFEEDER_API_KEY }}
-          KUNUNU_API_TOKEN: ${{ secrets.KUNUNU_API_TOKEN }}
+          # Basic auth, password-only — see stage1.yml.
+          KUNUNU_API_PASSWORD: ${{ secrets.KUNUNU_API_TOKEN }}
         run: |
           FLAGS=""
           if [ "${{ inputs.leadfeeder }}" = "false" ]; then FLAGS="--no-leadfeeder"; fi
