@@ -214,6 +214,16 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   scheduling moved to an **external cron-job.org job** hitting `workflow_dispatch` (see Status; the
   GitHub `schedule:` block is gone). NEVER gate on execution wall-clock hour (the old Vienna-hour
   check silently skipped every run).
+- **`enriching.yml` ("Enriching") is the manual, paste-by-hand route** (2026-08-19, dispatch-only):
+  a dry Stage 1 whose only output is the QA workbook's **Inspector Ready** sheet — the exact
+  `lead_field_payload` in Salesforce field API names, pasted into Inspector Reloaded's Data
+  Import (Lead / Update / id field Id). `--dry-run` is hardwired (no input to get wrong), it
+  commits NOTHING (no watermark, no state, no approval CSV, `contents: read`) and skips
+  shadow-compare so it cannot spend that once-a-day gate. It shares **stage1's concurrency
+  group** on purpose: the LF rate limit and credit quota are per API key. It also carries the
+  two fixes stage1.yml still lacks — an optional `Main-Profile-Account` checkout (`MPA_PAT`
+  secret, skipped when absent ⇒ the usual degraded no-feed run) and the kununu secret mapped to
+  **`KUNUNU_API_PASSWORD`**, since `common.kununu_feed` refuses `KUNUNU_API_TOKEN` by design.
 
 ### LeadFeeder & kununu feed
 
