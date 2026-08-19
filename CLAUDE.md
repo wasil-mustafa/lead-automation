@@ -214,15 +214,16 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   scheduling moved to an **external cron-job.org job** hitting `workflow_dispatch` (see Status; the
   GitHub `schedule:` block is gone). NEVER gate on execution wall-clock hour (the old Vienna-hour
   check silently skipped every run).
-- **`enriching.yml` ("Enriching") is the manual, paste-by-hand route** (2026-08-19, dispatch-only):
-  a dry Stage 1 whose only output is the QA workbook's **Inspector Ready** sheet — the exact
-  `lead_field_payload` in Salesforce field API names, pasted into Inspector Reloaded's Data
-  Import (Lead / Update / id field Id). `--dry-run` is hardwired (no input to get wrong), it
-  commits NOTHING (no watermark, no state, no approval CSV, `contents: read`) and skips
-  shadow-compare so it cannot spend that once-a-day gate. It shares **stage1's concurrency
-  group** on purpose: the LF rate limit and credit quota are per API key. Feed access (the
-  optional `MPA_PAT` checkout + `KUNUNU_API_PASSWORD` mapping) is the same in all three
-  workflows — see the kununu-feed section.
+- **The `runner` context does not exist in a job-level `env:` block, and neither does
+  `secrets`** — a job-level `KUNUNU_CACHE: ${{ runner.temp }}/...` makes the file an INVALID
+  WORKFLOW, which GitHub reports as a 0-second `startup_failure` with no job, no log and no API
+  annotation. Cost on 2026-08-19: every push created three red runs and `stage1.yml` was dead for
+  ~20 minutes across two scheduled dispatches before it was reverted. Env that needs `runner` or
+  `secrets` goes on the STEP, where both are available. There are only three workflows
+  (`stage1.yml`, `stage2.yml`, `backtest-skipped.yml`) — a fourth was added that day for the
+  Enriching sheet and reverted the same day: it was a dry Stage 1 with a different artifact name,
+  i.e. Stage 1 with extra steps. **The sheet is a Stage 1 feature, not a workflow** (Wasil,
+  2026-08-19).
 
 ### LeadFeeder & kununu feed
 
@@ -318,7 +319,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   key on someone else's repo. **This deliberately relaxes the global "import it, never vendor
   it" rule, so do not treat the guards as optional:** `common_kununu_feed()` still prefers the
   REAL checkout and only falls back, at WARNING level, so every local run and any CI run with
-  `MPA_PAT` set executes the canonical module; a checkout that is PRESENT but broken raises
+  `MPA_ROOT` pointed at a checkout executes the canonical module; one that is PRESENT but broken raises
   instead of falling back (different fault, different fix); and `tests/test_mpa_vendor.py` hashes
   the snapshot against the live files (CRLF-normalised) and FAILS on drift, skipping only where
   Main-Profile-Account is absent — i.e. it fires on the machines where the suite is actually run.
@@ -328,9 +329,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `feed_cache_path` redirects to the temp dir when `KUNUNU_CACHE` is unset (CI sets it); and only
   two files are vendored because `kununu_feed` imports nothing else from its package (`from .
   import REPO_ROOT`) — a test pins that, and a new intra-package import must be vendored with it.
-  The optional sparse `MPA_PAT` checkout stays wired in all three workflows (`HAS_MPA` gate,
-  `continue-on-error`, `MPA_ROOT` set only on `steps.mpa.outcome == 'success'`) so a token, if it
-  ever exists, silently upgrades CI to the canonical reader.
+  No cross-repo checkout is wired into CI: setting `MPA_ROOT` on a runner would upgrade it to the
+  canonical reader, but that needs a credential for a repo owned by someone else, which is the
+  whole reason the snapshot exists.
   Two other CI bugs were fixed alongside: the workflows passed **`KUNUNU_API_TOKEN`**, which
   `common.kununu_feed` refuses by design (the feed is Basic, not Bearer) so the feed was
   unauthenticated even with a checkout — the secret of that name holds the password and is now

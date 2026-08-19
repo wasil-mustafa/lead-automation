@@ -69,45 +69,9 @@ jobs:
       # "unsettled top-level await" / Node exit-13 hangs on CI runners.
       SF_AUTOUPDATE_DISABLE: "true"
       SF_DISABLE_TELEMETRY: "true"
-      # The kununu feed is ~200 MB CSV. Keep it OUT of the checkout (the old default
-      # wrote it into the working tree); common.kununu_feed reads KUNUNU_CACHE at call
-      # time and sniffs CSV vs JSONL from the file CONTENT, so no format is pinned here.
-      KUNUNU_CACHE: ${{ runner.temp }}/kununu/profiles.csv
-      # Gate for the optional checkout below. A boolean, not the token: this only picks
-      # a step, so the PAT itself never enters the environment.
-      HAS_MPA: ${{ secrets.MPA_PAT != '' }}
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
-
-      - name: Check out Main-Profile-Account (optional — owns the kununu feed reader)
-        # `leadauto.kununu_feed` bridges to `common.kununu_feed` in the sibling repo;
-        # this project deliberately keeps NO local copy. Without it the bridge raises
-        # MpaBridgeError, which is caught and degrades to no alt names, no profile_score
-        # and no kununu industry — and a missing score fails the live-scope gate CLOSED,
-        # so nothing converts. That was CI's silent state until 2026-08-19. The step is
-        # skipped, not failed, when no PAT for the private repo is configured.
-        # Sparse: `common` is stdlib-only and must never import main_profile_tag, so the
-        # rest of that repo (and its data) is not fetched.
-        id: mpa
-        # NEVER fail the run on this: a wrong, expired or revoked PAT must
-        # degrade to the no-feed state (which is how CI ran until 2026-08-19),
-        # not break the scheduled pipeline. Without this a present-but-invalid
-        # MPA_PAT is WORSE than an absent one - an absent secret skips the step,
-        # while a bad one flips HAS_MPA true and hard-fails the checkout.
-        continue-on-error: true
-        if: env.HAS_MPA == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: Nicolaus-Pichorner/Main-Profile-Account
-          token: ${{ secrets.MPA_PAT }}
-          path: mpa
-          sparse-checkout: common
-          sparse-checkout-cone-mode: true
-
-      - name: Point the bridge at that checkout
-        if: steps.mpa.outcome == 'success'
-        run: echo "MPA_ROOT=${{ github.workspace }}/mpa" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -133,6 +97,9 @@ jobs:
         # If the download fails, the stale restore keeps the gate working.
         uses: actions/cache@v4
         with:
+          # The runner-temp dir named by KUNUNU_CACHE below, NOT the checkout: the feed
+          # is ~200 MB, and the old `kununu_profiles.jsonl` here named a path nothing has
+          # written since kununu moved the feed to CSV on 2026-08-06.
           path: ${{ runner.temp }}/kununu
           key: kununu-feed-csv-${{ steps.feedkey.outputs.date }}
           restore-keys: kununu-feed-csv-
@@ -178,11 +145,16 @@ jobs:
         env:
           PYTHONPATH: src
           LEADFEEDER_API_KEY: ${{ secrets.LEADFEEDER_API_KEY }}
-          # HTTP Basic, password-only (KUNUNU_API_USER stays unset). Deliberately NOT
-          # KUNUNU_API_TOKEN: the feed does not speak Bearer and common.kununu_feed
-          # refuses that name outright, so passing it authenticated nothing. The secret
-          # is called KUNUNU_API_TOKEN and holds the password; it is mapped here.
+          # The feed is HTTP Basic, password-only (KUNUNU_API_USER stays unset).
+          # Deliberately NOT KUNUNU_API_TOKEN: `common.kununu_feed` refuses that name
+          # because the feed does not speak Bearer, so passing it authenticated nothing.
+          # The GitHub secret is *called* KUNUNU_API_TOKEN and holds the password.
           KUNUNU_API_PASSWORD: ${{ secrets.KUNUNU_API_TOKEN }}
+          # Keep the ~200 MB feed out of the checkout. Set at STEP level because the
+          # `runner` context does not exist in a job-level `env:` block — putting it
+          # there is an invalid workflow file, which startup-failed every run in this
+          # repo on 2026-08-19 until it was reverted.
+          KUNUNU_CACHE: ${{ runner.temp }}/kununu/profiles.csv
         run: |
           FLAGS=""
           if [ "${{ needs.gate.outputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; else FLAGS="--no-dry-run"; fi

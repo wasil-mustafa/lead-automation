@@ -13,7 +13,7 @@ guards that make it survivable are not optional:
 
   * `mpa_bridge.common_kununu_feed()` still prefers the REAL checkout and only falls
     back here, with a warning naming this snapshot. Wherever Main-Profile-Account is
-    present - every local run, and CI if `MPA_PAT` is ever set - the canonical module
+    present - every local run, and any runner given an `MPA_ROOT` - the canonical module
     is what executes, so the snapshot is a CI-only backstop rather than a second
     implementation racing the first.
   * `tests/test_mpa_vendor.py` hashes these files against the live ones and FAILS on

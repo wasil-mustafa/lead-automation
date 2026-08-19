@@ -13,7 +13,7 @@ to the byte-identical snapshot in `leadauto/_vendor/common/` and says so at WARN
 level — added 2026-08-19, because CI cannot reach the private Main-Profile-Account
 repo (the `GITHUB_TOKEN` Actions injects is scoped to this repository, and the
 alternatives were a classic PAT good for every repo its owner can see, or a deploy
-key on someone else's repo). Local runs and any CI run with `MPA_PAT` set therefore
+key on someone else's repo). Local runs — and any runner given an `MPA_ROOT` — therefore
 execute the canonical module; the snapshot is a CI backstop, not a second reader.
 
 WHAT MUST NOT HAPPEN is a copy nobody checks. Requesting a dead `.jsonl` endpoint for
@@ -55,8 +55,8 @@ def mpa_root() -> Path:
         raise MpaBridgeError(
             f"Main-Profile-Account not found at {candidate}. Set MPA_ROOT to its "
             f"checkout root, or place it beside this repo as ../{_DEFAULT_SIBLING}. "
-            "This project deliberately keeps no local copy of common/ — see "
-            "leadauto/mpa_bridge.py."
+            "Callers that can use the vendored snapshot instead go through "
+            "common_kununu_feed(); see leadauto/mpa_bridge.py."
         )
     return candidate
 

@@ -10,7 +10,9 @@ from leadauto.extract.models import ExtractedLead
 from leadauto.extract.reader import Skipped
 from leadauto.leadfeeder.enrich import EnrichedLead
 from leadauto.match import AccountMatch, ContactMatch, MatchResult
-from leadauto.qa_artifact import REVIEW_COLUMNS, build_workbook, write_workbook
+from leadauto.qa_artifact import (ENRICHING_COLUMNS, REVIEW_COLUMNS, build_workbook,
+                                  write_workbook)
+from leadauto.writeback import lead_field_payload
 
 
 def _result(lead_id="00Q1", *, decision="link", account=None, contact=None,
@@ -42,7 +44,50 @@ def _rows(ws):
 
 def test_workbook_has_expected_sheets():
     wb = build_workbook([_result()], [], meta={})
-    assert set(wb.sheetnames) >= {"Review", "Contact_Found", "NoContact", "Skipped", "Summary"}
+    assert set(wb.sheetnames) >= {"Review", "Enriching", "Contact_Found", "NoContact",
+                                  "Skipped", "Summary"}
+
+
+# --- Enriching sheet ---------------------------------------------------------
+
+def test_enriching_sheet_is_the_write_back_payload_verbatim():
+    """The sheet must BE `lead_field_payload`, not a re-derivation of it — that is what
+    makes it safe to paste into Inspector Reloaded (Lead / Update / id field Id) to apply
+    a dry run's enrichment by hand."""
+    res = _result(company={"Website": "https://acme.de", "VAT_Id": "DE123"},
+                  contact_details={"position": "Head of HR"})
+    ws = build_workbook([res], [], meta={})["Enriching"]
+    assert _headers(ws) == ENRICHING_COLUMNS
+    payload = lead_field_payload(res.enriched)
+    row = dict(zip(ENRICHING_COLUMNS, _rows(ws)[0]))
+    assert row["Id"] == "00Q1"
+    assert row["KN_VATNumber__c"] == payload["KN_VATNumber__c"] == "DE123"
+    assert row["Title"] == payload["Title"] == "Head of HR"
+    # A field the payload does not carry is blank, never a stale or invented value: an
+    # import row is applied as-is, so a wrong cell here overwrites a real Lead field.
+    for col in ENRICHING_COLUMNS:
+        assert row[col] == payload.get(col, "")
+
+
+def test_enriching_sheet_drops_rows_with_nothing_to_write():
+    """A payload of only the Id means nothing was enriched, and the sheet must mirror
+    `write_back`, which filters on exactly the same `len(p) > 1` (writeback.py:212).
+    Keeping the row would put an all-blank line in an import file — an invitation to
+    overwrite good data with nothing.
+
+    Emptying such a lead takes some doing, which is the point: `KN_NoOwnDBID__c` is set
+    for any lead WITHOUT a DBID, so a lead needs one before the payload can shrink to the
+    Id alone. That is rare in practice, so the guard fires rarely — it is not dead."""
+    bare = _result(lead_id="00Q_BARE")
+    bare.enriched.extracted.kununu_url = None      # KN_KununuLinkProfile__c + CountryCode
+    bare.enriched.extracted.region = None          # KN_Region__c
+    bare.enriched.extracted.contact_email = None   # Email
+    bare.enriched.extracted.contact_name = None    # FirstName
+    bare.enriched.extracted.lead_dbid = "123456"   # suppresses the KN_NoOwnDBID__c tick
+    assert set(lead_field_payload(bare.enriched)) == {"Id"}
+    rich = _result(lead_id="00Q_RICH", company={"VAT_Id": "DE9"})
+    ws = build_workbook([bare, rich], [], meta={})["Enriching"]
+    assert [r[0] for r in _rows(ws)] == ["00Q_RICH"]
 
 
 def test_review_header_includes_match_and_gate_columns():
