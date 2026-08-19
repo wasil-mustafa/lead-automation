@@ -153,6 +153,10 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     # KN_Employee__c overwrites: fresh LF headcount beats a stale manual pick.
     _put(payload, "KN_VATNumber__c", company.get("VAT_Id"))
     _put(payload, "KN_Employee__c", employee_bin(company.get("Employee_Count")))
+    # Website is FILL-ONLY-BLANK, unlike the VAT/employee overwrites above: it is a
+    # matching key (match.py hosts a lead on it), and replacing a human-entered domain
+    # with LeadFeeder's guess would move the lead to a different account.
+    _fill(payload, "Website", e.lead_website, company.get("Website"))
 
     # Industry ('Branche'): the kununu profile industry IS this taxonomy, so it is
     # authoritative and OVERWRITES (like KN_Region__c/CountryCode). The LeadFeeder

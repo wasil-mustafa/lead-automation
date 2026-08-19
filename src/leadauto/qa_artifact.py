@@ -35,6 +35,17 @@ REVIEW_COLUMNS = [
     "convert_blockers",
     "live_scope", "decision", "Approve?",
 ]
+# Salesforce field API names, in the order a reviewer reads them. One row per Lead
+# the write-back would touch, carrying EXACTLY the values `lead_field_payload` produces
+# — so the sheet is what the pipeline would write, not a re-derivation of it. Paste the
+# block into Salesforce Inspector Reloaded's Data Import (object Lead, action Update,
+# id field Id) to apply a dry run's enrichment by hand.
+INSPECTOR_COLUMNS = [
+    "Id", "FirstName", "Email", "Phone", "Website", "Title",
+    "Street", "City", "PostalCode", "CountryCode",
+    "Industry", "KN_Region__c", "KN_Employee__c", "KN_VATNumber__c",
+    "KN_KununuLinkProfile__c", "KN_LinkedInProfileLink__c", "KN_NoOwnDBID__c",
+]
 CONTACT_FOUND_COLUMNS = [
     "lead_id", "company", "contact_name", "position",
     "contact_emails", "best_contact_phone", "contact_linkedin",
@@ -143,6 +154,16 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     # Review
     review_rows = [[_review_row(r, settings).get(c) for c in REVIEW_COLUMNS] for r in results]
     _add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
+
+    # Inspector Ready — the write-back payload, paste-ready. Rows whose payload is only
+    # the Id are dropped: `write_back` skips them too (nothing enriched), and an all-blank
+    # row in an import file is an invitation to overwrite good data with nothing.
+    inspector_rows = []
+    for r in results:
+        payload = lead_field_payload(r.enriched)
+        if len(payload) > 1:
+            inspector_rows.append([payload.get(c, "") for c in INSPECTOR_COLUMNS])
+    _add_sheet(wb, "Inspector Ready", INSPECTOR_COLUMNS, inspector_rows)
 
     # Contact split
     found_rows, nocontact_rows = [], []

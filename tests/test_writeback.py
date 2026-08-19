@@ -107,6 +107,17 @@ def test_payload_maps_firmographics_from_leadfeeder():
     assert "KN_CompanyEmail__c" not in payload
 
 
+def test_website_fills_only_a_blank_lead_website():
+    # LF fills a blank Website, but never replaces one the Lead already carries:
+    # Website is a matching key, so an overwrite could re-point the lead.
+    company = {"Website": "https://acme.de"}
+    assert lead_field_payload(_enriched(company=company))["Website"] == "https://acme.de"
+    # A lead that already has one keeps it: fill-only-blank omits the key entirely,
+    # so the update never touches the field.
+    e = _extracted(lead_website="https://old-acme.de")
+    assert "Website" not in lead_field_payload(_enriched(e, company=company))
+
+
 def test_linkedin_and_title_come_from_lf_contact():
     enr = _enriched(contact={"contact_linkedin": "https://li/in/max",
                              "position": "Head of HR"})
