@@ -10,6 +10,7 @@ match-validity gate: blank -> fill, equal -> no-op, present-and-different -> con
 from __future__ import annotations
 
 from ..logging import get_logger
+from ..sf import soql
 from ..textnorm import normalize_url
 
 # (lead_field, account_field) — overwrite the Account field when the lead value differs.
@@ -75,7 +76,6 @@ def resolve_pool_links(client, link_targets, settings, *, dry_run=False, logger=
     if not linked or not pool_owner:
         return list(link_targets), []
 
-    from ..sf import soql
     # Independent reads -> one /composite call instead of two (API-call reduction
     # 2026-07-25). They are NOT bundled with the Stage-2 preflight query: preflight
     # decides which targets survive, and pool enrichment WRITES to the accounts it

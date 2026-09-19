@@ -44,9 +44,9 @@ from .leadfeeder.client import MATCH_RESULTS_PRIMARY, MATCH_RESULTS_WIDE
 from .leadfeeder.enrich import build_match_payload
 from .logging import get_logger
 from .predictions import load_predictions
-from .qa_artifact import _add_sheet
+from .qa_artifact import add_sheet
 from .sf import soql
-from .sf.soql import _in_list
+from .sf.soql import in_list
 from .state import REPO_ROOT
 
 DEFAULT_XLSX_PATH = REPO_ROOT / "wide_match_backtest.xlsx"
@@ -112,10 +112,10 @@ def build_cases(sf_client, settings, predictions, *, profiles=None,
     task_ids = sorted({pr.task_id for pr in selected if pr.task_id})
     lead_ids = sorted({pr.lead_id for pr in selected if pr.lead_id})
     tasks = sf_client.query(
-        f"SELECT {soql._TASK_FIELDS} FROM Task WHERE Id IN ({_in_list(task_ids)})"
+        f"SELECT {soql.TASK_FIELDS} FROM Task WHERE Id IN ({in_list(task_ids)})"
     ) if task_ids else []
     leads = sf_client.query(
-        f"SELECT {soql._LEAD_FIELDS} FROM Lead WHERE Id IN ({_in_list(lead_ids)})"
+        f"SELECT {soql.LEAD_FIELDS} FROM Lead WHERE Id IN ({in_list(lead_ids)})"
     ) if lead_ids else []
     task_by_id = {t["Id"]: t for t in tasks}
     lead_by_id = {l["Id"]: l for l in leads}
@@ -240,13 +240,13 @@ def _write_xlsx(rows, tally, counts, max_results, now, credits, xpath: Path) -> 
 
     wb = Workbook()
     wb.remove(wb.active)
-    _add_sheet(wb, "Cases", CASES_COLUMNS, [[r[c] for c in CASES_COLUMNS] for r in rows])
+    add_sheet(wb, "Cases", CASES_COLUMNS, [[r[c] for c in CASES_COLUMNS] for r in rows])
 
     # Recoveries first: they are the only rows a human has to judge, and the judgement is
     # "is that actually the same company?" — a wide match is the candidate LF ranked
     # 4th-20th, so a plausible name is not enough.
     recovered = [r for r in rows if r["outcome"] == "recovered"]
-    _add_sheet(wb, "Recovered", CASES_COLUMNS,
+    add_sheet(wb, "Recovered", CASES_COLUMNS,
                [[r[c] for c in CASES_COLUMNS] for r in recovered])
 
     # Drifted rows need judging too, and for a sharper reason: each one is a lead the
@@ -255,7 +255,7 @@ def _write_xlsx(rows, tally, counts, max_results, now, credits, xpath: Path) -> 
     # 'Topgolf Wien' -> 'Topgolf' and 'Filter Queen GbmH Hallwil' -> 'Filter Queen' both
     # come back at 100 while pointing at a parent or a different site.
     drifted = [r for r in rows if r["outcome"] == "drifted"]
-    _add_sheet(wb, "Drifted", CASES_COLUMNS,
+    add_sheet(wb, "Drifted", CASES_COLUMNS,
                [[r[c] for c in CASES_COLUMNS] for r in drifted])
 
     summary = [["generated_at", now.isoformat()],
@@ -274,9 +274,9 @@ def _write_xlsx(rows, tally, counts, max_results, now, credits, xpath: Path) -> 
                                     "would match today at the normal width. Check "
                                     "control_company_name for a truncated/parent match "
                                     "before treating it as recoverable coverage."])
-    _add_sheet(wb, "Summary", ["metric", "value"], summary)
+    add_sheet(wb, "Summary", ["metric", "value"], summary)
 
-    _add_sheet(wb, "README", ["note"], [[line] for line in [
+    add_sheet(wb, "README", ["note"], [[line] for line in [
         "Second-chance ('wide') company-match backtest. Read-only, 0 LeadFeeder credits.",
         "Population: the newest prediction per lead whose rule was `no_lf_match` — the "
         "terminal-skip bucket, 19.3% of all predictions.",

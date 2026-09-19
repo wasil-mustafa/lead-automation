@@ -14,8 +14,8 @@ import re
 from typing import Sequence
 
 # Selected verbatim from the approved plan / verified org fields.
-_TASK_FIELDS = "Id, WhoId, Who.Name, Subject, Description, CreatedDate"
-_LEAD_FIELDS = (
+TASK_FIELDS = "Id, WhoId, Who.Name, Subject, Description, CreatedDate"
+LEAD_FIELDS = (
     "Id, FirstName, LastName, Company, Email, Website, Status, IsConverted, LeadSource, "
     "HasOptedOutOfEmail, Phone, Title, Industry, Street, City, PostalCode, Country, CountryCode, "
     "KN_DBID__c, KN_NoOwnDBID__c, KN_Employee__c, KN_Language__c, "
@@ -29,7 +29,7 @@ def _quote(value: str) -> str:
     return f"'{escaped}'"
 
 
-def _in_list(values: Sequence[str]) -> str:
+def in_list(values: Sequence[str]) -> str:
     return ", ".join(_quote(v) for v in values)
 
 
@@ -46,12 +46,12 @@ def tasks_since(watermark: str, subjects: Sequence[str],
     if not subjects:
         raise ValueError("tasks_since requires at least one subject")
     soql = (
-        f"SELECT {_TASK_FIELDS} FROM Task "
+        f"SELECT {TASK_FIELDS} FROM Task "
         f"WHERE CreatedDate >= {watermark} "
-        f"AND Subject IN ({_in_list(subjects)}) "
+        f"AND Subject IN ({in_list(subjects)}) "
     )
     if statuses:
-        soql += f"AND Status IN ({_in_list(statuses)}) "
+        soql += f"AND Status IN ({in_list(statuses)}) "
     soql += "ORDER BY CreatedDate ASC"
     if limit and limit > 0:
         soql += f" LIMIT {limit}"
@@ -69,8 +69,8 @@ def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
     if not ids:
         raise ValueError("leads_by_ids requires at least one Id")
     soql = (
-        f"SELECT {_LEAD_FIELDS} FROM Lead "
-        f"WHERE Id IN ({_in_list(ids)}) AND IsConverted = false "
+        f"SELECT {LEAD_FIELDS} FROM Lead "
+        f"WHERE Id IN ({in_list(ids)}) AND IsConverted = false "
         "AND Owner.Type = 'Queue'"
     )
     if limit and limit > 0:
@@ -86,7 +86,7 @@ def leads_preflight(ids: Sequence[str]) -> str:
     """
     if not ids:
         raise ValueError("leads_preflight requires at least one Id")
-    return f"SELECT {_LEAD_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
+    return f"SELECT {LEAD_FIELDS} FROM Lead WHERE Id IN ({in_list(ids)})"
 
 
 # --- match lookups (Module 3a) ----------------------------------------------
@@ -123,14 +123,14 @@ def accounts_pool_fields(ids: Sequence[str]) -> str:
     """Owner + kununu identity + mapped enrichment fields for candidate linked Accounts."""
     if not ids:
         raise ValueError("accounts_pool_fields requires at least one Id")
-    return f"SELECT {_ACCOUNT_POOL_FIELDS} FROM Account WHERE Id IN ({_in_list(ids)})"
+    return f"SELECT {_ACCOUNT_POOL_FIELDS} FROM Account WHERE Id IN ({in_list(ids)})"
 
 
 def leads_pool_enrich(ids: Sequence[str]) -> str:
     """Lead fields used to build the pool-Account overwrite payload."""
     if not ids:
         raise ValueError("leads_pool_enrich requires at least one Id")
-    return f"SELECT {_LEAD_POOL_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
+    return f"SELECT {_LEAD_POOL_FIELDS} FROM Lead WHERE Id IN ({in_list(ids)})"
 
 
 def _like_escape(needle: str) -> str:
@@ -156,7 +156,6 @@ def accounts_by_signals(
     profile_uuids: Sequence[str] = (),
     kununu_urls: Sequence[str] = (),
     vats: Sequence[str] = (),
-    dbids: Sequence[str] = (),
     hosts: Sequence[str] = (),
     names: Sequence[str] = (),
     name_patterns: Sequence[str] = (),
@@ -169,13 +168,11 @@ def accounts_by_signals(
     """
     clauses: list[str] = []
     if profile_uuids:
-        clauses.append(f"KN_KununuProfileUuid__c IN ({_in_list(profile_uuids)})")
+        clauses.append(f"KN_KununuProfileUuid__c IN ({in_list(profile_uuids)})")
     if vats:
-        clauses.append(f"KN_VATNumber__c IN ({_in_list(vats)})")
-    if dbids:
-        clauses.append(f"KN_DBID__c IN ({_in_list(dbids)})")
+        clauses.append(f"KN_VATNumber__c IN ({in_list(vats)})")
     if names:
-        clauses.append(f"Name IN ({_in_list(names)})")
+        clauses.append(f"Name IN ({in_list(names)})")
     patterns = [re.sub(r"[\\']", "", p) for p in name_patterns]
     clauses.extend(f"Name LIKE '{p}'" for p in patterns if p.strip("%"))
     url_like = _like_any("KN_KununuLinkProfile__c", kununu_urls)
@@ -199,13 +196,13 @@ def contacts_by_signals(
     """Contacts matching ANY direct signal or sitting in a candidate Account; None if empty."""
     clauses: list[str] = []
     if user_uuids:
-        clauses.append(f"KN_KununuUserUUID__c IN ({_in_list(user_uuids)})")
+        clauses.append(f"KN_KununuUserUUID__c IN ({in_list(user_uuids)})")
     if emails:
-        clauses.append(f"Email IN ({_in_list(emails)})")
+        clauses.append(f"Email IN ({in_list(emails)})")
     if linkedins:
-        clauses.append(f"KN_LinkedInProfile__c IN ({_in_list(linkedins)})")
+        clauses.append(f"KN_LinkedInProfile__c IN ({in_list(linkedins)})")
     if account_ids:
-        clauses.append(f"AccountId IN ({_in_list(account_ids)})")
+        clauses.append(f"AccountId IN ({in_list(account_ids)})")
     if not clauses:
         return None
     return f"SELECT {_CONTACT_MATCH_FIELDS} FROM Contact WHERE " + " OR ".join(clauses)
@@ -226,16 +223,16 @@ def leads_shadow_status(ids: Sequence[str]) -> str:
     """Conversion status + current KN_* fields for predicted leads."""
     if not ids:
         raise ValueError("leads_shadow_status requires at least one Id")
-    return f"SELECT {_LEAD_SHADOW_FIELDS} FROM Lead WHERE Id IN ({_in_list(ids)})"
+    return f"SELECT {_LEAD_SHADOW_FIELDS} FROM Lead WHERE Id IN ({in_list(ids)})"
 
 
 def accounts_by_ids(ids: Sequence[str]) -> str:
     if not ids:
         raise ValueError("accounts_by_ids requires at least one Id")
-    return f"SELECT {_ACCOUNT_SHADOW_FIELDS} FROM Account WHERE Id IN ({_in_list(ids)})"
+    return f"SELECT {_ACCOUNT_SHADOW_FIELDS} FROM Account WHERE Id IN ({in_list(ids)})"
 
 
 def contacts_by_ids(ids: Sequence[str]) -> str:
     if not ids:
         raise ValueError("contacts_by_ids requires at least one Id")
-    return f"SELECT {_CONTACT_SHADOW_FIELDS} FROM Contact WHERE Id IN ({_in_list(ids)})"
+    return f"SELECT {_CONTACT_SHADOW_FIELDS} FROM Contact WHERE Id IN ({in_list(ids)})"

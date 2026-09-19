@@ -7,7 +7,7 @@ import requests
 
 from leadauto import kununu_feed
 from leadauto.kununu_feed import ProfileInfo, base_slug, lookup_profiles, ensure_feed, load_profiles_for_leads
-from leadauto.extract.models import ExtractedLead
+from leadauto.models import ExtractedLead
 
 
 def _write_feed(tmp_path, records, extra_lines=()):

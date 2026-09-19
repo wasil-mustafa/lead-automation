@@ -6,10 +6,10 @@ reasons, and the Summary counts) without writing to disk except for the round-tr
 """
 from openpyxl import load_workbook
 
-from leadauto.extract.models import ExtractedLead
+from leadauto.models import ExtractedLead
 from leadauto.extract.reader import Skipped
-from leadauto.leadfeeder.enrich import EnrichedLead
-from leadauto.match import AccountMatch, ContactMatch, MatchResult
+from leadauto.models import EnrichedLead
+from leadauto.models import AccountMatch, ContactMatch, MatchResult
 from leadauto.qa_artifact import (ENRICHING_COLUMNS, REVIEW_COLUMNS, build_workbook,
                                   write_workbook)
 from leadauto.writeback import lead_field_payload
@@ -115,7 +115,7 @@ def test_review_row_emits_predicted_industry_value():
 def test_review_row_maps_match_result():
     res = _result(
         decision="link",
-        account=AccountMatch("001A", 1.0, "kununu_profile_uuid"),
+        account=AccountMatch("001A", "kununu_profile_uuid"),
         contact=ContactMatch("003C", 1.0, "kununu_user_uuid"),
         matched=True, matched_name="Acme AG", score=0.91,
     )
@@ -222,7 +222,7 @@ def test_review_sheet_has_rule_and_evidence_columns():
     # build one result with rule="name_only", evidence=["vat→001A"]
     res = _result(
         decision="review",
-        account=AccountMatch("001A", 1.0, "kununu_profile_uuid"),
+        account=AccountMatch("001A", "kununu_profile_uuid"),
         contact=None,
     )
     res.rule = "name_only"
@@ -291,9 +291,9 @@ def test_convert_blockers_empty_when_payload_fills_gaps():
 
 
 def test_review_sheet_carries_cluster_and_conflict_keys():
-    from leadauto.extract.models import ExtractedLead
-    from leadauto.leadfeeder.enrich import EnrichedLead
-    from leadauto.match import MatchResult
+    from leadauto.models import ExtractedLead
+    from leadauto.models import EnrichedLead
+    from leadauto.models import MatchResult
     from leadauto.qa_artifact import REVIEW_COLUMNS, build_workbook
 
     assert "lf_company_id" in REVIEW_COLUMNS and "kununu_profile_uuid" in REVIEW_COLUMNS
@@ -366,10 +366,10 @@ def _settings(**live_scope):
 
 
 def _auto_results():
-    from leadauto.match import AccountMatch
+    from leadauto.models import AccountMatch
     results = [
         _result("00Q000000000001", decision="link",
-                account=AccountMatch(account_id="001000000000001", score=None,
+                account=AccountMatch(account_id="001000000000001",
                                      reason="name_address")),
         _result("00Q000000000002", decision="create_new"),
         _result("00Q000000000003", decision="review"),
@@ -535,7 +535,7 @@ def test_address_check_sheet_compares_task_and_leadfeeder():
 
 
 def test_address_check_city_compare_tolerates_umlaut_spellings_and_repeats():
-    from leadauto.qa_artifact import _norm_city
+    from leadauto.textnorm import normalize_city as _norm_city
     assert _norm_city("Dusseldorf") == _norm_city("Düsseldorf") == _norm_city("Duesseldorf")
     assert _norm_city("Leverkusen, 51371 Leverkusen") == _norm_city("Leverkusen")
     assert _norm_city("Bonn Bad-Godesberg") == _norm_city("Bonn")
@@ -568,7 +568,7 @@ def test_address_check_task_cc_is_the_badge_country_not_the_url_country():
 
 
 def test_nocontact_reason_distinguishes_never_searched_from_not_found():
-    from leadauto.leadfeeder.enrich import CONTACT_SKIP_NO_NAME, CONTACT_SKIP_SEARCH_FAILED
+    from leadauto.models import CONTACT_SKIP_NO_NAME, CONTACT_SKIP_SEARCH_FAILED
     searched = _result("00Q1", matched=True)                 # LF was asked, held nobody
     no_name = _result("00Q2", matched=True)
     no_name.enriched.contact_skipped = CONTACT_SKIP_NO_NAME

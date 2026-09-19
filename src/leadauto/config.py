@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from .textnorm import domain_sld
+
 try:  # optional locally; absent in CI is fine
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover
@@ -195,7 +197,6 @@ class Settings:
         """Own-company email domain roots (second-level labels). A lead whose Lead.Email
         or parsed contact email matches one is internal and excluded from Stage 1
         extraction and shadow scoring. Empty set when the key is unset."""
-        from .textnorm import domain_sld
         raw = self.raw.get("excluded_email_domains", []) or []
         return {r for r in (domain_sld(str(e)) for e in raw) if r}
 

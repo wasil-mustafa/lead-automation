@@ -6,8 +6,8 @@ without touching an org.
 """
 from datetime import date
 
-from leadauto.extract.models import ExtractedLead
-from leadauto.leadfeeder.enrich import EnrichedLead
+from leadauto.models import ExtractedLead
+from leadauto.models import EnrichedLead
 from leadauto.config import Settings
 from leadauto.writeback import (
     employee_bin,
@@ -64,7 +64,7 @@ def test_payload_maps_kununu_fields_and_marker():
         kununu_url="https://www.kununu.com/de/hufeland-klinikum",
         kununu_user_uuid="uuid-1", region="Germany",
         profile_type="claimed", claimed_at=date(2026, 6, 1),
-        contact_email="max@hufeland.de", vat_number="DE811569869",
+        contact_email="max@hufeland.de",
     )
     payload = lead_field_payload(_enriched(e))
     assert payload["Id"] == "00Q1"

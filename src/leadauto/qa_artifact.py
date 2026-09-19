@@ -18,9 +18,9 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from .convert.preflight import check_lead
-from .leadfeeder.enrich import CONTACT_SKIP_NOT_NEEDED
+from .models import CONTACT_SKIP_NOT_NEEDED
 from .live_scope import live_scope_reason
-from .textnorm import country_iso2
+from .textnorm import country_iso2, normalize_city, normalize_postal
 from .match import RULE_DECISIONS
 from .writeback import lead_field_payload, lf_contact_email
 
@@ -98,7 +98,7 @@ def _convert_blockers(result, settings=None, payload: dict | None = None) -> str
     if result.decision == "skip":
         return ""  # terminal skip never converts — a preflight preview would be noise
     e = result.enriched.extracted
-    # This key set pairs with soql._LEAD_FIELDS / check_lead's reads by convention —
+    # This key set pairs with soql.LEAD_FIELDS / check_lead's reads by convention —
     # extend both when adding a check.
     fields = {
         "IsConverted": False,
@@ -116,35 +116,6 @@ def _convert_blockers(result, settings=None, payload: dict | None = None) -> str
     return "; ".join(f.check for f in fails)
 
 
-# City-name prefixes that are not the city: 'Bad Homburg' vs 'Bad Kreuznach', 'St. Gallen'
-# vs 'St. Pölten', 'Neu-Ulm' vs 'Neu-Isenburg' must NOT collapse to 'bad' / 'st' / 'neu'.
-_CITY_PREFIXES = {"bad", "st", "sankt", "saint", "neu", "alt", "gross", "klein", "ober", "unter"}
-
-
-def _norm_city(value) -> str:
-    """Head word of a city, ASCII-folded both ways so 'Düsseldorf' == 'Duesseldorf' ==
-    'Dusseldorf' and 'Köln' == 'Koeln'; trailing punctuation dropped. 'Frankfurt am Main'
-    ~ 'Frankfurt', 'Bonn Bad-Godesberg' ~ 'Bonn', 'Berlin-Kreuzberg' ~ 'Berlin'. A leading
-    prefix word ('Bad', 'St.', 'Neu') is kept TOGETHER with the word after it, so
-    'Bad Homburg' != 'Bad Kreuznach' and 'St. Gallen' != 'St. Pölten'."""
-    s = (value or "").strip().casefold()
-    for a, b in (("ä", "a"), ("ö", "o"), ("ü", "u"), ("ß", "ss"), ("ae", "a"), ("oe", "o"),
-                 ("ue", "u")):
-        s = s.replace(a, b)
-    s = re.sub(r"[^a-z0-9 \-]", " ", s).strip()
-    words = [w for w in re.split(r"[ \-]+", s) if w]
-    if not words:
-        return ""
-    if words[0] in _CITY_PREFIXES and len(words) > 1:
-        return f"{words[0]} {words[1]}"
-    return words[0]
-
-
-def _norm_postal(value) -> str:
-    s = (value or "").strip().upper().replace(" ", "")
-    return s.split("-")[-1] if s else ""                   # "D-50969" ~ "50969"
-
-
 def address_check_row(result) -> list:
     """One Address_Check row: task (badge) vs LeadFeeder vs current Lead address."""
     e = result.enriched.extracted
@@ -154,9 +125,10 @@ def address_check_row(result) -> list:
     lf_has = bool(c.get("Postal_Code") or c.get("City"))
     postal_match = city_match = ""
     if task_has and lf_has:
-        postal_match = _yn(_norm_postal(e.postal_code) != "" and
-                           _norm_postal(e.postal_code) == _norm_postal(c.get("Postal_Code")))
-        city_match = _yn(_norm_city(e.city) != "" and _norm_city(e.city) == _norm_city(c.get("City")))
+        postal_match = _yn(normalize_postal(e.postal_code) is not None and
+                           normalize_postal(e.postal_code) == normalize_postal(c.get("Postal_Code")))
+        city_match = _yn(normalize_city(e.city) is not None
+                         and normalize_city(e.city) == normalize_city(c.get("City")))
         if postal_match == "yes" and city_match == "yes":
             verdict = "same"
         elif city_match == "yes":
@@ -224,7 +196,7 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     }
 
 
-def _add_sheet(wb: Workbook, title: str, columns: list[str], rows: list[list]) -> None:
+def add_sheet(wb: Workbook, title: str, columns: list[str], rows: list[list]) -> None:
     ws = wb.create_sheet(title)
     ws.append(columns)
     for cell in ws[1]:
@@ -253,7 +225,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     # Review
     review_rows = [[_review_row(r, settings, p).get(c) for c in REVIEW_COLUMNS]
                    for r, p in zip(results, payloads)]
-    _add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
+    add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
 
     # Enriching — the write-back payload, paste-ready. Rows whose payload is only the Id
     # are dropped: `write_back` skips them too (nothing enriched), and an all-blank row in
@@ -262,7 +234,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     for payload in payloads:
         if len(payload) > 1:
             enriching_rows.append([payload.get(c, "") for c in ENRICHING_COLUMNS])
-    _add_sheet(wb, "Enriching", ENRICHING_COLUMNS, enriching_rows)
+    add_sheet(wb, "Enriching", ENRICHING_COLUMNS, enriching_rows)
 
     # Phone_Repair — the before/after of every existing phone the write-back rewrites
     repair_rows = []
@@ -274,11 +246,11 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
             repair_rows.append([e.lead_id, e.best_company,
                                 payload.get("CountryCode") or e.lead_country_code,
                                 before, after])
-    _add_sheet(wb, "Phone_Repair", PHONE_REPAIR_COLUMNS, repair_rows)
+    add_sheet(wb, "Phone_Repair", PHONE_REPAIR_COLUMNS, repair_rows)
 
     # Address_Check — badge-scan address vs LeadFeeder vs the Lead's current address
     address_rows = [address_check_row(r) for r in results]
-    _add_sheet(wb, "Address_Check", ADDRESS_CHECK_COLUMNS, address_rows)
+    add_sheet(wb, "Address_Check", ADDRESS_CHECK_COLUMNS, address_rows)
 
     # Contact split
     found_rows, nocontact_rows = [], []
@@ -296,16 +268,16 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
                           else "no LeadFeeder company match"))
             nocontact_rows.append([e.lead_id, e.best_company, e.contact_name,
                                    _yn(r.enriched.matched), reason])
-    _add_sheet(wb, "Contact_Found", CONTACT_FOUND_COLUMNS, found_rows)
-    _add_sheet(wb, "NoContact", NOCONTACT_COLUMNS, nocontact_rows)
+    add_sheet(wb, "Contact_Found", CONTACT_FOUND_COLUMNS, found_rows)
+    add_sheet(wb, "NoContact", NOCONTACT_COLUMNS, nocontact_rows)
 
     # Skipped
     skipped_rows = [[s.task_id, s.lead_id, s.subject, s.reason] for s in skipped]
-    _add_sheet(wb, "Skipped", SKIPPED_COLUMNS, skipped_rows)
+    add_sheet(wb, "Skipped", SKIPPED_COLUMNS, skipped_rows)
 
     # Failures (LeadFeeder / write-back errors surfaced for the reviewer)
     failure_rows = [[f.get("lead_id"), f.get("stage"), f.get("error")] for f in failures]
-    _add_sheet(wb, "Failures", FAILURES_COLUMNS, failure_rows)
+    add_sheet(wb, "Failures", FAILURES_COLUMNS, failure_rows)
 
     # Summary
     decisions = [r.decision for r in results]
@@ -334,7 +306,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         summary.append(["live_scope_pass", sum(
             1 for r in results if live_scope_reason(r, settings) is None)])
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
-    _add_sheet(wb, "Summary", ["metric", "value"], summary)
+    add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     return wb
 

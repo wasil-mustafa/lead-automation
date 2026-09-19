@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..extract.reader import Skipped, read_extracted_leads
-from ..leadfeeder.enrich import EnrichedLead, enrich_leads
+from ..leadfeeder.enrich import enrich_leads
+from ..models import EnrichedLead, MatchResult
 from ..live_scope import live_scope_reason
 from ..logging import get_logger
-from ..match import MatchResult, load_existing_records, match_lead
+from ..match import load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
 from ..qa_artifact import write_auto_approved_csv, write_workbook
 from ..state import REPO_ROOT, State, advance, compute_since, load_state, save_state

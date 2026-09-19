@@ -73,13 +73,27 @@ def test_normalize_postal_strips_whitespace():
     assert normalize_postal(None) is None
 
 
-def test_normalize_city_casefolds_and_collapses():
+def test_normalize_city_is_the_one_city_identity():
+    # ONE definition of "same city" for the name_address link rule AND the Address_Check
+    # sheet (2026-09-19: the sheet had a smarter copy than the rule that links accounts).
     from leadauto.textnorm import normalize_city
     assert normalize_city("  Wien ") == "wien"
-    assert normalize_city("Frankfurt  am   Main") == "frankfurt am main"
-    assert normalize_city("MÜNCHEN") == "münchen"
+    assert normalize_city("Frankfurt  am   Main") == normalize_city("Frankfurt") == "frankfurt"
+    assert normalize_city("MÜNCHEN") == normalize_city("Muenchen") == normalize_city("Munchen")
+    assert normalize_city("Berlin-Kreuzberg") == normalize_city("Berlin")
+    # a prefix word is not the city
+    assert normalize_city("Bad Homburg") != normalize_city("Bad Kreuznach")
+    assert normalize_city("St. Gallen") != normalize_city("St. Pölten")
+    assert normalize_city("Neu-Ulm") != normalize_city("Neu-Isenburg")
     assert normalize_city("") is None
     assert normalize_city(None) is None
+
+
+def test_normalize_postal_drops_country_prefix():
+    from leadauto.textnorm import normalize_postal
+    assert normalize_postal("D-50969") == normalize_postal("50969") == "50969"
+    assert normalize_postal("CH-8001") == "8001"
+    assert normalize_postal("ab 12") == "AB12"
 
 
 # --- name_like_pattern (account-recall widening, 2026-07-10) ------------------

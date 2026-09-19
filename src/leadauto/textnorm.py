@@ -209,16 +209,56 @@ def country_iso2(value) -> str | None:
 
 
 def normalize_postal(value: str | None) -> str | None:
-    """Postal code with ALL whitespace removed (LF and org store it inconsistently)."""
+    """Postal code for identity compare: no whitespace, upper-cased, and a leading
+    country prefix ('D-50969', 'CH-8001') dropped. LF and the org store it inconsistently."""
     if not value:
         return None
-    v = re.sub(r"\s+", "", str(value))
+    v = re.sub(r"\s+", "", str(value)).upper()
+    v = re.sub(r"^[A-Z]{1,2}-", "", v)
     return v or None
+
+
+# City-name prefixes that are not the city: 'Bad Homburg' vs 'Bad Kreuznach', 'St. Gallen'
+# vs 'St. Pölten', 'Neu-Ulm' vs 'Neu-Isenburg' must NOT collapse to 'bad' / 'st' / 'neu'.
+_CITY_PREFIXES = {"bad", "st", "sankt", "saint", "neu", "alt", "gross", "klein", "ober", "unter"}
 
 
 def normalize_city(value: str | None) -> str | None:
-    """Casefolded city name with collapsed whitespace, for address-identity compare."""
+    """City identity for address compare: the head word, ASCII-folded both ways so
+    'Düsseldorf' == 'Duesseldorf' == 'Dusseldorf'; 'Frankfurt am Main' ~ 'Frankfurt',
+    'Bonn Bad-Godesberg' ~ 'Bonn', 'Berlin-Kreuzberg' ~ 'Berlin'. A leading prefix word
+    ('Bad', 'St.', 'Neu') is kept TOGETHER with the word after it, so 'Bad Homburg' !=
+    'Bad Kreuznach'. Used by the name_address link rule and the Address_Check sheet —
+    ONE definition of "same city", on purpose (2026-09-19: there were two)."""
     if not value:
         return None
-    v = re.sub(r"\s+", " ", str(value)).strip().casefold()
-    return v or None
+    s = str(value).strip().casefold()
+    for a, b in (("ä", "a"), ("ö", "o"), ("ü", "u"), ("ß", "ss"), ("ae", "a"), ("oe", "o"),
+                 ("ue", "u")):
+        s = s.replace(a, b)
+    s = re.sub(r"[^a-z0-9 \-]", " ", s).strip()
+    words = [w for w in re.split(r"[ \-]+", s) if w]
+    if not words:
+        return None
+    if words[0] in _CITY_PREFIXES and len(words) > 1:
+        return f"{words[0]} {words[1]}"
+    return words[0]
+
+
+# --- Salesforce value coercions ---------------------------------------------------
+# Bulk API 2.0 results are CSV, so booleans arrive as 'true'/'false' STRINGS ('false' is
+# truthy!) and nulls as ''. REST returns real bools/None. Both shapes pass through here.
+
+def is_true(value) -> bool:
+    """True for a real True or the string 'true' (any case); everything else False."""
+    return value is True or str(value).strip().lower() == "true"
+
+
+def is_blank(value) -> bool:
+    """None or a whitespace-only string. A non-string non-None value is never blank."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+# KN_Checklengthpostalcode: PostalCode length the org enforces per country (Austria is
+# unchecked). One table for the write-back and the conversion preflight.
+POSTAL_LEN_BY_CC = {"DE": 5, "CH": 4}

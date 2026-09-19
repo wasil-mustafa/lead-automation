@@ -8,7 +8,8 @@ from __future__ import annotations
 import re
 from datetime import date
 
-from .models import ExtractedLead
+from ..models import ExtractedLead
+from ..textnorm import is_true
 
 # kununu URL country slug -> (region label, ISO2)
 _REGION_BY_SLUG = {
@@ -66,11 +67,6 @@ def _clean_email(value: str | None) -> str | None:
     return None if "@kununu" in value.lower() else value
 
 
-def _bool(value) -> bool:
-    """Coerce SF query booleans (True/False or Bulk-CSV 'true'/'false' strings)."""
-    return value is True or str(value).strip().lower() == "true"
-
-
 def _base(task: dict, lead: dict, task_type: str) -> ExtractedLead:
     return ExtractedLead(
         lead_id=lead.get("Id") or task.get("WhoId") or "",
@@ -91,9 +87,9 @@ def _base(task: dict, lead: dict, task_type: str) -> ExtractedLead:
         lead_title=lead.get("Title"),
         lead_industry=lead.get("Industry"),
         lead_source=lead.get("LeadSource"),
-        lead_opted_out_email=_bool(lead.get("HasOptedOutOfEmail")),
+        lead_opted_out_email=is_true(lead.get("HasOptedOutOfEmail")),
         lead_dbid=lead.get("KN_DBID__c"),
-        lead_no_own_dbid=_bool(lead.get("KN_NoOwnDBID__c")),
+        lead_no_own_dbid=is_true(lead.get("KN_NoOwnDBID__c")),
         lead_employee_category=lead.get("KN_Employee__c"),
         lead_language=lead.get("KN_Language__c"),
     )

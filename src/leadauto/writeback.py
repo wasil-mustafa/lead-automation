@@ -21,7 +21,8 @@ from __future__ import annotations
 import re
 
 from .industry import sf_industry_from_kununu, sf_industry_from_leadfeeder
-from .leadfeeder.enrich import EnrichedLead
+from .models import EnrichedLead
+from .textnorm import POSTAL_LEN_BY_CC, country_iso2, is_blank
 from .logging import get_logger
 
 # (upper_bound, label); counts above the last bound map to "> 100.000".
@@ -100,13 +101,6 @@ def split_first_name(source_name, last_name) -> str | None:
     return first or None
 
 
-def _iso2(value) -> str | None:
-    if not value:
-        return None
-    v = str(value).strip()
-    return v.upper() if len(v) == 2 else v
-
-
 def _put(payload: dict, field: str, value) -> None:
     """Set a field only when there is a real value (skip None / empty string)."""
     if value is None:
@@ -116,16 +110,9 @@ def _put(payload: dict, field: str, value) -> None:
     payload[field] = value
 
 
-_POSTAL_LEN_BY_CC = {"DE": 5, "CH": 4}  # KN_Checklengthpostalcode (Austria unchecked)
-
-
-def _blank(value) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
-
-
 def _fill(payload: dict, field: str, current, value) -> None:
     """_put, but only when the Lead's current value is blank (fill-only-blank policy)."""
-    if _blank(current):
+    if is_blank(current):
         _put(payload, field, value)
 
 
@@ -183,7 +170,7 @@ def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
     # a BLANK Lead.Email only (Wasil, 2026-09-18) — never overwrites: an existing
     # address is the one the person gave us, and writing Lead.Email has the Braze
     # side effect documented in CLAUDE.md. Same fill-only-blank rule as Phone below.
-    if _blank(e.contact_email):
+    if is_blank(e.contact_email):
         _fill(payload, "Email", e.lead_email, lf_contact_email(contact))
 
     # firmographics (LeadFeeder): VAT and employee band always from LF (the task's
@@ -214,7 +201,7 @@ def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
     _fill(payload, "Title", e.lead_title, e.position or contact.get("position"))
 
     # conversion requirements (org validation rules; all fill-only-blank)
-    if _blank(e.lead_dbid) and not e.lead_no_own_dbid:
+    if is_blank(e.lead_dbid) and not e.lead_no_own_dbid:
         payload["KN_NoOwnDBID__c"] = "true"  # KN_DbIdValidation XOR
     # address: always LeadFeeder (spec 2026-07-10, pinned by TestAddressFill). The event
     # parser stores the badge address in the parsed fields only; it is deliberately NOT
@@ -226,14 +213,14 @@ def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
     # Without a kununu slug, the LF company country fills only a fully blank country.
     # (CountryCode is the writable API form; the org's picklist derives Country from it.)
     slug_cc = (e.country_code or "").upper() or None
-    lf_cc = (_iso2(company.get("Country")) or "").upper() or None
+    lf_cc = country_iso2(company.get("Country"))   # LF sends names ("Germany"); the org wants ISO2
     if slug_cc:
         _put(payload, "CountryCode", slug_cc)
-    elif _blank(e.lead_country):
+    elif is_blank(e.lead_country):
         _fill(payload, "CountryCode", e.lead_country_code, lf_cc)
     postal = company.get("Postal_Code")
     effective_cc = (slug_cc or e.lead_country_code or lf_cc or "").upper()
-    expected_len = _POSTAL_LEN_BY_CC.get(effective_cc)
+    expected_len = POSTAL_LEN_BY_CC.get(effective_cc)
     if postal and (expected_len is None or len(str(postal).strip()) == expected_len):
         _fill(payload, "PostalCode", e.lead_postal_code, str(postal).strip())
     _fill(payload, "FirstName", e.lead_first_name,

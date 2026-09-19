@@ -564,7 +564,7 @@ def _no_gate_settings():
 def _matched_enrich(monkeypatch):
     """Make enrich_leads return an accepted LF match so the decision is create_new,
     with a kununu score under the live-scope cap so the row passes the go-live gate."""
-    from leadauto.leadfeeder.enrich import EnrichedLead
+    from leadauto.models import EnrichedLead
 
     def fake_enrich(lf, extracteds, settings, logger=None, **kw):
         return [EnrichedLead(extracted=e, matched=True, lf_company_id="123",

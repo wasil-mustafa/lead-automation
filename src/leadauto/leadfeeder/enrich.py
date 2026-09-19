@@ -10,48 +10,15 @@ Per-record HTTP errors are isolated so one bad lead never sinks the batch.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import requests
 
-from ..extract.models import ExtractedLead
+from ..models import (CONTACT_SKIP_NO_NAME, CONTACT_SKIP_NOT_NEEDED,
+                      CONTACT_SKIP_SEARCH_FAILED, EnrichedLead, ExtractedLead)
 from ..kununu_feed import base_slug, load_profiles_for_leads
 from ..logging import get_logger
-from ..textnorm import alnum, country_iso2, email_domain, normalize_host, normalize_name
+from ..textnorm import country_iso2, email_domain, is_blank, normalize_host, normalize_name
 from .client import (MATCH_RESULTS_PRIMARY, flatten_company, flatten_contact_details,
                      match_email)
-
-
-# Why a matched lead has no LF contact although LF was never asked for one. The QA
-# `NoContact` sheet shows these verbatim; "not found in LeadFeeder" is reserved for the
-# case where the search actually ran and held no such person.
-CONTACT_SKIP_NOT_NEEDED = "lead already has email and phone"     # config: contact_lookup_only_when_needed
-CONTACT_SKIP_NO_NAME = "no contact name to search"
-CONTACT_SKIP_SEARCH_FAILED = "LeadFeeder contact search failed (transport error)"
-
-
-@dataclass
-class EnrichedLead:
-    """An ExtractedLead plus whatever LeadFeeder returned. Feeds Module 3 (match/write-back)."""
-    extracted: ExtractedLead
-    matched: bool = False
-    lf_rejected: str | None = None  # post-retrieve sanity gate's rejection reason, or None
-    lf_company_id: str | None = None
-    matched_name: str | None = None
-    match_score: float | None = None
-    feed_country_code: str | None = None  # kununu feed profile_country_code (sanity-gate evidence)
-    feed_industry: str | None = None      # kununu feed profile_industry_name_de (write-back source)
-    kununu_score: float | None = None     # kununu feed profile_score (live-scope gate input)
-    name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
-    agreed_via: str | None = None  # which signal vouched: company_name / alt_name:<n> / email_domain
-    alt_names: list[str] = field(default_factory=list)  # assigned-company names from the kununu feed
-    match_pass: str = ""  # "primary" | "wide" (second-chance match); "" = never matched
-    company: dict = field(default_factory=dict)   # flatten_company output (or {})
-    contact_found: bool = False
-    contact: dict = field(default_factory=dict)   # flattened details + contact_id/full_name
-    # Why the contact cascade was NOT run for a matched lead (QA NoContact `reason`);
-    # None when it ran (found or not) or the lead never matched.
-    contact_skipped: str | None = None   # one of the CONTACT_SKIP_* reasons, or None when LF was asked
 
 
 def _domains_agree(a: str | None, b: str | None) -> bool:
@@ -84,8 +51,7 @@ def _match_sanity_reason(e: ExtractedLead, company: dict,
     - country_conflict: the retrieved company's country contradicts the lead's.
     - acronym_uncorroborated: acronym-like names make name agreement tautological
       (LF searched on the acronym we sent), so the match must be corroborated by
-      the lead's email domain matching the company's website/email domain, or by
-      VAT equality against the task-extracted VAT.
+      the lead's email domain matching the company's website/email domain.
     """
     # kununu-derived countries first (URL, then the feed's profile_country_code):
     # they are profile evidence, while the Lead's CountryCode/Country is often a
@@ -104,9 +70,6 @@ def _match_sanity_reason(e: ExtractedLead, company: dict,
         comp_doms = (normalize_host(company.get("Website")),
                      email_domain(company.get("Company_Email")))
         if any(_domains_agree(lead_dom, d) for d in comp_doms):
-            return None
-        lead_vat, comp_vat = alnum(e.vat_number), alnum(company.get("VAT_Id"))
-        if lead_vat and lead_vat == comp_vat:
             return None
         return "acronym_uncorroborated"
     return None
@@ -160,18 +123,14 @@ def _contact_name(e: ExtractedLead) -> str | None:
     return full or None
 
 
-def _has(value) -> bool:
-    return bool(value and str(value).strip())
-
-
 def lead_needs_email(e: ExtractedLead) -> bool:
     """No email will reach Lead.Email from what we already hold (Task email or Lead)."""
-    return not (_has(e.contact_email) or _has(e.lead_email))
+    return is_blank(e.contact_email) and is_blank(e.lead_email)
 
 
 def lead_needs_phone(e: ExtractedLead) -> bool:
     """Lead.Phone is blank — the only case the write-back fills it (fill-only-blank)."""
-    return not _has(e.lead_phone)
+    return is_blank(e.lead_phone)
 
 
 def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,

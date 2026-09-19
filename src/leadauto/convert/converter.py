@@ -30,6 +30,7 @@ from dataclasses import dataclass, replace
 
 from ..logging import get_logger
 from ..sf.client import guard_sf_id
+from ..sf.soql import in_list
 
 
 # Lead Ids per already-converted probe statement (~500 × 20 chars stays far inside the
@@ -38,8 +39,8 @@ _CONVERTED_PROBE_CHUNK = 500
 
 
 def _id_in_list(ids) -> str:
-    """Comma-joined quoted SOQL literals, each re-guarded to a bare Salesforce Id."""
-    return ", ".join(f"'{guard_sf_id(i)}'" for i in ids)
+    """SOQL literal list of Ids, each re-guarded to a bare Salesforce Id first."""
+    return in_list([guard_sf_id(i) for i in ids])
 
 
 def _short_id(sf_id: str) -> str:

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from ..logging import get_logger
 from ..sf import soql
 from ..textnorm import is_internal_email
-from .models import ExtractedLead
+from ..models import ExtractedLead
 from .parsers import extract_lead
 
 

@@ -14,10 +14,11 @@ from pathlib import Path
 
 from .logging import get_logger
 from .predictions import DEFAULT_PREDICTIONS_PATH, load_predictions, save_predictions
-from .qa_artifact import _add_sheet
+from .qa_artifact import add_sheet
 from .sf import soql
-from .state import REPO_ROOT, _parse_sf_dt
-from .textnorm import is_internal_email, normalize_city, normalize_host, normalize_postal
+from .state import REPO_ROOT, parse_sf_dt
+from .textnorm import (country_iso2, is_internal_email, is_true, normalize_city,
+                       normalize_host, normalize_postal)
 from .writeback import normalize_phone
 
 DEFAULT_RESULTS_PATH = REPO_ROOT / "state" / "shadow_results.jsonl"
@@ -37,18 +38,6 @@ DECISIONS_COLUMNS = [
     "converted_date", "result", "detail",
 ]
 FIELDS_COLUMNS = ["lead_id", "field", "status", "lf_value", "human_value"]
-
-
-def _is_true(v) -> bool:
-    """Coerce SF booleans: 300 pending IDs push the lead query over the Bulk-API
-    threshold, and bulk export returns 'true'/'false' STRINGS ('false' is truthy!)."""
-    return v is True or str(v).strip().lower() == "true"
-
-
-def _norm_country(v):
-    if not v:
-        return None
-    return str(v).strip().upper() or None
 
 
 def _norm_text(v):
@@ -72,7 +61,7 @@ _FIELD_CHECKS = [
      "account", "BillingPostalCode", normalize_postal, ("PostalCode",)),
     ("city", ("City", "KN_DBCity__c"), "account", "BillingCity", normalize_city,
      ("City",)),
-    ("country", ("CountryCode",), "account", "BillingCountryCode", _norm_country,
+    ("country", ("CountryCode",), "account", "BillingCountryCode", country_iso2,
      ("Country", "CountryCode")),
     ("employee_bin", ("KN_Employee__c",), "lead", "KN_Employee__c", _norm_text,
      ("KN_Employee__c",)),
@@ -106,15 +95,15 @@ def compare_fields(pred, lead: dict, account: dict | None,
     return out
 
 
-def _is_new_account(account: dict | None, converted_date_raw) -> bool:
+def is_new_account(account: dict | None, converted_date_raw) -> bool:
     """Salesforce creates the Account at conversion time, so a human 'create new'
     shows as Account.CreatedDate on the conversion day (ConvertedDate is DATE-only)."""
     if not account or not account.get("CreatedDate") or not converted_date_raw:
         return False
-    created = _parse_sf_dt(account["CreatedDate"])
+    created = parse_sf_dt(account["CreatedDate"])
     raw = str(converted_date_raw).strip()
     if "T" in raw:
-        return abs(created - _parse_sf_dt(raw)) <= timedelta(hours=1)
+        return abs(created - parse_sf_dt(raw)) <= timedelta(hours=1)
     # Known edge: created.date() is a UTC calendar date compared against a
     # Date-only ConvertedDate, so a conversion near local midnight can land on
     # the "wrong" side by one day. Acceptable — this only affects the backtest
@@ -130,16 +119,16 @@ def classify_decision(pred, lead: dict, account: dict | None) -> tuple[str, str]
             return "hit", "linked the predicted account"
         return "miss", f"human chose {converted_account}, predicted {pred.account_id}"
     if pred.decision == "create_new":
-        if _is_new_account(account, lead.get("ConvertedDate")):
+        if is_new_account(account, lead.get("ConvertedDate")):
             return "hit", "human also created a new account"
         return "miss", f"human linked pre-existing {converted_account}"
     if pred.decision == "skip":
         # Terminal skip (no LF match). The human converting it is a coverage gap the
         # pipeline would have dropped — a miss, distinct from a wrong-account miss.
-        kind = "new account" if _is_new_account(account, lead.get("ConvertedDate")) \
+        kind = "new account" if is_new_account(account, lead.get("ConvertedDate")) \
             else f"existing account {converted_account}"
         return "miss", f"human converted ({kind}); pipeline skipped (no LF match)"
-    kind = "new account" if _is_new_account(account, lead.get("ConvertedDate")) \
+    kind = "new account" if is_new_account(account, lead.get("ConvertedDate")) \
         else f"existing account {converted_account}"
     return "observed", f"review case; human resolved to {kind}"
 
@@ -230,8 +219,8 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
             pred.status = "excluded"
             stats["excluded"] += 1
             continue
-        if not lead or not _is_true(lead.get("IsConverted")):
-            if now - _parse_sf_dt(pred.predicted_at) > timedelta(days=_EXPIRE_DAYS):
+        if not lead or not is_true(lead.get("IsConverted")):
+            if now - parse_sf_dt(pred.predicted_at) > timedelta(days=_EXPIRE_DAYS):
                 pred.status = "expired"
                 stats["expired"] += 1
             else:
@@ -289,11 +278,11 @@ def _write_xlsx(new_results, rpath, stats, now, xpath) -> None:
                                       "converted_account_id", "converted_account_name",
                                       "account_created", "converted_date", "result", "detail")]
                       for r in new_results]
-    _add_sheet(wb, "Decisions", DECISIONS_COLUMNS, decisions_rows)
+    add_sheet(wb, "Decisions", DECISIONS_COLUMNS, decisions_rows)
 
     field_rows = [[r["lead_id"], label, f["status"], str(f["lf"] or ""), str(f["human"] or "")]
                   for r in new_results for label, f in r["fields"].items()]
-    _add_sheet(wb, "Fields", FIELDS_COLUMNS, field_rows)
+    add_sheet(wb, "Fields", FIELDS_COLUMNS, field_rows)
 
     # Rolling summary over the FULL results history.
     history = _load_all_results(rpath)
@@ -325,6 +314,6 @@ def _write_xlsx(new_results, rpath, stats, now, xpath) -> None:
                                           f"human_empty={fa['human_empty']} "
                                           f"lf_empty={fa['lf_empty']} "
                                           f"prefilled={fa['prefilled']} rate={rate}"])
-    _add_sheet(wb, "Summary", ["metric", "value"], summary)
+    add_sheet(wb, "Summary", ["metric", "value"], summary)
     xpath.parent.mkdir(parents=True, exist_ok=True)
     wb.save(xpath)

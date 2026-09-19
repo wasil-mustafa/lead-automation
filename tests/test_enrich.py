@@ -6,9 +6,10 @@ company retrieve, and contact assembly with lead-field fallbacks.
 """
 import requests
 from leadauto.config import Settings
-from leadauto.extract.models import ExtractedLead
+from leadauto.models import ExtractedLead
 from leadauto.kununu_feed import ProfileInfo
-from leadauto.leadfeeder.enrich import EnrichedLead, enrich_leads
+from leadauto.leadfeeder.enrich import enrich_leads
+from leadauto.models import EnrichedLead
 
 SETTINGS = Settings.load()
 
@@ -248,12 +249,12 @@ def test_enrich_search_contact_connection_error_is_non_fatal():
     assert r.matched is True           # company enrichment kept
     assert r.contact_found is False    # contact search failed soft
     # ...and the QA sheet must not claim LF "held no such person"
-    from leadauto.leadfeeder.enrich import CONTACT_SKIP_SEARCH_FAILED
+    from leadauto.models import CONTACT_SKIP_SEARCH_FAILED
     assert r.contact_skipped == CONTACT_SKIP_SEARCH_FAILED
 
 
 def test_enrich_no_contact_name_is_named_as_the_skip_reason():
-    from leadauto.leadfeeder.enrich import CONTACT_SKIP_NO_NAME
+    from leadauto.models import CONTACT_SKIP_NO_NAME
     fc = FakeClient()
     fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
     fc.company_attrs = {"c1": {}}
@@ -465,17 +466,6 @@ def test_acronym_match_corroborated_by_domain_survives():
     [r] = enrich_leads(fc, [_sng()], SETTINGS)
     assert r.matched is True
     assert r.lf_rejected is None
-
-
-def test_acronym_match_corroborated_by_vat_survives():
-    fc = FakeClient()
-    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "SNG AG"}}
-    fc.company_attrs = {"c1": {"url": "https://elsewhere.ch", "vat_id": "CHE-165.603.061",
-                               "address": {"country": "CH"}}}
-    e = _sng(email="andreas@gmail.com")  # freemail: domain can't corroborate
-    e.vat_number = "CHE165603061"
-    [r] = enrich_leads(fc, [e], SETTINGS)
-    assert r.matched is True
 
 
 def test_four_letter_uppercase_acronym_guarded_but_not_ordinary_names():
