@@ -135,16 +135,24 @@ def test_update_records_http_error_raises_with_body(monkeypatch):
         client.update_records("Lead", [{"Id": "00Q1", "Nope": "x"}])
 
 
-# --- query routing: CLI REST for short queries, direct Bulk API 2.0 for long ones ----
+# --- query routing: direct REST GET for short queries, direct Bulk API 2.0 for long ones -
 # Long IN(...) lists overflow the GET-URL header limit (HTTP 431), so they go through a
 # Bulk query job — since 2026-07-25 over direct HTTP rather than `sf data export bulk`,
-# which polled job status every 5 s and spent ~4-7 API calls where 2 suffice.
+# which polled job status every 5 s and spent ~4-7 API calls where 2 suffice. Short
+# queries stopped shelling out to the sf CLI on 2026-09-19: the CLI is now only the
+# token source (auth_info).
 
-def _fake_run(records, capture):
-    def run(cmd):
-        capture.append(cmd)
-        return types.SimpleNamespace(stdout=json.dumps({"result": {"records": records}}))
-    return run
+class _RestOrg:
+    """GET /query answering from a list of page bodies, in order."""
+    def __init__(self, bodies):
+        self.bodies = list(bodies)
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, method, url, data=None, headers=None, timeout=None):
+        path = url.split("salesforce.com", 1)[-1]
+        self.calls.append((method, path))
+        assert headers["Authorization"] == "Bearer TOK1"
+        return _FakeResponse(json.dumps(self.bodies.pop(0)))
 
 
 def _long_id_query(n=300):
@@ -196,14 +204,51 @@ def _bulk_client(monkeypatch, org):
     return client
 
 
-def test_query_short_uses_rest_and_strips_attributes(monkeypatch):
+def test_query_short_is_one_rest_get_and_strips_attributes(monkeypatch):
     client = SfClient("headless")
-    cmds: list[str] = []
-    monkeypatch.setattr(client, "_run",
-                        _fake_run([{"Id": "00Q1", "attributes": {"type": "Lead"}}], cmds))
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    org = _RestOrg([{"done": True, "totalSize": 1,
+                     "records": [{"Id": "00Q1", "attributes": {"type": "Lead"}}]}])
+    monkeypatch.setattr("leadauto.sf.client.requests.request", org)
     out = client.query("SELECT Id FROM Lead WHERE Id IN ('00Q1')")
     assert out == [{"Id": "00Q1"}]                     # attributes stripped
-    assert "data query --query" in cmds[0]
+    assert org.calls == [("GET", "/services/data/v66.0/query/?q=SELECT%20Id%20FROM%20Lead"
+                                 "%20WHERE%20Id%20IN%20%28%2700Q1%27%29")]
+
+
+def test_query_short_follows_next_records_url(monkeypatch):
+    # done=false is never the answer: a truncated read is a plausible-looking wrong one.
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    org = _RestOrg([
+        {"done": False, "nextRecordsUrl": "/services/data/v66.0/query/01g-2000",
+         "records": [{"Id": "00Q1"}]},
+        {"done": True, "records": [{"Id": "00Q2"}]},
+    ])
+    monkeypatch.setattr("leadauto.sf.client.requests.request", org)
+    assert client.query("SELECT Id FROM Lead") == [{"Id": "00Q1"}, {"Id": "00Q2"}]
+    assert org.calls[1] == ("GET", "/services/data/v66.0/query/01g-2000")
+
+
+def test_query_short_http_error_raises_with_body(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    monkeypatch.setattr("leadauto.sf.client.requests.request",
+                        lambda *a, **k: _FakeResponse(
+                            json.dumps([{"message": "No such column 'Nope'"}]), status_code=400))
+    with pytest.raises(SfError, match="No such column"):
+        client.query("SELECT Nope FROM Lead")
+
+
+def test_query_double_quotes_are_no_longer_a_shell_problem(monkeypatch):
+    # The ban existed for the shell-quoted `sf data query` string; REST carries the SOQL
+    # URL-encoded, so a double quote is just a character (SOQL itself still wants ').
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    org = _RestOrg([{"done": True, "records": []}])
+    monkeypatch.setattr("leadauto.sf.client.requests.request", org)
+    assert client.query('SELECT Id FROM Lead WHERE Name = "x"') == []
+    assert "%22x%22" in org.calls[0][1]
 
 
 def test_query_long_routes_to_bulk_job_in_two_calls(monkeypatch):

@@ -1,12 +1,10 @@
-"""Salesforce transport: the `sf` CLI for short SOQL and the session token, plus direct HTTP
-riding that token: Bulk API 2.0 query jobs for large reads, `/composite`
-for bundled reads, REST sObject Collections for record updates and the SOAP Partner API
-`convertLead()` for lead conversion.
+"""Salesforce transport: direct HTTP on the `sf` CLI's cached session token.
 
-Uses shell=True with a single command string (portable across Windows cmd and Linux
-bash: SOQL string literals use single quotes, so a double-quoted --query value is safe
-on both). Anonymous Apex is NOT offered: the pipeline user lacks Author Apex, so
-conversion goes over SOAP (sf/soap.py) and record writes over sObject Collections.
+REST `GET /query` for short SOQL, Bulk API 2.0 query jobs for long SOQL, `/composite`
+for bundled reads, REST sObject Collections for record updates and the SOAP Partner API
+`convertLead()` for lead conversion. The CLI itself is invoked for ONE thing: `sf org
+display` / `show-access-token`, to obtain the token (`auth_info`). Anonymous Apex is not
+offered: the pipeline user lacks Author Apex, so conversion goes over SOAP (sf/soap.py).
 
 API-call budget is the primary constraint on this module (the org's allocation is shared
 with business-critical integrations), so every transport here is the cheapest one that is
@@ -30,12 +28,12 @@ import requests
 _ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true",
         "FORCE_COLOR": "0", "NO_COLOR": "1"}
 
-# A plain `sf data query` sends the SOQL in the GET request URL, so a long IN(...) list
-# overflows Salesforce's request-header limit -> HTTP 431 "Request Header Fields Too
-# Large". Queries whose raw SOQL exceeds this length are routed through Bulk API 2.0
-# (`sf data export bulk`), which carries the query in the POST body. The threshold is on
-# raw length (URL-encoding inflates it) and stays well under the ~8 KB header budget, so
-# small everyday queries keep using the faster synchronous REST path.
+# A REST GET carries the SOQL in the request URL, so a long IN(...) list overflows
+# Salesforce's request-header limit -> HTTP 431 "Request Header Fields Too Large".
+# Queries whose raw SOQL exceeds this length are routed through a Bulk API 2.0 query job,
+# which carries the query in the POST body. The threshold is on raw length (URL-encoding
+# inflates it) and stays well under the ~8 KB header budget, so small everyday queries
+# keep using the faster synchronous REST path.
 _BULK_QUERY_THRESHOLD = 2000
 
 
@@ -121,19 +119,19 @@ class SfClient:
         through `query_many` instead — one /composite call for all of them.
         """
         soql = " ".join(soql.split())  # collapse whitespace/newlines
-        if '"' in soql:
-            raise SfError("SOQL must not contain double quotes (use single quotes for literals)")
         if bulk or len(soql) > _BULK_QUERY_THRESHOLD:
             return self._query_bulk(soql)
-        cmd = (
-            f'sf data query --query "{soql}" --target-org {self.alias} '
-            "--result-format json"
-        )
-        data = json.loads(self._run(cmd).stdout)
-        records = data.get("result", {}).get("records", [])
-        for r in records:
-            r.pop("attributes", None)
-        return records
+        # Direct REST GET on the cached token (since 2026-09-19; before that this path
+        # shelled out to `sf data query`, the one remaining CLI transport for data — and
+        # the source of the double-quote ban, the FORCE_COLOR env dance and the cp1252
+        # decode crash). Same single API call; `query_many` has run this exact request
+        # inside /composite in production since 2026-07-25.
+        response = self._request("GET", self._query_path(soql))
+        self._raise_for_status(response, "query")
+        return self._collect_query_records(self._json_body(response, "query"), "query")
+
+    def _query_path(self, soql: str) -> str:
+        return self._data_path(f"/query/?q={urllib.parse.quote(soql, safe='')}")
 
     def _query_bulk(self, soql: str) -> list[dict]:
         """Run SOQL as a Bulk API 2.0 query job over direct HTTP (2 calls on the happy
@@ -243,9 +241,6 @@ class SfClient:
         bundleable: list[tuple[str, str]] = []
         for label, soql in queries.items():
             collapsed = " ".join(soql.split())
-            if '"' in collapsed:
-                raise SfError("SOQL must not contain double quotes "
-                              "(use single quotes for literals)")
             if len(collapsed) > _BULK_QUERY_THRESHOLD:
                 out[label] = self._query_bulk(collapsed)   # own job; can't ride a GET URL
             else:
@@ -258,8 +253,7 @@ class SfClient:
     def _composite_query(self, items: list[tuple[str, str]]) -> dict[str, list[dict]]:
         """One /composite request carrying up to 25 SOQL GET subrequests."""
         payload = {"allOrNone": False, "compositeRequest": [
-            {"method": "GET", "referenceId": f"q{i}",
-             "url": self._data_path(f"/query/?q={urllib.parse.quote(soql, safe='')}")}
+            {"method": "GET", "referenceId": f"q{i}", "url": self._query_path(soql)}
             for i, (_label, soql) in enumerate(items)]}
         response = self._request("POST", self._data_path("/composite"),
                                  body=json.dumps(payload))

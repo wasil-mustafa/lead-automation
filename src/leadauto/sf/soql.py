@@ -1,7 +1,8 @@
 """SOQL query builders for the extraction reader.
 
 Pure string functions, no I/O. Two constraints shape them:
-- `SfClient.query` rejects double quotes, so every literal here is single-quoted.
+- Every literal is single-quoted (SOQL's own string syntax; the old shell-quoted
+  `sf data query` transport that also forbade double quotes is gone since 2026-09-19).
 - The watermark is injected as a SOQL *datetime literal* (ISO 8601, unquoted); string
   values (Subjects, Ids) are single-quoted with apostrophes escaped.
 

@@ -238,9 +238,12 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Task Description; existing Accounts/Contacts carry them.
 - **SOQL:** `Task` not allowed in reverse semi-joins (query Tasks first, then Leads by `WhoId`);
   `Subject` filterable but not groupable; `Description` is long-text → not LIKE-filterable.
-- **`sf` is wrapped** in `sf/client.py` via `subprocess(shell=True)` with double-quoted `--query`
-  (short SOQL + apex only; apex payloads go to temp files). **Large SOQL auto-routes to Bulk API
-  2.0:** a plain `sf data query` puts SOQL in the GET URL, so long `IN(...)` lists overflow the
+- **Every data call is direct HTTP on the CLI's cached token** (`sf/client.py`); the `sf` CLI
+  is shelled out ONLY for `sf org display` / `show-access-token` (`auth_info`). Short SOQL is
+  a REST `GET /query` (since 2026-09-19 — before that it shelled out to `sf data query`, which
+  is where the double-quote ban, the `FORCE_COLOR` env dance and the cp1252 decode crash came
+  from; the env fix stays because `org display --json` is still parsed). **Large SOQL
+  auto-routes to Bulk API 2.0:** a GET puts SOQL in the URL, so long `IN(...)` lists overflow the
   header limit → HTTP 431; `SfClient.query` routes SOQL over 2000 chars to a **direct** Bulk
   query job (`_query_bulk`, since 2026-07-25 — the `sf data export bulk` shell-out polled status
   every 5 s and cost ~4-7 requests where 2 do). Its rules, do NOT re-tune without re-measuring:

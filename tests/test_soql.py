@@ -1,7 +1,7 @@
 """SOQL builder tests. Builders are pure string functions — no org needed.
 
 Invariants that matter downstream:
-- SfClient.query rejects double quotes, so builders must use single-quoted literals only.
+- Builders use single-quoted literals only (SOQL string syntax).
 - Datetime watermark is a SOQL datetime literal (unquoted, ISO 8601).
 - Lead query carries the verified KN_* fields and IsConverted = false.
 """
