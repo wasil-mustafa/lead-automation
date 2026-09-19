@@ -75,6 +75,11 @@ class FakeSession:
         return [c for c in self.calls if c[0] == "POST" and fragment in c[1]]
 
 
+def match_company(client, company_name, **payload):
+    """Single-company match through the batched endpoint (the shape the pipeline uses)."""
+    return client.match_companies([{"company_name": company_name, **payload}])[0] or None
+
+
 def _client(routes, seed_account=True, **kw):
     kw.setdefault("max_requests_per_min", 0)    # throttle off unless a test opts in
     kw.setdefault("sleep_fn", lambda *_: None)   # never actually sleep in tests
@@ -195,7 +200,7 @@ def test_match_company_picks_highest_score_above_threshold():
     routes = {("POST", "/companies/match"):
               _match_payload([("c1", 0.62, "Low"), ("c2", 0.95, "Acme GmbH")])}
     client = _client(routes, min_match_score=0.70)
-    match = client.match_company("Acme", email="x@acme.de", country="Germany", country_code="DE")
+    match = match_company(client, "Acme", email="x@acme.de", country="Germany", country_code="DE")
     assert match == {"company_id": "c2", "match_score": 0.95, "matched_name": "Acme GmbH",
                      "name_agreement": 100, "agreed_via": "company_name"}
 
@@ -203,12 +208,12 @@ def test_match_company_picks_highest_score_above_threshold():
 def test_match_company_returns_none_below_threshold():
     routes = {("POST", "/companies/match"): _match_payload([("c1", 0.50, "Low")])}
     client = _client(routes, min_match_score=0.70)
-    assert client.match_company("Acme") is None
+    assert match_company(client, "Acme") is None
 
 
 def test_match_company_returns_none_when_no_matches():
     routes = {("POST", "/companies/match"): {"data": [[]]}}
-    assert _client(routes).match_company("Acme") is None
+    assert match_company(_client(routes), "Acme") is None
 
 
 # --- the name-agreement gate (calibrated on the 6-month control set) ----------
@@ -217,14 +222,14 @@ def test_match_company_rejects_high_score_with_wrong_name():
     # Observed live: LF returned "GogoMil UG" at 0.91 for myITplanet — score alone lies.
     routes = {("POST", "/companies/match"): _match_payload([("c1", 0.91, "GogoMil UG")])}
     client = _client(routes, min_match_score=0.70)
-    assert client.match_company("myITplanet GmbH", email="info@myitplanet.de") is None
+    assert match_company(client, "myITplanet GmbH", email="info@myitplanet.de") is None
 
 
 def test_match_company_rescues_low_score_with_exact_name():
     # Observed live: exact-name hits scored as low as 0.13 for small companies.
     routes = {("POST", "/companies/match"): _match_payload([("c1", 0.13, "Lingenfelder IT UG")])}
     client = _client(routes, min_match_score=0.70)
-    match = client.match_company("Lingenfelder IT")
+    match = match_company(client, "Lingenfelder IT")
     assert match["company_id"] == "c1" and match["name_agreement"] >= 90
 
 
@@ -232,7 +237,7 @@ def test_match_company_accepts_via_email_domain_root():
     # LF name differs from the kununu profile name but equals the corporate domain root.
     routes = {("POST", "/companies/match"): _match_payload([("c1", 0.90, "digitaleformate")])}
     client = _client(routes, min_match_score=0.70)
-    match = client.match_company("Digifom GmbH", email="kontakt@digitaleformate.de")
+    match = match_company(client, "Digifom GmbH", email="kontakt@digitaleformate.de")
     assert match["company_id"] == "c1"
 
 
@@ -240,14 +245,14 @@ def test_match_company_freemail_domain_never_vouches():
     # googlemail.com would "agree" with a Googlemail-named candidate — freemail is excluded.
     routes = {("POST", "/companies/match"): _match_payload([("c1", 0.90, "Googlemail Ltd")])}
     client = _client(routes, min_match_score=0.70)
-    assert client.match_company("Acme", email="jane@googlemail.com") is None
+    assert match_company(client, "Acme", email="jane@googlemail.com") is None
 
 
 def test_match_company_prefers_passing_candidate_over_higher_scoring_failing_one():
     routes = {("POST", "/companies/match"):
               _match_payload([("c1", 0.95, "Wrong Company AG"), ("c2", 0.80, "Acme GmbH")])}
     client = _client(routes, min_match_score=0.70)
-    match = client.match_company("Acme")
+    match = match_company(client, "Acme")
     assert match["company_id"] == "c2"
 
 
@@ -698,7 +703,7 @@ def test_match_companies_chunk_failure_yields_falsy_sentinel():
     assert out == [MATCH_CHUNK_FAILED, MATCH_CHUNK_FAILED] and not any(out)
     assert all(m is not None for m in out)
     # the single-company wrapper still answers None (its callers compare `is None`)
-    assert client.match_company("x") is None
+    assert match_company(client, "x") is None
 
 
 def test_match_companies_empty_input():
@@ -779,12 +784,6 @@ def test_retrieve_contacts_chunk_failure_isolated():
     routes = {("GET", "/contacts"): FakeResponse({}, status=500)}
     client = _client(routes, max_retries=0)
     assert client.retrieve_contacts(["k1"]) == {}  # logged + skipped, not raised
-
-
-def test_get_contact_details_flattens_single_contact():
-    handler = lambda p, b: {"data": [{"id": "k1", "attributes": {"position": {"title": "CEO"}}}]}
-    client = _client({("GET", "/contacts"): handler})
-    assert client.get_contact_details("k1")["position"] == "CEO"
 
 
 # --- find contact data (async external-provider enrichment) -------------------

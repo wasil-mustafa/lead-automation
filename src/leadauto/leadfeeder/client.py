@@ -448,15 +448,6 @@ class LeadfeederClient:
                 results.append(self._best_match(matches, chunk[j]))
         return results
 
-    def match_company(self, company_name: str, email: str | None = None,
-                      country: str | None = None, country_code: str | None = None) -> dict | None:
-        payload = {"company_name": company_name, "email": email}
-        if country:
-            payload["country"] = country
-        if country_code:
-            payload["country_code"] = country_code
-        return self.match_companies([payload])[0] or None   # a failed chunk reads as "no match" here
-
     def add_company_to_list(self, company_id: str, list_id: str) -> None:
         self.api_post(f"/companies/{company_id}/lists",
                       payload={"data": [{"type": "list", "id": list_id}]},
@@ -568,10 +559,6 @@ class LeadfeederClient:
             except requests.exceptions.RequestException as e:
                 self.log.warning("Contact retrieve batch failed: %s", e)
         return out
-
-    def get_contact_details(self, contact_id: str) -> dict:
-        attrs = self.retrieve_contacts([contact_id]).get(contact_id, {})
-        return flatten_contact_details(attrs)
 
     def find_contact_data(self, contact_ids: list[str], timeout: float = 180.0,
                           poll_interval: float = 10.0) -> bool:

@@ -1,11 +1,12 @@
-"""Wrapper over the `sf` CLI (short SOQL queries, anonymous Apex) plus direct HTTP calls
-riding the CLI's cached session: Bulk API 2.0 query jobs for large reads, `/composite`
+"""Salesforce transport: the `sf` CLI for short SOQL and the session token, plus direct HTTP
+riding that token: Bulk API 2.0 query jobs for large reads, `/composite`
 for bundled reads, REST sObject Collections for record updates and the SOAP Partner API
 `convertLead()` for lead conversion.
 
 Uses shell=True with a single command string (portable across Windows cmd and Linux
 bash: SOQL string literals use single quotes, so a double-quoted --query value is safe
-on both). SOQL/Apex payloads that are large or multi-line are written to temp files.
+on both). Anonymous Apex is NOT offered: the pipeline user lacks Author Apex, so
+conversion goes over SOAP (sf/soap.py) and record writes over sObject Collections.
 
 API-call budget is the primary constraint on this module (the org's allocation is shared
 with business-critical integrations), so every transport here is the cheapest one that is
@@ -19,10 +20,8 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import time
 import urllib.parse
-from pathlib import Path
 
 import requests
 
@@ -39,23 +38,6 @@ _ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true",
 # small everyday queries keep using the faster synchronous REST path.
 _BULK_QUERY_THRESHOLD = 2000
 
-# The sf CLI intermittently dies with a non-zero exit and NO output at all (the same
-# Node-level flake both workflows retry the login for) — seen live 2026-07-10 on the
-# first Stage-2 conversion dispatch: `sf apex run --json` exit 1, empty stdout.
-# apex_run retries only that no-output case; a parseable failure is real and never
-# re-run. Retrying conversion Apex is safe: it only converts IsConverted=false leads
-# and callers reconcile alreadyConverted rows.
-_APEX_RUN_ATTEMPTS = 3
-_APEX_RETRY_DELAY_S = 10
-
-
-def _env_int(name: str, default: int) -> int:
-    """A positive int from the environment, else `default` (empty/garbage/<=0 ignored)."""
-    try:
-        value = int((os.environ.get(name) or "").strip())
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 class SfError(RuntimeError):
@@ -101,9 +83,9 @@ _COMPOSITE_SUBREQUEST_MAX = 25
 # its results are read directly — the results endpoint doubles as the completion check.
 # The initial wait is a latency/robustness knob only: a job that is not ready yet just
 # falls back to the polling loop, so a wrong guess never costs correctness.
-_BULK_POLL_INITIAL_S = _env_int("LEADAUTO_BULK_POLL_INITIAL", 5)
-_BULK_POLL_INTERVAL_S = _env_int("LEADAUTO_BULK_POLL_INTERVAL", 5)
-_BULK_TIMEOUT_S = _env_int("LEADAUTO_BULK_TIMEOUT", 900)
+_BULK_POLL_INITIAL_S = 5
+_BULK_POLL_INTERVAL_S = 5
+_BULK_TIMEOUT_S = 900
 
 _HTTP_TIMEOUT_S = 120
 
@@ -477,53 +459,3 @@ class SfClient:
                 row["leadId"] = conversion["lead_id"]
         return rows
 
-    def apex_run(self, apex_code: str) -> str:
-        """Execute anonymous Apex and return the execution debug log.
-
-        Runs with --json and inspects the structured ExecuteAnonymous result, so a compile
-        error or an uncaught runtime exception raises SfError with the real problem instead
-        of returning output that merely lacks whatever the caller expected to find in it.
-        """
-        # Unique temp file (like _query_bulk): a fixed name would collide on overlap.
-        fd, tmp_name = tempfile.mkstemp(prefix="leadauto_apex_", suffix=".apex")
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(apex_code)
-            cmd = f'sf apex run --file "{tmp}" --target-org {self.alias} --json'
-            # --json reports failures inside the payload (with a non-zero exit code), so
-            # run uncheck-ed and diagnose from the structured result, not the exit code.
-            data = None
-            for attempt in range(1, _APEX_RUN_ATTEMPTS + 1):
-                res = self._run(cmd, check=False)
-                try:
-                    data = json.loads(res.stdout)
-                    break
-                except (json.JSONDecodeError, TypeError):
-                    if self.log:
-                        self.log.warning(
-                            "sf apex run attempt %d/%d produced no parseable --json "
-                            "output (exit %s): %s", attempt, _APEX_RUN_ATTEMPTS,
-                            res.returncode, (res.stderr or res.stdout or "")[:500])
-                    if attempt < _APEX_RUN_ATTEMPTS:
-                        time.sleep(_APEX_RETRY_DELAY_S)
-            if data is None:
-                raise SfError(f"sf apex run produced no parseable --json output after "
-                              f"{_APEX_RUN_ATTEMPTS} attempts "
-                              f"(exit {res.returncode}):\n{res.stderr or res.stdout}")
-        finally:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        result = data.get("result") if isinstance(data, dict) else None
-        if not isinstance(result, dict):
-            raise SfError(f"Unexpected sf apex run --json shape (exit {res.returncode}):\n"
-                          f"{res.stdout[:2000]}")
-        if not result.get("compiled"):
-            raise SfError(f"Apex did not compile: {result.get('compileProblem')}")
-        if not result.get("success"):
-            raise SfError("Apex run failed: "
-                          f"{result.get('exceptionMessage')}\n"
-                          f"{result.get('exceptionStackTrace') or ''}")
-        return result.get("logs") or ""

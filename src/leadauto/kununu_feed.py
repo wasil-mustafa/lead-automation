@@ -59,21 +59,11 @@ def base_slug(url: str | None) -> str | None:
 
 
 def _company_names(record: dict) -> list[str]:
-    # Field name unconfirmed until the first live feed pull (the legacy analysis
-    # script only read number_of_assigned_companies) — handle the plausible shapes;
-    # this function is the single place to adjust afterwards.
-    raw = record.get("assigned_companies") or record.get("assigned_company_names") or []
-    names: list[str] = []
-    for item in raw:
-        if isinstance(item, str):
-            name = item
-        elif isinstance(item, dict):
-            name = item.get("name") or item.get("company_name")
-        else:
-            name = None
-        if name and name.strip():
-            names.append(name.strip())
-    return names
+    """`common.kununu_feed.iter_feed_records` guarantees
+    `rec["assigned_companies"][i]["company_name"]` on both feed formats; that contract
+    is the reader's, not ours, so no other shape is guessed at here."""
+    return [c["company_name"].strip() for c in record.get("assigned_companies") or []
+            if isinstance(c, dict) and (c.get("company_name") or "").strip()]
 
 
 def _profile_score(record: dict) -> float | None:

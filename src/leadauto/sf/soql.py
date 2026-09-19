@@ -58,7 +58,7 @@ def tasks_since(watermark: str, subjects: Sequence[str],
     return soql
 
 
-def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
+def leads_by_ids(ids: Sequence[str]) -> str:
     """Unconverted, queue-owned Leads for the given Ids.
 
     Queue-owned only (scope decision 2026-07-03): pool-user-owned leads
@@ -73,8 +73,6 @@ def leads_by_ids(ids: Sequence[str], limit: int = 0) -> str:
         f"WHERE Id IN ({in_list(ids)}) AND IsConverted = false "
         "AND Owner.Type = 'Queue'"
     )
-    if limit and limit > 0:
-        soql += f" LIMIT {limit}"
     return soql
 
 

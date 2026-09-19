@@ -184,15 +184,10 @@ def parse_event(task: dict, lead: dict) -> ExtractedLead:
     return e
 
 
-def parse_content(task: dict, lead: dict) -> ExtractedLead:  # phase 3
-    raise NotImplementedError("content parser is not enabled yet (phase 3)")
-
-
 PARSERS = {
     "claimer": parse_claimer,
     "ebp_trial": parse_ebp_trial,
     "event": parse_event,
-    "content": parse_content,
 }
 
 

@@ -13,7 +13,7 @@ from typing import Optional
 import typer
 
 from .config import Settings
-from .leadfeeder.client import LeadfeederClient
+from .leadfeeder.client import MATCH_RESULTS_WIDE, LeadfeederClient
 from .logging import get_logger
 from .pipeline.stage1_enrich import run_stage1
 from .pipeline.stage2_convert import run_stage2
@@ -163,7 +163,7 @@ def backtest_skipped(
 
 @app.command("wide-match-backtest")
 def wide_match_backtest(
-    max_results: int = typer.Option(20, "--max-results",
+    max_results: int = typer.Option(MATCH_RESULTS_WIDE, "--max-results",
                                     help="Treatment width (API max 20). Control is always 3."),
     kununu_feed: bool = typer.Option(True, "--kununu-feed/--no-kununu-feed",
                                      help="Disable the feed: payloads then carry NO alt_names, "

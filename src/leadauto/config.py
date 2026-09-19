@@ -27,9 +27,6 @@ class Settings:
     raw: dict
     leadfeeder_api_key: str | None
     sf_auth_url: str | None
-    kununu_api_token: str | None = None
-    kununu_api_user: str | None = None
-    kununu_api_password: str | None = None
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "Settings":
@@ -43,9 +40,6 @@ class Settings:
             # Accept the existing repo secret name (SFDX_AUTH_URL) as a fallback so the
             # ensure_org sfdx-url login path works without a second secret.
             sf_auth_url=os.environ.get("SF_AUTH_URL") or os.environ.get("SFDX_AUTH_URL"),
-            kununu_api_token=os.environ.get("KUNUNU_API_TOKEN"),
-            kununu_api_user=os.environ.get("KUNUNU_API_USER"),
-            kununu_api_password=os.environ.get("KUNUNU_API_PASSWORD"),
         )
 
     # --- Salesforce ---
@@ -70,10 +64,6 @@ class Settings:
         """OwnerId of the 'Rohdaten Pool' user; linked Accounts with this owner are
         the only ones the Stage 2 pool-enrichment step may update."""
         return self.raw["salesforce"].get("rohdaten_pool_owner_id")
-
-    @property
-    def campaign_id(self) -> str | None:
-        return self.raw["salesforce"].get("campaign_id")
 
     # --- LeadFeeder ---
     @property
@@ -164,17 +154,6 @@ class Settings:
     @property
     def kununu_feed_max_age_hours(self) -> int:
         return int(self.raw.get("kununu_feed", {}).get("max_age_hours", 24))
-
-    @property
-    def kununu_feed_url(self) -> str | None:
-        """Explicit endpoint override, or None to use `common.kununu_feed`'s.
-
-        The old hardcoded default pointed at `profiles.jsonl`, which has returned 404
-        since the 2026-08-06 switchover to CSV — for eleven days every run degraded to
-        "no profiles" behind a single WARNING. Override the endpoint with the
-        KUNUNU_FEED_URL env var, which `common` reads at call time, rather than here.
-        """
-        return self.raw.get("kununu_feed", {}).get("url")
 
     # --- Task routing ---
     @property

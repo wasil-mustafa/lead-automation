@@ -15,8 +15,6 @@ salesforce:
   # 'Rohdaten Pool' user: linked Accounts owned by this user are raw data and get
   # overwrite-enriched at conversion time (Owner.Name = 'Rohdaten Pool').
   rohdaten_pool_owner_id: "005Mz00000Xw0jjIAB"
-  # Optional campaign tagging (currently inactive in the org; leave null to skip).
-  campaign_id: null
 
 leadfeeder:
   base_url: "https://api.leadfeeder.com/v1"

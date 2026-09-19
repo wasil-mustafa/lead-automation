@@ -1,6 +1,6 @@
 """Tests for the sf client wrapper: query routing, the direct Bulk API 2.0 read
-transport, /composite bundled reads, sObject-Collections updates, apex_run
-diagnostics/retry, auth_info and the SOAP convertLead path.
+transport, /composite bundled reads, sObject-Collections updates, auth_info and the
+SOAP convertLead path.
 """
 import json
 import types
@@ -392,91 +392,6 @@ def test_query_many_empty_makes_no_call(monkeypatch):
     assert client.query_many({}) == {}
 
 
-# --- apex_run: diagnose failures from the --json payload, not a lack of expected output --
-
-def _fake_apex_run(payload, capture):
-    """Stand in for SfClient._run: record the cmd, return an ExecuteAnonymous --json blob."""
-    def run(cmd, check=True):
-        capture.append(cmd)
-        return types.SimpleNamespace(returncode=0 if payload.get("success") else 1,
-                                     stdout=json.dumps({"result": payload}), stderr="")
-    return run
-
-
-def test_apex_run_returns_logs_on_success(monkeypatch):
-    client = SfClient("headless")
-    cmds: list[str] = []
-    logs = "USER_DEBUG|@@LEADAUTO@@[]@@LEADAUTO@@"
-    monkeypatch.setattr(client, "_run", _fake_apex_run(
-        {"compiled": True, "success": True, "logs": logs}, cmds))
-    assert client.apex_run("System.debug('x');") == logs
-    assert "--json" in cmds[0]
-
-
-def test_apex_run_raises_on_compile_error(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr(client, "_run", _fake_apex_run(
-        {"compiled": False, "compileProblem": "Unexpected token", "success": False}, []))
-    with pytest.raises(SfError, match="did not compile"):
-        client.apex_run("this is not apex")
-
-
-def test_apex_run_raises_on_runtime_exception(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr(client, "_run", _fake_apex_run(
-        {"compiled": True, "success": False,
-         "exceptionMessage": "System.LimitException: Too many SOQL queries: 101",
-         "exceptionStackTrace": "AnonymousBlock: line 1, column 1"}, []))
-    with pytest.raises(SfError, match="Apex run failed"):
-        client.apex_run("run that throws")
-
-
-def test_apex_run_raises_on_unparseable_output(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-
-    def run(cmd, check=True):
-        return types.SimpleNamespace(returncode=1, stdout="not json", stderr="boom")
-    monkeypatch.setattr(client, "_run", run)
-    with pytest.raises(SfError, match="no parseable"):
-        client.apex_run("System.debug('x');")
-
-
-# --- apex_run retry: the sf CLI intermittently dies on CI with exit 1 and EMPTY output
-# (same class as the login hangs both workflows retry) — seen live 2026-07-10 on the
-# first Stage-2 conversion dispatch. Retrying is safe: the conversion Apex only touches
-# IsConverted=false leads and callers reconcile alreadyConverted rows.
-
-def test_apex_run_retries_on_empty_output_then_succeeds(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-    calls: list[str] = []
-    good = json.dumps({"result": {"compiled": True, "success": True, "logs": "ok-log"}})
-
-    def run(cmd, check=True):
-        calls.append(cmd)
-        if len(calls) < 3:
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout=good, stderr="")
-    monkeypatch.setattr(client, "_run", run)
-    assert client.apex_run("System.debug('x');") == "ok-log"
-    assert len(calls) == 3
-
-
-def test_apex_run_gives_up_after_three_unparseable_attempts(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-    calls: list[str] = []
-
-    def run(cmd, check=True):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-    monkeypatch.setattr(client, "_run", run)
-    with pytest.raises(SfError, match="no parseable"):
-        client.apex_run("System.debug('x');")
-    assert len(calls) == 3
-
-
 # --- auth_info + SOAP convert_lead --------------------------------------------
 # Conversion goes over the SOAP Partner API (the org user lacks "Author Apex", so
 # anonymous-Apex conversion throws System.SecurityException; SOAP honors his
@@ -664,18 +579,3 @@ def test_convert_lead_empty_is_noop_without_post(monkeypatch):
     assert client.convert_lead([], converted_status="Qualified", owner_id=None) == []
 
 
-def test_apex_run_does_not_retry_apex_level_failures(monkeypatch):
-    """A parseable failure (compile error / runtime exception) is real — never re-run."""
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-    calls: list[str] = []
-
-    def run(cmd, check=True):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=1, stdout=json.dumps({"result": {
-            "compiled": False, "compileProblem": "Unexpected token", "success": False}}),
-            stderr="")
-    monkeypatch.setattr(client, "_run", run)
-    with pytest.raises(SfError, match="did not compile"):
-        client.apex_run("bad apex")
-    assert len(calls) == 1

@@ -137,7 +137,7 @@ python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-d
   snippets. He DOES hold Convert Leads (`KN_DataManager` perm set), which the SOAP Partner API
   honors — hence `sf/soap.py`. Extra trap: the CI CLI (2.140.6, Linux) mangles that runtime
   SecurityException into empty/unparseable `--json` output, which mimics a CLI flake (locally
-  2.141.6 shows the real exception). `SfClient.apex_run` still exists but conversion must NEVER
+  2.141.6 shows the real exception). `SfClient.apex_run` was DELETED 2026-09-19 (no caller); conversion must NEVER
   go back to Apex while the permission is absent.
 - **Duplicate rules can block conversion** (Apex or SOAP — same engine underneath) — the
   `setBypass*` methods on `Database.LeadConvert` are internal-only, and

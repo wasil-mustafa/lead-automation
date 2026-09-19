@@ -24,7 +24,6 @@ salesforce:
   converted_status: Qualified
   owner_id: 005Mz00000Xw0jjIAB
   rohdaten_pool_owner_id: 005Mz00000Xw0jjIAB
-  campaign_id: null
 leadfeeder:
   base_url: https://api.leadfeeder.com/v1
   company_list_name: Lead_Automation

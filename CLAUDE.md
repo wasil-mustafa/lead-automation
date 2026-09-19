@@ -443,7 +443,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   **Invariant: no accepted LF match ⇒ terminal `skip`** — the lead is excluded from BOTH account
   and contact matching (`match_lead` short-circuits: no account, no contact, no evidence), and
   Stage 2 drops an approved `skip` row rather than converting it. **`name_corroborated`** = normalized
-  name equal AND an independent weak signal (VAT/DBID/host/email-domain/fuzzy) on the SAME account
+  name equal AND an independent weak signal (VAT/host/email-domain/fuzzy) on the SAME account
   (two axes ⇒ auto-link; if the corroborator singles out one account it also disambiguates a name
   collision). **`name_only`** = name equal on exactly one account, nothing else. **`duplicate`** =
   name equal on 2+ accounts, none singled out (the org already holds duplicate accounts) — evidence
@@ -457,7 +457,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Decisions: `link | review | create_new | skip`. In shadow-compare a `skip` lead a
   human later converted scores as a coverage-gap **miss**. No score thresholds; `MatchResult`
   carries `rule` + `evidence`
-  (demoted VAT/DBID/host/email-domain/fuzzy hits are review evidence only). `name_address` =
+  (demoted VAT/host/email-domain/fuzzy hits are review evidence only). `name_address` =
   normalized name + `BillingPostalCode` + `BillingCity`; `kununu_agree` splits on
   `matching.dedupe_name_agree_min` (85). QA Review sheet: `match_rule`/`match_evidence`.
 - **Skipped-task backtest (2026-07-08):** the rule engine scored **87% correct account on 283**
@@ -519,8 +519,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
      the pipeline lost and never revisits (a `no_lf_match` skip is terminal and the
      lookback has passed those tasks). Recoverable, but they need a human read — see the
      table in that doc, not an automatic conversion.
-   - Two dead ends recorded so no one re-derives them: `ExtractedLead.vat_number` is filled
-     by **NO parser** (a dead field that reads as "no VAT"), and `Lead.Website` is populated
+   - Two dead ends recorded so no one re-derives them: `ExtractedLead.vat_number` was filled
+     by **NO parser** and was REMOVED 2026-09-19 (so was the Register_Id-vs-DUNS `dbid` axis, which could never match); `Lead.Website` is populated
      on only **3.3%** of queue-owned leads — which is why no identifier rescue arm exists.
 3. **Task-type rollout:** `claimer` + `ebp_trial` are enabled; add `event`, then `content`,
    calibrating from the review sheet's false-match rate.
