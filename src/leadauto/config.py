@@ -103,6 +103,34 @@ class Settings:
         return int(self.raw["leadfeeder"].get("match_batch", 200))
 
     @property
+    def lf_match_wide_results(self) -> int:
+        """`max_results_per_company` for the second-chance match on leads the primary
+        pass left unmatched (see leadfeeder/enrich.py). 0 disables the pass; the API
+        ceiling is 20 (client.MATCH_RESULTS_MAX). The primary pass is NOT affected.
+        An ABSENT key means 0: the pass was measured at 0 of 103 recovered (2026-08-25)
+        and disabled, so a config that forgets the key must not silently re-enable it."""
+        return int(self.raw["leadfeeder"].get("match_wide_results", 0))
+
+    @property
+    def live_allow_wide_match(self) -> bool:
+        """False (default) keeps second-chance matches OUT of the live scope: they are
+        predicted, written to the QA artifact and shadow-scored, but never written back
+        or converted. Flip it once the shadow evidence says the pass is accurate."""
+        return bool((self.raw["pipeline"].get("live_scope") or {})
+                    .get("allow_wide_match", False))
+
+    @property
+    def lf_contact_lookup_only_when_needed(self) -> bool:
+        """True runs the LF contact cascade (search + 1-credit retrieve + find-contact-data)
+        ONLY for leads whose Lead record still lacks an email or a phone — the two fields
+        the cascade exists to fill (Wasil, 2026-09-18, for the ZPE event leads: 116/116
+        had an email and 109/116 a phone, so 94 lookups would have served 7 leads).
+        A lead that already carries both keeps its values and costs nothing. False
+        (default, the scheduled pipeline) looks every matched lead up as before, which
+        also yields Title/LinkedIn/FirstName for leads that have email and phone."""
+        return bool(self.raw["leadfeeder"].get("contact_lookup_only_when_needed", False))
+
+    @property
     def lf_find_contact_data(self) -> bool:
         return bool(self.raw["leadfeeder"].get("find_contact_data", True))
 
@@ -224,11 +252,15 @@ class Settings:
 
     # --- Live scope (phased go-live gate; see live_scope.py) ---
     @property
-    def live_max_kununu_score(self) -> float:
+    def live_max_kununu_score(self) -> float | None:
         """Strict upper bound on the kununu profile score for live processing
-        (score < max qualifies; a missing score never does)."""
-        return float((self.raw["pipeline"].get("live_scope") or {})
-                     .get("max_kununu_score", 3.0))
+        (score < max qualifies; a missing score never does). An explicit `null` in the
+        config returns None = no score axis at all (see live_scope.py); an ABSENT key
+        keeps the 3.0 default, so the scheduled config cannot lose the cap by omission."""
+        scope = self.raw["pipeline"].get("live_scope") or {}
+        if "max_kununu_score" in scope and scope["max_kununu_score"] is None:
+            return None
+        return float(scope.get("max_kununu_score", 3.0))
 
     @property
     def live_decisions(self) -> list[str]:
@@ -236,6 +268,16 @@ class Settings:
         rollout here (e.g. add 'link') — `skip`/`review` must never be listed."""
         return list((self.raw["pipeline"].get("live_scope") or {})
                     .get("decisions", ["create_new"]))
+
+    @property
+    def repair_national_phone(self) -> bool:
+        """True lets the write-back OVERWRITE a Lead.Phone of the shape `+0<digits>` — a
+        national number with a '+' glued onto its trunk zero, which the org's validation
+        rule accepts (it only checks '+' and 6-15 digits) — with the international form
+        for the lead's country (DE +49 / AT +43 / CH +41). Found on 46 of 109 ZPE 2026
+        badge-scan leads (Wasil, 2026-09-18). Default False: Phone stays strictly
+        fill-only-blank in the scheduled pipeline; the one-off ZPE config sets it."""
+        return bool(self.raw["pipeline"].get("repair_national_phone", False))
 
     @property
     def include_enriched_leads(self) -> bool:

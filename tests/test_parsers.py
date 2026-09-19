@@ -139,3 +139,62 @@ def test_base_captures_lead_industry():
     lead = {"Id": "00Q1", "Industry": "IT"}
     e = _base({"WhoId": "00Q1"}, lead, "claimer")
     assert e.lead_industry == "IT"
+
+
+# event -> Task 00TMz00001Sl9nJMAR (ZPE 2026 badge scan, 2026-09-15); one ';'-joined line
+EVENT_DESC = (
+    "ZPE 2026; Review: 3; Title: ; Position: HR Consultant; Company size: 51-300 employees; "
+    "Industry: Consulting; Address: Gesundheitscampus-Süd 29, 44801 Bochum, DE; "
+    "Note: Chiara: Chiara: 2026-09-15 11:34:47 - 2026-09-15 11:34:51"
+)
+
+
+def test_parse_event_reads_url_from_lead_and_fills_blank_native_fields():
+    from leadauto.extract.parsers import parse_event
+    lead = _lead(company="SIVAplan GmbH", email="a@sivaplan.de")
+    lead["KN_KununuLinkProfile__c"] = "https://www.kununu.com/de/sivaplan"
+    e = parse_event(_task("Inbound Sales Task: Eventteilnahme", EVENT_DESC), lead)
+    assert e.task_type == "event"
+    assert e.kununu_url == "https://www.kununu.com/de/sivaplan"
+    assert (e.region, e.country_code) == ("Germany", "DE")
+    assert e.contact_email is None                      # nothing may overwrite Lead.Email
+    assert e.position == "HR Consultant"
+    assert (e.street, e.postal_code, e.city) == ("Gesundheitscampus-Süd 29", "44801", "Bochum")
+    assert e.address_country_code == "DE"               # the badge's own country, kept separately
+    # Parsed values must NOT be copied into the lead-native fields: the write-back reads
+    # those as "already on the Lead" and would then never write the badge values.
+    assert (e.lead_title, e.lead_street, e.lead_postal_code, e.lead_city) == (None, None, None, None)
+    assert e.company_size == "51-300 employees"
+    assert e.best_company == "SIVAplan GmbH"
+
+
+def test_parse_event_keeps_lead_native_fields_and_drops_other_position():
+    from leadauto.extract.parsers import parse_event
+    lead = _lead()
+    lead.update({"KN_KununuLinkProfile__c": "https://www.kununu.com/at/acme", "Title": "CEO",
+                 "Street": "Own 1", "PostalCode": "1010", "City": "Wien", "CountryCode": "AT"})
+    desc = EVENT_DESC.replace("Position: HR Consultant", "Position: Other")
+    e = parse_event(_task("Inbound Sales Task: Eventteilnahme", desc), lead)
+    assert e.position is None and e.lead_title == "CEO"
+    assert (e.lead_street, e.lead_postal_code, e.lead_city, e.lead_country_code) == (
+        "Own 1", "1010", "Wien", "AT")
+    assert (e.region, e.country_code) == ("Austria", "AT")
+
+
+def test_parse_event_badge_country_is_not_the_url_country():
+    # A Zürich badge on a lead whose profile link is /de/: the URL country drives
+    # region/CountryCode, but the badge country must survive for the Address_Check sheet.
+    from leadauto.extract.parsers import parse_event
+    lead = _lead()
+    lead["KN_KununuLinkProfile__c"] = "https://www.kununu.com/de/acme"
+    desc = "ZPE 2026; Review: 3; Address: Bahnhofstr. 1, 8001 Zürich, CH; Note: x"
+    e = parse_event(_task("Inbound Sales Task: Eventteilnahme", desc), lead)
+    assert (e.region, e.country_code) == ("Germany", "DE")
+    assert (e.city, e.address_country_code) == ("Zürich", "CH")
+
+
+def test_parse_event_without_any_url_leaves_region_empty():
+    from leadauto.extract.parsers import parse_event
+    e = parse_event(_task("Inbound Sales Task: Eventteilnahme", "ZPE 2026; Review: 4; Address: nonsense"), _lead())
+    assert e.kununu_url is None and e.region is None
+    assert e.street is None and e.lead_street is None

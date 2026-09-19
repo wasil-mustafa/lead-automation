@@ -105,3 +105,17 @@ def test_name_like_pattern_never_emits_quotes_or_backslashes():
     p = name_like_pattern("O'Brien & Söhne\ GmbH")
     assert p is not None
     assert "'" not in p and "\\" not in p
+
+
+def test_country_iso2_knows_leadfeeder_english_names_outside_europe():
+    # 2026-09-18 ZPE dry run: LF matched Evonik to a record in "Canada", Henkel to
+    # "Bosnia and Herzegovina" and Pax to "Argentina"; all three sailed through the
+    # country sanity gate (which fails open on None) with a foreign address staged.
+    from leadauto.textnorm import country_iso2
+    assert country_iso2("Canada") == "CA"
+    assert country_iso2("Bosnia and Herzegovina") == "BA"
+    assert country_iso2("Argentina") == "AR"
+    assert country_iso2("United States of America") == "US"
+    assert country_iso2("South Korea") == "KR"
+    assert country_iso2("Australia") == "AU"
+    assert country_iso2("Nowhere Land") is None      # still fails open on the unknown

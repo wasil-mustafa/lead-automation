@@ -51,6 +51,7 @@ class ExtractedLead:
     street: str | None = None
     postal_code: str | None = None
     city: str | None = None
+    address_country_code: str | None = None   # ISO2 of the PARSED address (event badge); not the kununu-URL country
     vat_number: str | None = None
 
     # parsed contact signals

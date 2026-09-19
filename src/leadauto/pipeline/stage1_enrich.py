@@ -87,11 +87,12 @@ def run_stage1(
     # need the field values).
     reasons = [live_scope_reason(r, settings) for r in results]
     if dry_run:
-        wb = write_back(sf_client, enriched, dry_run=True, logger=log)
+        wb = write_back(sf_client, enriched, dry_run=True, logger=log, settings=settings)
     else:
         live_enriched = [r.enriched for r, reason in zip(results, reasons) if reason is None]
         log.info("Live scope: %d of %d lead(s) pass the gate", len(live_enriched), len(results))
-        wb = write_back(sf_client, live_enriched, dry_run=False, logger=log)
+        wb = write_back(sf_client, live_enriched, dry_run=False, logger=log,
+                        settings=settings)
     new_state = advance(state, extraction.processed_tasks)
 
     failures = wb.get("failures", [])
@@ -107,7 +108,7 @@ def run_stage1(
             shadow_results, shadow_payloads = results, wb.get("payloads", [])
         else:
             shadow_results = [r for r, reason in zip(results, reasons) if reason is not None]
-            shadow_payloads = [lead_field_payload(r.enriched) for r in shadow_results]
+            shadow_payloads = [lead_field_payload(r.enriched, settings) for r in shadow_results]
         if shadow_results:
             stamp = (now or datetime.now(timezone.utc)).isoformat()
             n = record_predictions(shadow_results, shadow_payloads, stamp, predictions_path)

@@ -8,6 +8,10 @@ stands in for `requests.Session` (the unavoidable external boundary) and records
 import pytest
 
 from leadauto.leadfeeder.client import (
+    MATCH_CHUNK_FAILED,
+    MATCH_RESULTS_MAX,
+    MATCH_RESULTS_PRIMARY,
+    MATCH_RESULTS_WIDE,
     LeadfeederClient,
     LeadfeederError,
     flatten_company,
@@ -646,7 +650,10 @@ def test_match_chunk_still_degrades_after_transport_retries_are_exhausted():
     import requests
     routes = {("POST", "/companies/match"): requests.exceptions.ConnectionError("drop")}
     client = _client(routes, max_retries=2)
-    assert client.match_companies([{"company_name": "A"}, {"company_name": "B"}]) == [None, None]
+    out = client.match_companies([{"company_name": "A"}, {"company_name": "B"}])
+    # falsy (callers degrade as before) but NOT None: "never asked" != "rejected"
+    assert out == [MATCH_CHUNK_FAILED, MATCH_CHUNK_FAILED] and not any(out)
+    assert all(m is not None for m in out)
 
 
 # --- match_companies (batch) -------------------------------------------------
@@ -684,14 +691,66 @@ def test_match_companies_applies_score_floor():
     assert client.match_companies([{"company_name": "Acme"}]) == [None]
 
 
-def test_match_companies_chunk_failure_yields_none():
+def test_match_companies_chunk_failure_yields_falsy_sentinel():
     routes = {("POST", "/companies/match"): FakeResponse({}, status=500)}
     client = _client(routes, max_retries=0)
-    assert client.match_companies([{"company_name": "x"}, {"company_name": "y"}]) == [None, None]
+    out = client.match_companies([{"company_name": "x"}, {"company_name": "y"}])
+    assert out == [MATCH_CHUNK_FAILED, MATCH_CHUNK_FAILED] and not any(out)
+    assert all(m is not None for m in out)
+    # the single-company wrapper still answers None (its callers compare `is None`)
+    assert client.match_company("x") is None
 
 
 def test_match_companies_empty_input():
     assert _client({}).match_companies([]) == []
+
+
+# --- candidate width (max_results_per_company) --------------------------------
+# The primary pass must keep asking for 3: the acceptance gate was calibrated at that
+# width, and more candidates can only outrank the accepted one on (score, agreement).
+# The second-chance pass in enrich asks for 20, for unmatched leads only.
+
+def test_match_companies_defaults_to_three_candidates():
+    seen = {}
+    def handler(params, body):
+        seen.update(params)
+        return {"data": [[]]}
+    client = _client({("POST", "/companies/match"): handler})
+    client.match_companies([{"company_name": "Acme"}])
+    assert seen["max_results_per_company"] == MATCH_RESULTS_PRIMARY == 3
+
+
+def test_match_companies_sends_the_requested_width():
+    seen = {}
+    def handler(params, body):
+        seen.update(params)
+        return {"data": [[]]}
+    client = _client({("POST", "/companies/match"): handler})
+    client.match_companies([{"company_name": "Acme"}], max_results=MATCH_RESULTS_WIDE)
+    assert seen["max_results_per_company"] == MATCH_RESULTS_WIDE == 20
+
+
+def test_match_companies_rejects_a_width_outside_the_api_range():
+    # 20 is the machine-readable spec's ceiling; the prose doc's 10 is wrong. A bad
+    # value must fail here, not as an opaque 400 that degrades the whole chunk to None.
+    client = _client({("POST", "/companies/match"): lambda p, b: {"data": [[]]}})
+    for bad in (0, -1, MATCH_RESULTS_MAX + 1):
+        with pytest.raises(ValueError):
+            client.match_companies([{"company_name": "Acme"}], max_results=bad)
+
+
+def test_a_wider_call_still_gates_every_candidate():
+    # The safety argument for widening: `_best_match` judges all candidates, so a wider
+    # call cannot accept anything the narrow call would have rejected.
+    handler = lambda p, b: {"data": [[
+        {"id": "c1", "attributes": {"match_score": 0.95},
+         "relationships": {"company_summary": {"attributes": {"name": "Totally Other"}}}},
+        {"id": "c2", "attributes": {"match_score": 0.10},
+         "relationships": {"company_summary": {"attributes": {"name": "Also Wrong"}}}},
+    ]]}
+    client = _client({("POST", "/companies/match"): handler})
+    assert client.match_companies([{"company_name": "Acme GmbH"}],
+                                  max_results=MATCH_RESULTS_WIDE) == [None]
 
 
 # --- retrieve_contacts (batch) -----------------------------------------------

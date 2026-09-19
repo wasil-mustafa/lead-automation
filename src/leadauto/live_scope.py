@@ -16,12 +16,30 @@ from __future__ import annotations
 
 def live_scope_reason(result, settings) -> str | None:
     """None => the MatchResult is in live scope; else a short exclusion reason
-    (`decision_<d>` / `score_missing` / `score_<value>`) for the QA artifact."""
+    (`decision_<d>` / `score_missing` / `score_<value>` / `match_pass_wide`) for the QA
+    artifact."""
+    # A second-chance ("wide") LF match is a weaker claim than a primary one — it is the
+    # candidate LF ranked 4th-20th — and every downstream write (firmographics onto the
+    # Lead, a new Account on conversion) trusts the match completely. Prior art measured
+    # rescued matches as ~6.5x more likely to be an umbrella/parent record than primary
+    # ones (`Contact Presence Check`, 2026-08-23). So they predict and shadow-score but
+    # do not convert until that accuracy is measured HERE. Flip with
+    # `pipeline.live_scope.allow_wide_match: true`.
+    if (not settings.live_allow_wide_match
+            and (result.enriched.match_pass or "primary") != "primary"):
+        return "match_pass_wide"
     if result.decision not in settings.live_decisions:
         return f"decision_{result.decision}"
+    # `max_kununu_score: null` (Settings -> None) switches the score axis OFF for a run
+    # whose population is NOT the No-Demand triage — e.g. the 2026-09 ZPE event leads,
+    # where the decision alone decides. With a cap set, a missing score still fails
+    # closed: that fail-closed default is what protects the scheduled runs.
+    cap = settings.live_max_kununu_score
+    if cap is None:
+        return None
     score = result.enriched.kununu_score
     if score is None:
         return "score_missing"
-    if score >= settings.live_max_kununu_score:
+    if score >= cap:
         return f"score_{score:g}"
     return None

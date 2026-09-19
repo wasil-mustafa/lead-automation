@@ -136,8 +136,56 @@ def parse_ebp_trial(task: dict, lead: dict) -> ExtractedLead:
     return e
 
 
-def parse_event(task: dict, lead: dict) -> ExtractedLead:  # phase 2
-    raise NotImplementedError("event parser is not enabled yet (phase 2)")
+def _event_field(desc: str, label: str) -> str | None:
+    """Value after `label` up to the next ';' in a badge-scan Description, trimmed."""
+    idx = desc.find(label)
+    if idx == -1:
+        return None
+    rest = desc[idx + len(label):]
+    end = rest.find(";")
+    value = (rest if end == -1 else rest[:end]).strip()
+    return value or None
+
+
+# "Gesundheitscampus-Süd 29, 44801 Bochum, DE" -> street / postal / city / ISO2.
+_EVENT_ADDRESS_RE = re.compile(
+    r"^(?P<street>.*?),\s*(?P<postal>[A-Z]{0,2}-?\d{4,5})\s+(?P<city>.+?),\s*(?P<cc>[A-Z]{2})$"
+)
+
+
+def parse_event(task: dict, lead: dict) -> ExtractedLead:
+    """Event participation (badge scan) — added 2026-09-18 for the ZPE 2026 leads.
+
+    The Description is ONE line of `;`-separated fields written by the badge scanner
+    (`ZPE 2026; Review: 3; Title: ; Position: HR Consultant; Company size: 51-300
+    employees; Industry: Consulting; Address: <street>, <postal> <city>, <CC>; Note: …`).
+    It carries NO kununu URL and NO email, so the kununu URL — the one Task-side field
+    the write-back needs — is read off the Lead's `KN_KununuLinkProfile__c` instead
+    (set by hand from the exact-match workbook before the run; a URL in the Description
+    is honoured first if one ever appears). Consequence: an event run must set
+    `pipeline.include_enriched_leads: true`, because that same field is the reader's
+    "already processed" marker. `contact_email` stays None (nothing to overwrite the
+    Lead email with). Badge Position and address land in the PARSED fields
+    (`position`, `street`, `postal_code`, `city`) — never in the `lead_*` fields, which
+    the write-back reads as "what the Lead already has" (a parsed value copied there
+    would look pre-filled and silently never be written). `writeback.lead_field_payload`
+    fills a blank Title/address from these before falling back to LeadFeeder.
+    """
+    desc = task.get("Description") or ""
+    e = _base(task, lead, "event")
+    e.kununu_url = _kununu_url(desc) or (lead.get("KN_KununuLinkProfile__c") or "").strip() or None
+    e.region, e.country_code = _region_from_url(e.kununu_url)
+    e.position = _event_field(desc, "Position:")
+    if e.position and e.position.lower() == "other":
+        e.position = None
+    e.company_size = _event_field(desc, "Company size:")
+    e.notes = _event_field(desc, "Note:")
+    address = _event_field(desc, "Address:")
+    m = _EVENT_ADDRESS_RE.match(address) if address else None
+    if m:
+        e.street, e.postal_code, e.city = m.group("street").strip(), m.group("postal"), m.group("city").strip()
+        e.address_country_code = m.group("cc")   # the badge's country, distinct from the kununu-URL slug
+    return e
 
 
 def parse_content(task: dict, lead: dict) -> ExtractedLead:  # phase 3

@@ -8,10 +8,13 @@ from datetime import date
 
 from leadauto.extract.models import ExtractedLead
 from leadauto.leadfeeder.enrich import EnrichedLead
+from leadauto.config import Settings
 from leadauto.writeback import (
     employee_bin,
     lead_field_payload,
+    lf_contact_email,
     normalize_phone,
+    repair_national_phone,
     split_first_name,
     write_back,
 )
@@ -130,6 +133,16 @@ def test_title_fills_only_blank():
     e = _extracted(lead_title="CEO")
     enr = EnrichedLead(extracted=e, contact={"position": "Head of HR"})
     assert "Title" not in lead_field_payload(enr)
+
+
+def test_task_parsed_position_beats_lf_contact_title_but_never_a_set_lead_title():
+    # Event badge scans (2026-09-18) carry the attendee's own position; claimer/trial
+    # tasks leave `position` None, so their payload is unchanged.
+    e = _extracted(position="HR Consultant")
+    enr = EnrichedLead(extracted=e, contact={"position": "Head of HR"})
+    assert lead_field_payload(enr)["Title"] == "HR Consultant"
+    e = _extracted(position="HR Consultant", lead_title="CEO")
+    assert "Title" not in lead_field_payload(EnrichedLead(extracted=e, contact={}))
 
 
 # --- write_back orchestration ------------------------------------------------
@@ -435,3 +448,115 @@ class TestEmployeeAlwaysLeadfeeder:
         e = _extracted(lead_employee_category="1-10")
         enr = EnrichedLead(extracted=e, matched=True, company={"Employee_Count": 75})
         assert lead_field_payload(enr)["KN_Employee__c"] == "51-100"
+
+
+class TestEmailFromLeadfeederContact:
+    """Wasil, 2026-09-18: with no Task email (event badge scans), the LF contact's
+    email fills a BLANK Lead.Email. It never overwrites, and a Task email still wins."""
+
+    def test_lf_email_fills_blank_lead_email(self):
+        enr = EnrichedLead(extracted=_extracted(task_type="event", contact_email=None,
+                                                lead_email=None),
+                           contact_found=True,
+                           contact={"contact_emails": "jane@acme.de; j.doe@acme.de"})
+        assert lead_field_payload(enr)["Email"] == "jane@acme.de"
+
+    def test_lf_email_never_overwrites_existing_lead_email(self):
+        enr = EnrichedLead(extracted=_extracted(task_type="event", contact_email=None,
+                                                lead_email="me@firma.de"),
+                           contact_found=True,
+                           contact={"contact_emails": "jane@acme.de"})
+        assert "Email" not in lead_field_payload(enr)
+
+    def test_task_email_beats_lf_email(self):
+        enr = EnrichedLead(extracted=_extracted(contact_email="claimer@acme.de",
+                                                lead_email=None),
+                           contact_found=True,
+                           contact={"contact_emails": "jane@acme.de"})
+        assert lead_field_payload(enr)["Email"] == "claimer@acme.de"
+
+    def test_no_contact_no_email(self):
+        enr = EnrichedLead(extracted=_extracted(task_type="event", contact_email=None,
+                                                lead_email=None))
+        assert "Email" not in lead_field_payload(enr)
+
+    def test_lf_contact_email_helper(self):
+        assert lf_contact_email({"contact_emails": " a@x.de ; b@x.de"}) == "a@x.de"
+        assert lf_contact_email({"contact_emails": ""}) is None
+        assert lf_contact_email({}) is None
+        assert lf_contact_email(None) is None
+
+
+def _settings(**pipeline):
+    import copy
+    raw = copy.deepcopy(Settings.load().raw)
+    raw["pipeline"].update(pipeline)
+    return Settings(raw=raw, leadfeeder_api_key=None, sf_auth_url=None)
+
+
+class TestRepairNationalPhone:
+    """Wasil, 2026-09-18: 46 of 109 ZPE badge-scan leads carry `+0<digits>` — a national
+    number with '+' on the trunk zero. Repaired to the lead country's code, ZPE config only."""
+
+    def test_helper_de_at_ch(self):
+        assert repair_national_phone("+02091584338", "DE") == "+492091584338"
+        assert repair_national_phone("+015146371938", "de") == "+4915146371938"
+        assert repair_national_phone("+015123456", "AT") == "+4315123456"
+        assert repair_national_phone("+0443334455", "CH") == "+41443334455"
+
+    def test_helper_leaves_international_and_other_countries_alone(self):
+        assert repair_national_phone("+4940419131", "DE") is None
+        assert repair_national_phone("+420739583308", "DE") is None   # already +420
+        assert repair_national_phone("+02091584338", "FR") is None    # trunk rule unknown
+        assert repair_national_phone("+02091584338", None) is None
+        assert repair_national_phone("+0091584338", "DE") is None     # 00… is not a trunk 0
+        assert repair_national_phone("", "DE") is None
+        assert repair_national_phone(None, "DE") is None
+
+    def test_the_shipped_default_is_off(self):
+        assert Settings.load().repair_national_phone is False
+
+    def test_gated_payload_overwrites_national_phone(self):
+        e = _extracted(lead_phone="+02091584338", lead_country_code="DE")
+        enr = EnrichedLead(extracted=e, contact_found=True,
+                           contact={"phone_direct": "+49 40 419131"})
+        payload = lead_field_payload(enr, _settings(repair_national_phone=True))
+        assert payload["Phone"] == "+492091584338"   # repaired, NOT replaced by LF
+
+    def test_default_settings_keep_phone_fill_only_blank(self):
+        e = _extracted(lead_phone="+02091584338", lead_country_code="DE")
+        enr = EnrichedLead(extracted=e, contact_found=True,
+                           contact={"phone_direct": "+49 40 419131"})
+        assert "Phone" not in lead_field_payload(enr, _settings(repair_national_phone=False))
+        assert "Phone" not in lead_field_payload(enr)   # no settings at all
+
+    def test_gated_payload_uses_slug_country_over_lead_country(self):
+        # country precedence mirrors CountryCode: kununu slug > Lead CountryCode > LF
+        e = _extracted(lead_phone="+015123456", lead_country_code="DE", country_code="AT")
+        assert lead_field_payload(EnrichedLead(extracted=e),
+                                  _settings(repair_national_phone=True))["Phone"] == "+4315123456"
+
+    def test_gated_payload_still_fills_a_blank_phone_from_leadfeeder(self):
+        enr = EnrichedLead(extracted=_extracted(lead_phone=None, lead_country_code="DE"),
+                           contact_found=True, contact={"phone_direct": "+49 40 419131"})
+        assert lead_field_payload(enr, _settings(repair_national_phone=True))["Phone"] == "+4940419131"
+
+    def test_gated_payload_leaves_a_correct_phone_alone(self):
+        enr = EnrichedLead(extracted=_extracted(lead_phone="+4940419131", lead_country_code="DE"),
+                           contact_found=True, contact={"phone_direct": "+49 30 1"})
+        assert "Phone" not in lead_field_payload(enr, _settings(repair_national_phone=True))
+
+    def test_write_back_passes_settings_through(self):
+        class FakeClient:
+            def __init__(self):
+                self.payloads = None
+
+            def update_records(self, sobject, payloads):
+                self.payloads = payloads
+                return {"processed": len(payloads), "failed": 0, "failures": [], "confirmed": True}
+
+        fc = FakeClient()
+        e = _extracted(lead_phone="+02091584338", lead_country_code="DE")
+        write_back(fc, [EnrichedLead(extracted=e)], dry_run=False,
+                   settings=_settings(repair_national_phone=True))
+        assert fc.payloads[0]["Phone"] == "+492091584338"

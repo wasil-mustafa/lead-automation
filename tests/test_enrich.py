@@ -16,6 +16,10 @@ SETTINGS = Settings.load()
 class FakeClient:
     def __init__(self):
         self.match_by_name: dict = {}     # company_name -> match dict | None
+        # Only visible at max_results > MATCH_RESULTS_PRIMARY: the candidates LF ranks
+        # 4th-20th, which the second-chance pass is the only caller that ever sees.
+        self.wide_match_by_name: dict = {}
+        self.match_widths: list = []      # max_results of every match_companies call
         self.company_attrs: dict = {}     # lf_company_id -> raw attrs
         self.contact_by_name: dict = {}   # name -> {contact_id, full_name} | None
         self.contact_attrs: dict = {}     # contact_id -> raw LF attributes
@@ -30,11 +34,14 @@ class FakeClient:
         self.calls.append(("list", name, scope))
         return f"{scope}-list"
 
-    def match_companies(self, payloads):
+    def match_companies(self, payloads, max_results=3):
         self.calls.append(("match_companies", tuple(
             (p["company_name"], p.get("email"), p.get("country"), p.get("country_code"))
             for p in payloads)))
-        return [self.match_by_name.get(p["company_name"]) for p in payloads]
+        self.match_widths.append(max_results)
+        table = (self.match_by_name if max_results <= 3
+                 else {**self.match_by_name, **self.wide_match_by_name})
+        return [table.get(p["company_name"]) for p in payloads]
 
     def add_company_to_list(self, company_id, list_id):
         self.calls.append(("add_company", company_id, list_id))
@@ -103,9 +110,9 @@ def test_match_payload_omits_country_fields():
     # set (2026-07-03 probe) 59 leads regained a candidate without them and ALL agreed
     # with the true converted account. The name-agreement gate guards wrong-company.
     class RawCapture(FakeClient):
-        def match_companies(self, payloads):
+        def match_companies(self, payloads, max_results=3):
             self.raw_payloads = payloads
-            return super().match_companies(payloads)
+            return super().match_companies(payloads, max_results)
 
     fc = RawCapture()
     enrich_leads(fc, [_extracted()], SETTINGS)
@@ -240,6 +247,42 @@ def test_enrich_search_contact_connection_error_is_non_fatal():
     [r] = enrich_leads(fc, [_extracted()], SETTINGS)
     assert r.matched is True           # company enrichment kept
     assert r.contact_found is False    # contact search failed soft
+    # ...and the QA sheet must not claim LF "held no such person"
+    from leadauto.leadfeeder.enrich import CONTACT_SKIP_SEARCH_FAILED
+    assert r.contact_skipped == CONTACT_SKIP_SEARCH_FAILED
+
+
+def test_enrich_no_contact_name_is_named_as_the_skip_reason():
+    from leadauto.leadfeeder.enrich import CONTACT_SKIP_NO_NAME
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9, "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None, first=None, last=None)], SETTINGS)
+    assert r.contact_skipped == CONTACT_SKIP_NO_NAME
+    # a lead LF was actually asked about keeps None (-> "not found in LeadFeeder")
+    [asked] = enrich_leads(fc, [_extracted()], SETTINGS)
+    assert asked.contact_skipped is None
+
+
+def test_wide_pass_does_not_re_ask_a_lead_whose_primary_chunk_failed():
+    # A failed primary chunk degrades to MATCH_CHUNK_FAILED, not None: those leads were
+    # never judged at width 3, so re-asking them would stamp a hit `wide`, hold it out of
+    # live scope and corrupt the wide-pass accuracy measurement.
+    from leadauto.leadfeeder.client import MATCH_CHUNK_FAILED
+
+    class FailingPrimary(FakeClient):
+        def match_companies(self, payloads, max_results=3):
+            self.calls.append(("match_companies", tuple(
+                (p.get("company_name"), p.get("email"), None, None) for p in payloads)))
+            self.match_widths.append(max_results)
+            return [MATCH_CHUNK_FAILED] * len(payloads)
+
+    fc = FailingPrimary()
+    fc.wide_match_by_name = {"Acme GmbH": {"company_id": "c9", "match_score": 0.42,
+                                           "matched_name": "Acme GmbH"}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], _wide_settings(20))
+    assert r.matched is False and r.match_pass == ""
+    assert fc.match_widths == [3]                      # no second call at width 20
 
 
 def test_enrich_retrieves_all_contacts_in_one_call():
@@ -302,9 +345,9 @@ def test_enrich_puts_assigned_companies_into_alt_names():
     fc.company_attrs = {"c1": {}}
     captured = {}
     orig = fc.match_companies
-    def spy(payloads):
+    def spy(payloads, max_results=3):
         captured["payloads"] = payloads
-        return orig(payloads)
+        return orig(payloads, max_results)
     fc.match_companies = spy
     e = _extracted(company="Siemens", contact_name=None)
     e.kununu_profile_uuid = "u1"
@@ -323,9 +366,9 @@ def test_enrich_no_profile_found_leaves_payload_unchanged():
     fc.company_attrs = {"c1": {}}
     captured = {}
     orig = fc.match_companies
-    def spy(payloads):
+    def spy(payloads, max_results=3):
         captured["payloads"] = payloads
-        return orig(payloads)
+        return orig(payloads, max_results)
     fc.match_companies = spy
     [r] = enrich_leads(fc, [_extracted(contact_name=None)], SETTINGS, profiles={})
     assert "alt_names" not in captured["payloads"][0]
@@ -597,3 +640,175 @@ def test_no_countries_no_rejection():
     e = _extracted(contact_name=None, cc=None, region=None)
     [r] = enrich_leads(fc, [e], SETTINGS)
     assert r.matched is True
+
+
+# --- the second-chance ("wide") match ----------------------------------------------
+# Rescue-only by construction: `no_lf_match` is a TERMINAL skip (101 of 523 shadow
+# predictions, 19.3%), and one cause is that the primary call sees only LF's top 3
+# candidates while LF holds several records per company. What these tests pin is the
+# asymmetry that makes it safe: a lead that already matched is never re-asked.
+
+def _wide_settings(width):
+    import copy
+    raw = copy.deepcopy(SETTINGS.raw)
+    raw["leadfeeder"]["match_wide_results"] = width
+    return Settings(raw=raw, leadfeeder_api_key=None, sf_auth_url=None)
+
+
+def test_wide_pass_recovers_a_lead_the_primary_pass_missed():
+    fc = FakeClient()
+    fc.wide_match_by_name = {"Acme GmbH": {"company_id": "c9", "match_score": 0.42,
+                                           "matched_name": "Acme GmbH",
+                                           "name_agreement": 100,
+                                           "agreed_via": "company_name"}}
+    fc.company_attrs = {"c9": {}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], _wide_settings(20))
+    assert r.matched is True
+    assert r.lf_company_id == "c9"
+    assert r.match_pass == "wide"
+    assert fc.match_widths == [3, 20]
+
+
+def test_a_primary_match_is_never_re_asked():
+    # The whole safety argument: widening cannot move a working match if the working
+    # match is never sent again. One call, at the calibrated width.
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.95,
+                                      "matched_name": "Acme GmbH"}}
+    fc.wide_match_by_name = {"Acme GmbH": {"company_id": "c-other", "match_score": 0.99,
+                                           "matched_name": "Acme Holding AG"}}
+    fc.company_attrs = {"c1": {}, "c-other": {}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], _wide_settings(20))
+    assert r.lf_company_id == "c1"
+    assert r.match_pass == "primary"
+    assert fc.match_widths == [3]
+
+
+def test_wide_pass_re_asks_only_the_unmatched_payloads():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.95,
+                                      "matched_name": "Acme GmbH"}}
+    fc.wide_match_by_name = {"Nobody GmbH": {"company_id": "c2", "match_score": 0.3,
+                                             "matched_name": "Nobody GmbH"}}
+    fc.company_attrs = {"c1": {}, "c2": {}}
+    leads = [_extracted(contact_name=None),
+             _extracted(company="Nobody GmbH", contact_name=None, contact_email=None,
+                        lead_id="00Q2", task_id="T2")]
+    hit, rescued = enrich_leads(fc, leads, _wide_settings(20))
+    assert (hit.match_pass, rescued.match_pass) == ("primary", "wide")
+    assert fc.match_widths == [3, 20]
+    # The second call carries the unmatched company ONLY.
+    match_calls = [c for c in fc.calls if c[0] == "match_companies"]
+    assert len(match_calls) == 2
+    assert [n for n, *_ in match_calls[1][1]] == ["Nobody GmbH"]
+
+
+def test_the_shipped_default_is_disabled():
+    # Measured 0 recoveries on 103 leads (2026-08-25 backtest), so the live path does not
+    # spend the call. This test is what makes flipping it back a deliberate act.
+    assert SETTINGS.lf_match_wide_results == 0
+
+
+def test_wide_pass_disabled_by_config():
+    fc = FakeClient()
+    fc.wide_match_by_name = {"Acme GmbH": {"company_id": "c9", "match_score": 0.42,
+                                           "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c9": {}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], _wide_settings(0))
+    assert r.matched is False
+    assert r.match_pass == ""
+    assert fc.match_widths == [3]
+    assert not any(c[0] == "retrieve" for c in fc.calls)   # no match -> no credit spent
+
+
+def test_a_wide_match_still_faces_the_sanity_gate():
+    # A rescued match is a weaker claim, so it must not bypass the post-retrieve gate:
+    # the country conflict degrades it back to unmatched exactly as for a primary match.
+    fc = FakeClient()
+    fc.wide_match_by_name = {"Acme GmbH": {"company_id": "c9", "match_score": 0.42,
+                                           "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c9": {"address": {"country": "France"}}}
+    [r] = enrich_leads(fc, [_extracted(contact_name=None)], _wide_settings(20))
+    assert r.matched is False
+    assert r.lf_rejected == "country_conflict:FR!=DE"
+    assert r.match_pass == "wide"   # kept as evidence of which pass proposed it
+
+
+# --- contact lookup only when needed (Wasil, 2026-09-18) -----------------------------
+# The cascade feeds Lead.Email and Lead.Phone, both fill-only-blank. A lead that already
+# carries both would pay a retrieve credit for values the write-back never writes.
+
+def _lookup_settings(only_needed: bool):
+    import copy
+    raw = copy.deepcopy(SETTINGS.raw)
+    raw["leadfeeder"]["contact_lookup_only_when_needed"] = only_needed
+    return Settings(raw=raw, leadfeeder_api_key=None, sf_auth_url=None)
+
+
+def _matched_client():
+    fc = FakeClient()
+    fc.match_by_name = {"Acme GmbH": {"company_id": "c1", "match_score": 0.9,
+                                      "matched_name": "Acme GmbH"}}
+    fc.company_attrs = {"c1": {}}
+    fc.contact_by_name = {"Jane Doe": {"contact_id": "k1", "full_name": "Jane Doe"}}
+    fc.contact_attrs = {"k1": {"emails": [{"address": "jane@acme.de"}],
+                              "phones": [{"number": "+49 170 111", "type": "mobile"}]}}
+    return fc
+
+
+def _event_lead(lead_email=None, lead_phone=None):
+    # Event badge scans carry no Task email; the person's data lives on the Lead.
+    return ExtractedLead(lead_id="00Q1", task_id="T1", task_type="event",
+                         company_name="Acme GmbH", contact_name="Jane Doe",
+                         contact_email=None, lead_email=lead_email, lead_phone=lead_phone)
+
+
+def test_the_shipped_default_looks_every_matched_lead_up():
+    assert SETTINGS.lf_contact_lookup_only_when_needed is False
+
+
+def test_lookup_skipped_when_lead_has_email_and_phone():
+    fc = _matched_client()
+    [r] = enrich_leads(fc, [_event_lead("jane@acme.de", "+49 40 1")], _lookup_settings(True))
+    assert r.matched is True
+    assert r.contact_found is False
+    assert r.contact_skipped == "lead already has email and phone"
+    assert not any(c[0] in ("search", "retrieve_contacts", "find_contact_data")
+                   for c in fc.calls)
+
+
+def test_lookup_runs_when_lead_lacks_phone():
+    fc = _matched_client()
+    [r] = enrich_leads(fc, [_event_lead("jane@acme.de", None)], _lookup_settings(True))
+    assert r.contact_found is True
+    assert r.contact_skipped is None
+    assert ("search", "Jane Doe", "c1") in fc.calls
+    # mobile only -> the phone-finding job runs, because the lead still needs a phone
+    assert ("find_contact_data", ("k1",)) in fc.calls
+
+
+def test_lookup_runs_when_lead_lacks_email_but_no_phone_job_when_it_has_a_phone():
+    fc = _matched_client()
+    [r] = enrich_leads(fc, [_event_lead(None, "+49 40 1")], _lookup_settings(True))
+    assert r.contact_found is True
+    assert r.contact["contact_emails"] == "jane@acme.de"
+    # the lead already has a phone: no credit on the async phone lookup
+    assert not any(c[0] == "find_contact_data" for c in fc.calls)
+
+
+def test_task_email_counts_as_having_an_email():
+    # A claimer/trial Task email always lands on Lead.Email, so only the phone can
+    # still be missing.
+    fc = _matched_client()
+    e = _extracted(contact_email="jane@acme.de", lead_email=None)
+    e.lead_phone = "+49 40 1"
+    [r] = enrich_leads(fc, [e], _lookup_settings(True))
+    assert r.contact_skipped == "lead already has email and phone"
+
+
+def test_gate_off_keeps_looking_up_fully_enriched_leads():
+    fc = _matched_client()
+    [r] = enrich_leads(fc, [_event_lead("jane@acme.de", "+49 40 1")], _lookup_settings(False))
+    assert r.contact_found is True
+    assert r.contact_skipped is None
+    assert ("find_contact_data", ("k1",)) in fc.calls

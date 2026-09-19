@@ -705,3 +705,180 @@ def download_feed(dest):
     with urllib.request.urlopen(req, timeout=KUNUNU_FEED_TIMEOUT) as resp, open(tmp, "wb") as out:
         shutil.copyfileobj(resp, out, length=1024 * 1024)
     os.replace(tmp, dest)
+
+
+# --- The COMPANIES feed (added 2026-08-21) ----------------------------------
+#
+# A SECOND kununu export, published alongside profiles.csv, at one row per
+# assigned COMPANY instead of one row per profile. Measured 2026-08-21 against
+# that day's pair of files: 705,966 company rows over 472,108 profiles, and the
+# (company_uuid, company_name) sets are IDENTICAL to what the profiles feed's
+# `assigned_companies` column already carries - 0 pairs on either side only.
+#
+# So it adds NO names, and nothing that matches on names changes because of it.
+# What it adds is LOCATION PER COMPANY: company_city / company_postal_code /
+# company_country_code (96.5% filled) and company_address (57.9%). The profiles
+# feed carries only profile-level state/city, which is the LEADING company's -
+# so a multi-company profile spanning several cities was previously
+# indistinguishable, and 268 profiles even span more than one country.
+#
+# Read it the way iter_feed_records is read: a scoped pass over a local file,
+# zero API calls and no network.
+KUNUNU_COMPANIES_URL_DEFAULT = (
+    "https://api.data.kununu.com/v1/feeds/data-management/companies.csv"
+)
+_COMPANIES_CACHE_DEFAULT_NAME = "companies.csv"
+
+# Column aliases, same loose-schema discipline as the profiles reader: upstream
+# owns the schema, so a rename must degrade to a MISSING signal, never a wrong
+# one. profile_uuid and company_name are REQUIRED (without either there is
+# nothing to key on or match against); every location column is optional and
+# resolves to "" when absent.
+_COMPANIES_PROFILE_UUID_ALIASES = ("profile_uuid", "profileuuid", "profile_id")
+_COMPANIES_NAME_ALIASES = ("company_name", "companyname", "name")
+_COMPANIES_CITY_ALIASES = ("company_city", "companycity", "city")
+_COMPANIES_POSTAL_ALIASES = (
+    "company_postal_code", "companypostalcode", "postal_code", "zip", "zip_code",
+)
+_COMPANIES_COUNTRY_ALIASES = (
+    "company_country_code", "companycountrycode", "country_code", "country",
+)
+_COMPANIES_LEADING_ALIASES = ("is_leading_company", "isleadingcompany", "is_leading")
+
+# Cell values that mean True in the is_leading_company column. The feed ships
+# Python-style "True"/"False" (not "true"/"1"), so a naive == "true" reads every
+# row as non-leading - the same class of bug as the tagger's stringly-typed Bulk
+# booleans, where 'false' is truthy.
+_COMPANIES_TRUE_VALUES = frozenset({"true", "1", "yes", "y", "t"})
+
+
+def _kununu_companies_cache_path():
+    """Local path of the cached companies feed. Override with
+    KUNUNU_COMPANIES_CACHE.
+
+    A SEPARATE env var from KUNUNU_CACHE on purpose. KUNUNU_CACHE names one path
+    shared by every profiles-feed consumer, so overloading it would make the two
+    feeds fight over one filename - and because the profiles readers sniff
+    content rather than trusting the name, that collision would surface as a
+    schema error deep in a parse rather than as a configuration mistake.
+    Anchored on REPO_ROOT, not __file__ (see the package docstring)."""
+    return os.environ.get(
+        "KUNUNU_COMPANIES_CACHE",
+        str(REPO_ROOT / _companies_cache_name()),
+    )
+
+
+def _companies_cache_name():
+    """Cache filename derived from the companies feed URL's last path segment,
+    with the same whitelist as _feed_cache_name - so an unexpected URL shape
+    cannot produce a junk or path-traversing filename."""
+    url = os.environ.get("KUNUNU_COMPANIES_URL", KUNUNU_COMPANIES_URL_DEFAULT)
+    candidate = url.split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    if (
+        _FEED_CACHE_NAME_RE.match(candidate)
+        and candidate.lower().endswith(_FEED_CACHE_EXTENSIONS)
+    ):
+        return candidate
+    return _COMPANIES_CACHE_DEFAULT_NAME
+
+
+def download_companies_feed(dest):
+    """Stream the kununu COMPANIES feed to `dest` (atomic via a .part temp
+    file). Raises on missing credentials or any HTTP/network error.
+
+    Same auth as the profiles feed - one Basic credential covers the feeds API.
+    The endpoint is the profiles URL with its last segment swapped, overridable
+    with KUNUNU_COMPANIES_URL, so if upstream publishes it elsewhere no code
+    change is needed. CONFIRMED against the live API 2026-08-21: the default URL
+    returned 148,977,776 bytes with the expected header, matching the
+    hand-downloaded copy the callers' measurements were taken on. A wrong URL
+    would be a loud HTTP error, not a silent wrong answer."""
+    hdr = _kununu_auth_header()
+    if hdr is None:
+        raise RuntimeError("no kununu credentials (set KUNUNU_API_PASSWORD)")
+    url = os.environ.get("KUNUNU_COMPANIES_URL", KUNUNU_COMPANIES_URL_DEFAULT)
+    req = urllib.request.Request(url, headers=hdr)
+    tmp = dest + ".part"
+    with urllib.request.urlopen(req, timeout=KUNUNU_FEED_TIMEOUT) as resp, \
+            open(tmp, "wb") as out:
+        shutil.copyfileobj(resp, out, length=1024 * 1024)
+    os.replace(tmp, dest)
+
+
+def load_company_locations(path, needed=None, key_name=None):
+    """{profile_uuid: {name_key: {city, postal_code, country_code, is_leading}}}
+    from the companies feed at `path`.
+
+    `needed` (profile UUIDs, lowercased here) scopes the pass the way
+    iter_feed_records does: the file is ~150 MB / 706k rows and a caller
+    normally wants the few thousand profiles actually in play. None loads all.
+    An empty-but-not-None `needed` returns {} without opening the file.
+
+    `key_name` is the normalizer applied to company_name to build the inner key.
+    Pass common.names.norm_name so a lookup uses the SAME normalization the name
+    match used - it is injected rather than imported so this module keeps no
+    dependency on the matching rules. None keys on the raw stripped name.
+
+    Two company names under one profile that normalize to the same key keep ONE
+    row, preferring the leading company: they are the same company under two
+    spellings, so either city is equally defensible, while merging them would
+    invent a company with two locations. The leading one is preferred because it
+    is the company the profile's own city column describes.
+
+    Raises FeedSchemaError when the header carries neither a profile-uuid nor a
+    company-name column - the same contract as the profiles readers, so a caller
+    that already treats RuntimeError as "signal unavailable" degrades to
+    resolving nothing instead of matching on absent evidence."""
+    wanted = None
+    if needed is not None:
+        wanted = {u for u in (str(x).strip().lower() for x in needed) if u}
+        if not wanted:
+            return {}
+
+    out = {}
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+        reader = csv.reader(fh)
+        try:
+            raw_headers = next(reader)
+        except StopIteration:
+            raise FeedSchemaError(path + ": companies feed is empty")
+        headers = {_norm_header(h): i for i, h in enumerate(raw_headers)}
+        uuid_i = _resolve_column(headers, _COMPANIES_PROFILE_UUID_ALIASES)
+        name_i = _resolve_column(headers, _COMPANIES_NAME_ALIASES)
+        if uuid_i is None or name_i is None:
+            raise FeedSchemaError(
+                path + ": companies feed has no recognisable profile_uuid / "
+                "company_name columns (header: " + repr(raw_headers[:12]) + ")"
+            )
+        city_i = _resolve_column(headers, _COMPANIES_CITY_ALIASES)
+        post_i = _resolve_column(headers, _COMPANIES_POSTAL_ALIASES)
+        cc_i = _resolve_column(headers, _COMPANIES_COUNTRY_ALIASES)
+        lead_i = _resolve_column(headers, _COMPANIES_LEADING_ALIASES)
+
+        def cell(row, i):
+            if i is None or i >= len(row):
+                return ""
+            return (row[i] or "").strip()
+
+        for row in reader:
+            if uuid_i >= len(row):
+                continue
+            uuid = (row[uuid_i] or "").strip().lower()
+            if not uuid or (wanted is not None and uuid not in wanted):
+                continue
+            key = cell(row, name_i)
+            if key_name:
+                key = key_name(key)
+            if not key:
+                continue
+            is_leading = cell(row, lead_i).lower() in _COMPANIES_TRUE_VALUES
+            bucket = out.setdefault(uuid, {})
+            if key in bucket and not is_leading:
+                continue
+            bucket[key] = {
+                "city": cell(row, city_i),
+                "postal_code": cell(row, post_i),
+                "country_code": cell(row, cc_i),
+                "is_leading": is_leading,
+            }
+    return out

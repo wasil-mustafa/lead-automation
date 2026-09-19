@@ -1,0 +1,76 @@
+# ONE-OFF config for the ZPE 2026 event leads (Wasil, 2026-09-18). Generated from
+# config.yaml by scripts/event_run.py's sibling snippet; comments were dropped by the dump.
+# Differences from config.yaml, each deliberate:
+#   enabled_task_types: [event]            only badge-scan tasks; claimer/ebp_trial untouched
+#   pipeline.include_enriched_leads: true  KN_KununuLinkProfile__c was set BY HAND from the
+#                                          exact-match workbook, and it doubles as the
+#                                          reader's "already processed" marker
+#   pipeline.record_predictions: false     the pipeline converts these itself
+#   leadfeeder.contact_lookup_only_when_needed: true
+#                                          LF contact lookup (and its credit) only for
+#                                          leads still missing an email or a phone
+#                                          (Wasil, 2026-09-18); Email/Phone fill blanks only
+#   pipeline.repair_national_phone: true   46/109 badge-scan phones are "+0209…" (national
+#                                          number, '+' on the trunk zero) -> rewritten to
+#                                          +49/+43/+41 by lead country (Wasil, 2026-09-18)
+#   pipeline.live_scope.decisions: [create_new, link], max_kununu_score: null
+#                                          event contacts are not the No-Demand triage;
+#                                          review/skip rows still stay with humans
+# Run ONLY through scripts/event_run.py, which gives it its own watermark file and review
+# dir so the scheduled pipeline's state is never touched.
+salesforce:
+  org_alias: headless
+  api_version: '66.0'
+  converted_status: Qualified
+  owner_id: 005Mz00000Xw0jjIAB
+  rohdaten_pool_owner_id: 005Mz00000Xw0jjIAB
+  campaign_id: null
+leadfeeder:
+  base_url: https://api.leadfeeder.com/v1
+  company_list_name: Lead_Automation
+  contact_list_name: Lead_Automation
+  max_requests_per_min: 95
+  max_retries: 4
+  retrieve_batch: 100
+  match_batch: 200
+  match_wide_results: 0
+  contact_lookup_only_when_needed: true
+  find_contact_data: true
+  find_details_timeout: 180
+  find_details_poll: 10
+kununu_feed:
+  enabled: true
+  max_age_hours: 24
+task_types:
+  'Inbound Sales Task: New Claimed Profile': claimer
+  'Inbound Sales Task: EBP Trial': ebp_trial
+  'Inbound Sales Task: Eventteilnahme': event
+enabled_task_types:
+- event
+fresh_task_statuses:
+- In Progress
+- in Arbeit
+- Not Started
+excluded_email_domains:
+- kununu
+- xing
+- onlyfy
+matching:
+  lf_min_match_score: 0.7
+  lf_name_agree_min: 85
+  lf_name_agree_rescue: 90
+  dedupe_name_agree_min: 85
+pipeline:
+  review_gate: false
+  dry_run: true
+  batch_limit: 0
+  task_lookback_days: 14
+  live_scope:
+    max_kununu_score: null
+    decisions:
+    - create_new
+    - link
+    allow_wide_match: false
+  include_enriched_leads: true
+  record_predictions: false
+  repair_national_phone: true
