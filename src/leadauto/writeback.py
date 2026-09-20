@@ -21,7 +21,8 @@ from __future__ import annotations
 import re
 
 from .industry import sf_industry_from_kununu, sf_industry_from_leadfeeder
-from .leadfeeder.enrich import EnrichedLead
+from .models import EnrichedLead
+from .textnorm import POSTAL_LEN_BY_CC, country_iso2, is_blank
 from .logging import get_logger
 
 # (upper_bound, label); counts above the last bound map to "> 100.000".
@@ -64,6 +65,26 @@ def normalize_phone(value) -> str | None:
     return s if re.fullmatch(r"\+[0-9]{6,15}", s) else None
 
 
+_TRUNK_ZERO_CC = {"DE": "49", "AT": "43", "CH": "41"}
+
+
+def repair_national_phone(lead_phone, country_code) -> str | None:
+    """`+0<digits>` on a DE/AT/CH lead -> `+<cc><digits without the trunk zero>`.
+
+    The ZPE 2026 badge import wrote national numbers with a '+' in front of the trunk
+    zero (`+02091584338` for 0209 1584338). They pass KN_ValidatePhone but dial nowhere
+    from abroad. Only the three countries whose trunk prefix is a single 0 are repaired;
+    anything else, including a phone that is already international, returns None.
+    """
+    if not lead_phone:
+        return None
+    s = re.sub(r"[\s\-.()/]", "", str(lead_phone).strip())
+    cc = _TRUNK_ZERO_CC.get((country_code or "").upper())
+    if not cc or not re.fullmatch(r"\+0[1-9][0-9]{4,13}", s):
+        return None
+    return normalize_phone("+" + cc + s[2:])
+
+
 def split_first_name(source_name, last_name) -> str | None:
     """Leading remainder of `source_name` when it ends with the Lead's `last_name`.
 
@@ -80,13 +101,6 @@ def split_first_name(source_name, last_name) -> str | None:
     return first or None
 
 
-def _iso2(value) -> str | None:
-    if not value:
-        return None
-    v = str(value).strip()
-    return v.upper() if len(v) == 2 else v
-
-
 def _put(payload: dict, field: str, value) -> None:
     """Set a field only when there is a real value (skip None / empty string)."""
     if value is None:
@@ -96,17 +110,20 @@ def _put(payload: dict, field: str, value) -> None:
     payload[field] = value
 
 
-_POSTAL_LEN_BY_CC = {"DE": 5, "CH": 4}  # KN_Checklengthpostalcode (Austria unchecked)
-
-
-def _blank(value) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
-
-
 def _fill(payload: dict, field: str, current, value) -> None:
     """_put, but only when the Lead's current value is blank (fill-only-blank policy)."""
-    if _blank(current):
+    if is_blank(current):
         _put(payload, field, value)
+
+
+def lf_contact_email(contact: dict) -> str | None:
+    """The first (best) email LeadFeeder holds for the contact, or None.
+
+    `flatten_contact_details` joins the addresses with '; ' in LF's order, which puts
+    the primary/verified address first. Also read by the QA sheet's `lf_contact_email`.
+    """
+    first = ((contact or {}).get("contact_emails") or "").split(";")[0].strip()
+    return first or None
 
 
 def dialable_phone(contact: dict, company: dict) -> str | None:
@@ -123,16 +140,18 @@ def dialable_phone(contact: dict, company: dict) -> str | None:
             or None)
 
 
-def lead_field_payload(enriched: EnrichedLead) -> dict:
+def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
     """Build the Id-keyed write-back dict for one enriched Lead (only populated fields).
 
     Field spec (Wasil, 2026-07-10): from the Task only the kununu URL, Region and the
-    contact email (-> standard Email, overwriting a differing Lead email); everything
+    contact email (-> standard Email, overwriting a differing Lead email; with no Task
+    email the LF contact email fills a blank Lead.Email, 2026-09-18); everything
     else comes from LeadFeeder — VAT from LF VAT_Id, employee band from LF headcount
     (the task's Unternehmensgröße line is never used). LinkedIn/Title/Phone come from
     the LF contact; company LinkedIn is never used and mobile numbers are never written.
     `Industry` ← kununu profile `profile_industry_name_de` mapped to the picklist
     (overwrite), else LeadFeeder industry mapped (fill-only-blank).
+    `settings` (optional) carries the one-off `pipeline.repair_national_phone` switch.
     """
     e = enriched.extracted
     company = enriched.company or {}
@@ -147,6 +166,12 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     _put(payload, "KN_KununuLinkProfile__c", e.kununu_url)
     _put(payload, "KN_Region__c", e.region)
     _put(payload, "Email", e.contact_email)
+    # Without a Task email (event badge scans carry none) the LF contact's email fills
+    # a BLANK Lead.Email only (Wasil, 2026-09-18) — never overwrites: an existing
+    # address is the one the person gave us, and writing Lead.Email has the Braze
+    # side effect documented in CLAUDE.md. Same fill-only-blank rule as Phone below.
+    if is_blank(e.contact_email):
+        _fill(payload, "Email", e.lead_email, lf_contact_email(contact))
 
     # firmographics (LeadFeeder): VAT and employee band always from LF (the task's
     # Unternehmensgröße line is ~90% empty and only ever 'small'/'large' — unusable).
@@ -171,12 +196,16 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
 
     # from the LF contact: LinkedIn, Title (position) — left empty when no contact found
     _put(payload, "KN_LinkedInProfileLink__c", contact.get("contact_linkedin"))
-    _fill(payload, "Title", e.lead_title, contact.get("position"))
+    # Title: a Task-parsed position (event badge scans carry one; claimer/trial tasks
+    # never do) beats LeadFeeder's — the attendee stated it about themselves.
+    _fill(payload, "Title", e.lead_title, e.position or contact.get("position"))
 
     # conversion requirements (org validation rules; all fill-only-blank)
-    if _blank(e.lead_dbid) and not e.lead_no_own_dbid:
+    if is_blank(e.lead_dbid) and not e.lead_no_own_dbid:
         payload["KN_NoOwnDBID__c"] = "true"  # KN_DbIdValidation XOR
-    # address: always LeadFeeder (tasks carry no address)
+    # address: always LeadFeeder (spec 2026-07-10, pinned by TestAddressFill). The event
+    # parser stores the badge address in the parsed fields only; it is deliberately NOT
+    # used here — changing that means changing the spec and its test together.
     _fill(payload, "Street", e.lead_street, (company.get("Street") or "")[:100] or None)
     _fill(payload, "City", e.lead_city, company.get("City"))
     # country: kununu-URL-derived, the same slug logic as KN_Region__c (Wasil, 2026-07-10)
@@ -184,31 +213,41 @@ def lead_field_payload(enriched: EnrichedLead) -> dict:
     # Without a kununu slug, the LF company country fills only a fully blank country.
     # (CountryCode is the writable API form; the org's picklist derives Country from it.)
     slug_cc = (e.country_code or "").upper() or None
-    lf_cc = (_iso2(company.get("Country")) or "").upper() or None
+    lf_cc = country_iso2(company.get("Country"))   # LF sends names ("Germany"); the org wants ISO2
     if slug_cc:
         _put(payload, "CountryCode", slug_cc)
-    elif _blank(e.lead_country):
+    elif is_blank(e.lead_country):
         _fill(payload, "CountryCode", e.lead_country_code, lf_cc)
     postal = company.get("Postal_Code")
     effective_cc = (slug_cc or e.lead_country_code or lf_cc or "").upper()
-    expected_len = _POSTAL_LEN_BY_CC.get(effective_cc)
+    expected_len = POSTAL_LEN_BY_CC.get(effective_cc)
     if postal and (expected_len is None or len(str(postal).strip()) == expected_len):
         _fill(payload, "PostalCode", e.lead_postal_code, str(postal).strip())
     _fill(payload, "FirstName", e.lead_first_name,
           split_first_name(e.contact_name or contact.get("full_name"), e.lead_last_name))
-    _fill(payload, "Phone", e.lead_phone, normalize_phone(dialable_phone(contact, company)))
+    # Phone is fill-only-blank — with ONE gated exception: `pipeline.repair_national_phone`
+    # (ZPE config only) rewrites a `+0…` national number already on the Lead to its
+    # international form for the lead's country. A repaired phone is never replaced by
+    # a LeadFeeder number; LF only fills a blank.
+    repaired = (repair_national_phone(e.lead_phone, effective_cc)
+                if settings is not None and settings.repair_national_phone else None)
+    if repaired:
+        payload["Phone"] = repaired
+    else:
+        _fill(payload, "Phone", e.lead_phone, normalize_phone(dialable_phone(contact, company)))
 
     return payload
 
 
-def write_back(client, enriched_leads: list[EnrichedLead], dry_run: bool = False, logger=None) -> dict:
+def write_back(client, enriched_leads: list[EnrichedLead], dry_run: bool = False, logger=None,
+               settings=None) -> dict:
     """Write enrichment back to Leads. Returns {processed, payloads}; no call under dry_run.
 
     Leads whose payload carries only the Id (nothing enriched) are skipped — there is
     nothing to write and we never want to issue an empty update.
     """
     log = logger or get_logger("writeback")
-    payloads = [lead_field_payload(e) for e in enriched_leads]
+    payloads = [lead_field_payload(e, settings) for e in enriched_leads]
     writable = [p for p in payloads if len(p) > 1]  # more than just {"Id": ...}
 
     if dry_run:

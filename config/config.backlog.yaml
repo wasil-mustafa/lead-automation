@@ -26,7 +26,6 @@ salesforce:
   # new Account, new Contact and converted Lead are all pool-owned (accepted 2026-07-15).
   owner_id: "005Mz00000Xw0jjIAB"
   rohdaten_pool_owner_id: "005Mz00000Xw0jjIAB"
-  campaign_id: null
 
 leadfeeder:
   base_url: "https://api.leadfeeder.com/v1"

@@ -12,9 +12,9 @@ from leadauto.backtest_skipped import (
     run_backtest,
 )
 from leadauto.config import Settings
-from leadauto.extract.models import ExtractedLead
-from leadauto.leadfeeder.enrich import EnrichedLead
-from leadauto.match import AccountMatch, MatchResult
+from leadauto.models import ExtractedLead
+from leadauto.models import EnrichedLead
+from leadauto.models import AccountMatch, MatchResult
 
 CLAIMER_SUBJECT = "Inbound Sales Task: New Claimed Profile"
 CLAIMER_DESC = (
@@ -73,7 +73,7 @@ def _conv_lead(lid="00Q1", contact="0031", account="001EX", date="2026-06-20"):
 def _result(decision="link", rule="name_address", account_id="001EX", evidence=None):
     enriched = EnrichedLead(extracted=ExtractedLead(
         lead_id="00Q1", task_id="T1", task_type="claimer"))
-    account = AccountMatch(account_id, None, rule) if account_id else None
+    account = AccountMatch(account_id, rule) if account_id else None
     return MatchResult(enriched=enriched, account=account, contact=None,
                        decision=decision, rule=rule, evidence=evidence or [])
 

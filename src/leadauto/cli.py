@@ -13,7 +13,7 @@ from typing import Optional
 import typer
 
 from .config import Settings
-from .leadfeeder.client import LeadfeederClient
+from .leadfeeder.client import MATCH_RESULTS_WIDE, LeadfeederClient
 from .logging import get_logger
 from .pipeline.stage1_enrich import run_stage1
 from .pipeline.stage2_convert import run_stage2
@@ -159,6 +159,33 @@ def backtest_skipped(
     res = run_backtest(sf, lf, settings, xlsx_path=xlsx, kununu_feed=kununu_feed, logger=log)
     typer.echo(f"Backtest done: counts={res['counts']} tally={res.get('tally')} "
                f"| xlsx={res.get('xlsx')}")
+
+
+@app.command("wide-match-backtest")
+def wide_match_backtest(
+    max_results: int = typer.Option(MATCH_RESULTS_WIDE, "--max-results",
+                                    help="Treatment width (API max 20). Control is always 3."),
+    kununu_feed: bool = typer.Option(True, "--kununu-feed/--no-kununu-feed",
+                                     help="Disable the feed: payloads then carry NO alt_names, "
+                                          "so the result is not comparable to production."),
+    xlsx: Path = typer.Option(REPO_ROOT / "wide_match_backtest.xlsx", "--xlsx",
+                              help="Report output path."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
+) -> None:
+    """Replay the `no_lf_match` leads at two candidate widths. Read-only, 0 credits."""
+    from .wide_match_backtest import run_backtest as run_wide_backtest
+
+    log = get_logger("cli.wide_backtest")
+    settings = Settings.load(config)
+    if not settings.leadfeeder_api_key:
+        log.error("LEADFEEDER_API_KEY is required for this backtest.")
+        raise typer.Exit(code=2)
+    sf = _build_sf_client(settings, log)
+    lf = _build_lf_client(settings, log)
+    res = run_wide_backtest(sf, lf, settings, max_results=max_results,
+                            xlsx_path=xlsx, use_kununu_feed=kununu_feed, logger=log)
+    typer.echo(f"Wide-match backtest done: counts={res['counts']} tally={res['tally']} "
+               f"| credits={res['credits']} | xlsx={res.get('xlsx')}")
 
 
 @app.command("shadow-compare")

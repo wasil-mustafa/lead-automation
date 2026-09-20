@@ -10,35 +10,15 @@ Per-record HTTP errors are isolated so one bad lead never sinks the batch.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import requests
 
-from ..extract.models import ExtractedLead
+from ..models import (CONTACT_SKIP_NO_NAME, CONTACT_SKIP_NOT_NEEDED,
+                      CONTACT_SKIP_SEARCH_FAILED, EnrichedLead, ExtractedLead)
 from ..kununu_feed import base_slug, load_profiles_for_leads
 from ..logging import get_logger
-from ..textnorm import alnum, country_iso2, email_domain, normalize_host, normalize_name
-from .client import flatten_company, flatten_contact_details, match_email
-
-
-@dataclass
-class EnrichedLead:
-    """An ExtractedLead plus whatever LeadFeeder returned. Feeds Module 3 (match/write-back)."""
-    extracted: ExtractedLead
-    matched: bool = False
-    lf_rejected: str | None = None  # post-retrieve sanity gate's rejection reason, or None
-    lf_company_id: str | None = None
-    matched_name: str | None = None
-    match_score: float | None = None
-    feed_country_code: str | None = None  # kununu feed profile_country_code (sanity-gate evidence)
-    feed_industry: str | None = None      # kununu feed profile_industry_name_de (write-back source)
-    kununu_score: float | None = None     # kununu feed profile_score (live-scope gate input)
-    name_agreement: int | None = None  # gate's 0-100 name/domain agreement (see client._best_match)
-    agreed_via: str | None = None  # which signal vouched: company_name / alt_name:<n> / email_domain
-    alt_names: list[str] = field(default_factory=list)  # assigned-company names from the kununu feed
-    company: dict = field(default_factory=dict)   # flatten_company output (or {})
-    contact_found: bool = False
-    contact: dict = field(default_factory=dict)   # flattened details + contact_id/full_name
+from ..textnorm import country_iso2, email_domain, is_blank, normalize_host, normalize_name
+from .client import (MATCH_RESULTS_PRIMARY, flatten_company, flatten_contact_details,
+                     match_email)
 
 
 def _domains_agree(a: str | None, b: str | None) -> bool:
@@ -71,8 +51,7 @@ def _match_sanity_reason(e: ExtractedLead, company: dict,
     - country_conflict: the retrieved company's country contradicts the lead's.
     - acronym_uncorroborated: acronym-like names make name agreement tautological
       (LF searched on the acronym we sent), so the match must be corroborated by
-      the lead's email domain matching the company's website/email domain, or by
-      VAT equality against the task-extracted VAT.
+      the lead's email domain matching the company's website/email domain.
     """
     # kununu-derived countries first (URL, then the feed's profile_country_code):
     # they are profile evidence, while the Lead's CountryCode/Country is often a
@@ -92,11 +71,49 @@ def _match_sanity_reason(e: ExtractedLead, company: dict,
                      email_domain(company.get("Company_Email")))
         if any(_domains_agree(lead_dom, d) for d in comp_doms):
             return None
-        lead_vat, comp_vat = alnum(e.vat_number), alnum(company.get("VAT_Id"))
-        if lead_vat and lead_vat == comp_vat:
-            return None
         return "acronym_uncorroborated"
     return None
+
+
+def build_match_payload(e: ExtractedLead, profiles: dict) -> tuple[dict | None, object]:
+    """The `/companies/match` payload for one lead, and the kununu ProfileInfo behind it.
+
+    Returns `(None, info)` when the lead has no company name to send — there is nothing
+    to ask LF about. `info` is None when the feed knows no profile for this lead.
+
+    Factored out of `enrich_leads` (2026-08-25) so the second-chance-match backtest
+    reproduces the PRODUCTION payload exactly. An approximated payload (say `Lead.Company`
+    where the pipeline sends the task-parsed name) would measure a different question than
+    the one the pipeline actually asks, and would read as a result about LF.
+
+    Two standing constraints live here:
+      - **no `country`/`country_code`**: LF's country filter SUPPRESSES good matches
+        (2026-07-03 control probe: 59 candidates regained without it, all correct). The
+        name-agreement gate is what guards wrong-company.
+      - **`email` only when it is a real address**: LF 400s on a blank/garbage one and a
+        400 fails the WHOLE chunk (`client.match_api_payload` enforces this at the
+        transport boundary too — this keeps the payload honest at source).
+    `alt_names` is a LOCAL gate input; `match_api_payload` strips it before the call.
+    """
+    company_name = e.best_company
+    info = (profiles.get(e.kununu_profile_uuid or "")
+            or profiles.get(base_slug(e.kununu_url) or ""))
+    if not company_name:
+        return None, info
+    payload = {"company_name": company_name}
+    email = e.contact_email or e.lead_email
+    if match_email(email):
+        payload["email"] = email
+    if info:
+        own = normalize_name(company_name)
+        alts = []
+        for n in info.companies:
+            nn = normalize_name(n)
+            if nn and nn != own and n not in alts:
+                alts.append(n)
+        if alts:
+            payload["alt_names"] = alts
+    return payload, info
 
 
 def _contact_name(e: ExtractedLead) -> str | None:
@@ -104,6 +121,16 @@ def _contact_name(e: ExtractedLead) -> str | None:
         return e.contact_name.strip()
     full = " ".join(p for p in (e.lead_first_name, e.lead_last_name) if p).strip()
     return full or None
+
+
+def lead_needs_email(e: ExtractedLead) -> bool:
+    """No email will reach Lead.Email from what we already hold (Task email or Lead)."""
+    return is_blank(e.contact_email) and is_blank(e.lead_email)
+
+
+def lead_needs_phone(e: ExtractedLead) -> bool:
+    """Lead.Phone is blank — the only case the write-back fills it (fill-only-blank)."""
+    return is_blank(e.lead_phone)
 
 
 def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
@@ -126,43 +153,25 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
     match_index: list[int] = []  # results-index for each payload
     for e in extracteds:
         result = EnrichedLead(extracted=e)
-        company_name = e.best_company
-        if company_name:
-            email = e.contact_email or e.lead_email
-            # No country/country_code: LF's country filter suppresses good matches
-            # (2026-07-03 control probe: 59 candidates regained without it, all
-            # correct). The name-agreement gate is what guards wrong-company.
-            # `email` stays out of the payload unless it is a real address: LF 400s on a
-            # blank/garbage one and a 400 fails the whole chunk (client.match_api_payload
-            # enforces this at the boundary too — this keeps the payload honest at source).
-            payload = {"company_name": company_name}
-            if match_email(email):
-                payload["email"] = email
-            info = (profiles.get(e.kununu_profile_uuid or "")
-                    or profiles.get(base_slug(e.kununu_url) or ""))
+        payload, info = build_match_payload(e, profiles)
+        # The feed fields are applied ONLY alongside a payload, which is how this read
+        # before the 2026-08-25 refactor. A lead with no company name is never matched,
+        # so a `kununu_score` on it could only ever loosen the live-scope gate for a
+        # record nothing else vouches for. Deliberate, not an oversight.
+        if payload is not None:
             if info:
                 result.feed_country_code = info.country_code
                 result.feed_industry = info.industry
                 result.kununu_score = info.score
-                own = normalize_name(company_name)
-                alts = []
-                for n in info.companies:
-                    nn = normalize_name(n)
-                    if nn and nn != own and n not in alts:
-                        alts.append(n)
-                if alts:
-                    payload["alt_names"] = alts
-                    result.alt_names = alts
+            result.alt_names = list(payload.get("alt_names") or [])
             match_payloads.append(payload)
             match_index.append(len(results))
         results.append(result)
 
-    matches = client.match_companies(match_payloads) if match_payloads else []
-    for payload_i, match in enumerate(matches):
-        if not match:
-            continue
+    def _accept(payload_i: int, match: dict, pass_name: str) -> None:
         r = results[match_index[payload_i]]
         r.matched = True
+        r.match_pass = pass_name
         r.lf_company_id = match["company_id"]
         r.matched_name = match.get("matched_name")
         r.match_score = match.get("match_score")
@@ -172,6 +181,51 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
             client.add_company_to_list(r.lf_company_id, company_list_id)
         except requests.exceptions.RequestException as err:
             log.warning("add_company_to_list failed for %s: %s", r.lf_company_id, err)
+
+    matches = (client.match_companies(match_payloads, max_results=MATCH_RESULTS_PRIMARY)
+               if match_payloads else [])
+    for payload_i, match in enumerate(matches):
+        if match:
+            _accept(payload_i, match, "primary")
+
+    # Second-chance match, rescue-only (2026-08-25). `no_lf_match` is a TERMINAL skip —
+    # 101 of 523 shadow predictions (19.3%) died there — and one cause is that the primary
+    # call asks for LF's top 3 candidates only, while LF holds several company records for
+    # one company and ranks the wrong (emptier) one first. Re-asking the SAME payload for
+    # 20 candidates lets `_best_match` gate the ones it never saw. It touches only leads
+    # that matched nothing, so no working match can move: that asymmetry is the whole
+    # safety argument, measured in `Contact Presence Check` (adding identifiers to the
+    # PRIMARY payload regressed ~15% of working matches; rescue-only regressed 0).
+    # Cost: one free call per `match_batch` unmatched leads, 0 credits. A match found here
+    # still pays 1 credit at phase 2 like any other, and still faces the sanity gate.
+    wide = settings.lf_match_wide_results
+    # `is None` = LF judged the payload at the primary width and rejected it. A chunk that
+    # FAILED (MATCH_CHUNK_FAILED, falsy but not None) was never judged: re-asking it here
+    # would stamp any hit `match_pass="wide"`, hold it out of live scope and shadow-score it
+    # as a wide match — polluting the accuracy measurement the flag exists to gather.
+    retry_idx = [i for i, m in enumerate(matches) if m is None]
+    never_asked = sum(1 for m in matches if m is not None and not m)
+    if wide and never_asked:
+        log.warning("Second-chance match: %d lead(s) skipped — their primary chunk failed, "
+                    "so they were never judged at width %d", never_asked, MATCH_RESULTS_PRIMARY)
+    if wide and retry_idx:
+        log.info("Second-chance match: re-asking %d unmatched lead(s) with "
+                 "max_results_per_company=%d", len(retry_idx), wide)
+        wide_matches = client.match_companies([match_payloads[i] for i in retry_idx],
+                                              max_results=wide)
+        recovered = 0
+        for payload_i, match in zip(retry_idx, wide_matches):
+            if match:
+                _accept(payload_i, match, "wide")
+                recovered += 1
+                log.info("Second-chance match recovered %r -> %r (lf %s, score %s, "
+                         "agree %s via %s)",
+                         match_payloads[payload_i].get("company_name"),
+                         match.get("matched_name"), match.get("company_id"),
+                         match.get("match_score"), match.get("name_agreement"),
+                         match.get("agreed_via"))
+        log.info("Second-chance match recovered %d of %d unmatched lead(s)",
+                 recovered, len(retry_idx))
 
     matched = [r for r in results if r.matched]
 
@@ -195,15 +249,28 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
     # Phase 3 — contact search cascade (free), then ONE batched detail retrieve (1 credit each).
     # `include_contacts=False` skips the whole phase (backtests that only need the
     # company side of enrichment shouldn't spend contact credits).
+    # `contact_lookup_only_when_needed` (config; Wasil, 2026-09-18) narrows the cascade
+    # to leads whose Lead still lacks an email or a phone: those are the fields it feeds
+    # (Email and Phone are fill-only-blank in writeback.py), so for a lead that has both
+    # the search+retrieve would spend a credit on values that are never written.
+    only_needed = settings.lf_contact_lookup_only_when_needed
     search_hits: list[tuple[EnrichedLead, dict]] = []
+    skipped_enriched = 0
     for r in matched if include_contacts else []:
         name = _contact_name(r.extracted)
         if not name:
+            r.contact_skipped = CONTACT_SKIP_NO_NAME
+            continue
+        if only_needed and not (lead_needs_email(r.extracted)
+                                or lead_needs_phone(r.extracted)):
+            r.contact_skipped = CONTACT_SKIP_NOT_NEEDED
+            skipped_enriched += 1
             continue
         try:
             cmatch = client.search_contact(name, r.lf_company_id)
         except requests.exceptions.RequestException as err:
             log.warning("Contact search failed for %r: %s", name, err)
+            r.contact_skipped = CONTACT_SKIP_SEARCH_FAILED
             continue
         if cmatch:
             search_hits.append((r, cmatch))
@@ -224,9 +291,12 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
     # Phase 3b — contacts without a direct dial (mobile never counts) go through LF's
     # async 'Find contact details' external-provider lookup (1 credit only per contact
     # that actually gains data), then ONE re-retrieve refreshes their details.
+    # Under `contact_lookup_only_when_needed` a lead that already has a phone is never
+    # sent: the job exists to surface a phone the write-back could fill.
     if search_hits and settings.lf_find_contact_data:
         needy = [r for r, _ in search_hits
-                 if not (r.contact.get("phone_direct") or r.contact.get("phone_office"))]
+                 if not (r.contact.get("phone_direct") or r.contact.get("phone_office"))
+                 and (not only_needed or lead_needs_phone(r.extracted))]
         if needy:
             ids = [r.contact["contact_id"] for r in needy]
             try:
@@ -245,6 +315,8 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
                                      "contact_id": cid,
                                      "full_name": r.contact.get("full_name", "")}
 
-    log.info("LeadFeeder: %d/%d matched, %d contact(s) found",
-             len(matched), len(results), sum(1 for r in results if r.contact_found))
+    log.info("LeadFeeder: %d/%d matched, %d contact(s) found, %d lookup(s) skipped "
+             "(lead already has email and phone)",
+             len(matched), len(results), sum(1 for r in results if r.contact_found),
+             skipped_enriched)
     return results

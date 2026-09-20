@@ -9,6 +9,7 @@ summary. Pure data in, a `Workbook` out (write to disk via `write_workbook`).
 from __future__ import annotations
 
 import csv
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,16 +18,18 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from .convert.preflight import check_lead
+from .models import CONTACT_SKIP_NOT_NEEDED
 from .live_scope import live_scope_reason
+from .textnorm import country_iso2, normalize_city, normalize_postal
 from .match import RULE_DECISIONS
-from .writeback import lead_field_payload
+from .writeback import lead_field_payload, lf_contact_email
 
 REVIEW_COLUMNS = [
     "lead_id", "task_id", "task_type", "subject",
     "company", "kununu_url", "kununu_profile_uuid", "region", "kununu_score",
     "contact_name", "contact_email",
     "lf_matched", "lf_matched_name", "lf_match_score", "lf_name_agreement", "lf_agreed_via",
-    "lf_rejected",
+    "lf_match_pass", "lf_rejected",
     "lf_city", "lf_employees", "lf_industry", "predicted_industry", "lf_website", "lf_company_id",
     "lf_contact_email",
     "match_rule", "match_evidence",
@@ -46,11 +49,35 @@ ENRICHING_COLUMNS = [
     "Industry", "KN_Region__c", "KN_Employee__c", "KN_VATNumber__c",
     "KN_KununuLinkProfile__c", "KN_LinkedInProfileLink__c", "KN_NoOwnDBID__c",
 ]
+# One row per Lead whose EXISTING phone the write-back rewrites (config
+# `pipeline.repair_national_phone`, ZPE 2026): `+0<digits>` -> `+<cc><digits>`. Phone is
+# otherwise fill-only-blank, so a payload Phone on a lead that already has one can only be
+# this repair. Empty sheet = nothing rewritten (also with the switch off).
+PHONE_REPAIR_COLUMNS = ["lead_id", "company", "country", "phone_before", "phone_after"]
+# Address_Check (Wasil, 2026-09-18): the badge-scan address the Task carries
+# (`Address: <street>, <postal> <city>, <CC>` in its Kommentar/Description, parsed by
+# parse_event into the ExtractedLead's `street/postal_code/city`) side by side with the
+# LeadFeeder company address (the one the write-back fills a blank Lead address from)
+# and the Lead's current address. `verdict` compares task vs LeadFeeder:
+#   same            postal code AND city agree
+#   same_city       city agrees, postal code differs (or one side has none)
+#   different       both sides carry an address and neither agrees
+#   no_task_address / no_lf_address   one side has nothing to compare
+ADDRESS_CHECK_COLUMNS = [
+    "lead_id", "company", "decision",
+    "task_street", "task_postal", "task_city", "task_cc",
+    "lf_street", "lf_postal", "lf_city", "lf_cc",
+    "lead_street", "lead_postal", "lead_city", "lead_cc",
+    "postal_match", "city_match", "verdict",
+]
 CONTACT_FOUND_COLUMNS = [
     "lead_id", "company", "contact_name", "position",
     "contact_emails", "best_contact_phone", "contact_linkedin",
 ]
-NOCONTACT_COLUMNS = ["lead_id", "company", "contact_name", "lf_matched"]
+# `reason`: why no LF contact is attached — the lookup was skipped (config
+# `contact_lookup_only_when_needed`: the Lead already has email and phone), the company
+# never matched, or LF simply holds no such person.
+NOCONTACT_COLUMNS = ["lead_id", "company", "contact_name", "lf_matched", "reason"]
 SKIPPED_COLUMNS = ["task_id", "lead_id", "subject", "reason"]
 FAILURES_COLUMNS = ["lead_id", "stage", "error"]
 
@@ -61,7 +88,7 @@ def _yn(value: bool) -> str:
     return "yes" if value else "no"
 
 
-def _convert_blockers(result) -> str:
+def _convert_blockers(result, settings=None, payload: dict | None = None) -> str:
     """Preview of stage-2 preflight over the lead's post-write-back state.
 
     Current lead values overlaid with the write-back payload (fill-only-blank, so the
@@ -71,7 +98,7 @@ def _convert_blockers(result) -> str:
     if result.decision == "skip":
         return ""  # terminal skip never converts — a preflight preview would be noise
     e = result.enriched.extracted
-    # This key set pairs with soql._LEAD_FIELDS / check_lead's reads by convention —
+    # This key set pairs with soql.LEAD_FIELDS / check_lead's reads by convention —
     # extend both when adding a check.
     fields = {
         "IsConverted": False,
@@ -82,16 +109,55 @@ def _convert_blockers(result) -> str:
         "KN_DBID__c": e.lead_dbid, "KN_NoOwnDBID__c": e.lead_no_own_dbid,
         "KN_Employee__c": e.lead_employee_category, "KN_Language__c": e.lead_language,
     }
-    payload = lead_field_payload(result.enriched)
+    if payload is None:
+        payload = lead_field_payload(result.enriched, settings)
     fields.update((k, v) for k, v in payload.items() if k != "Id")
     fails = check_lead(fields, create_new=result.account is None)
     return "; ".join(f.check for f in fails)
 
 
-def _review_row(result, settings=None) -> dict:
+def address_check_row(result) -> list:
+    """One Address_Check row: task (badge) vs LeadFeeder vs current Lead address."""
+    e = result.enriched.extracted
+    c = result.enriched.company or {}
+    lf_cc = country_iso2(c.get("Country")) or (c.get("Country") or None)
+    task_has = bool(e.postal_code or e.city)
+    lf_has = bool(c.get("Postal_Code") or c.get("City"))
+    postal_match = city_match = ""
+    if task_has and lf_has:
+        postal_match = _yn(normalize_postal(e.postal_code) is not None and
+                           normalize_postal(e.postal_code) == normalize_postal(c.get("Postal_Code")))
+        city_match = _yn(normalize_city(e.city) is not None
+                         and normalize_city(e.city) == normalize_city(c.get("City")))
+        if postal_match == "yes" and city_match == "yes":
+            verdict = "same"
+        elif city_match == "yes":
+            verdict = "same_city"
+        else:
+            verdict = "different"
+    elif not task_has:
+        verdict = "no_task_address"
+    else:
+        verdict = "no_lf_address"
+    # task_cc is the BADGE's country when the parser saw one; the kununu-URL country is
+    # only a fallback, and labelling it as the badge country would hide an LF/badge
+    # country disagreement (the class of miss that staged Canada/Bosnia onto DE leads).
+    task_cc = (e.address_country_code or e.country_code or "").upper() or None
+    return [
+        e.lead_id, e.best_company, result.decision,
+        e.street, e.postal_code, e.city, task_cc,
+        c.get("Street"), c.get("Postal_Code"), c.get("City"), lf_cc,
+        e.lead_street, e.lead_postal_code, e.lead_city, e.lead_country_code,
+        postal_match, city_match, verdict,
+    ]
+
+
+def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     e = result.enriched.extracted
     enr = result.enriched
     company = enr.company or {}
+    if payload is None:
+        payload = lead_field_payload(enr, settings)
     acct = result.account
     con = result.contact
     # live_scope: "yes" when the row would be processed live, else the exclusion
@@ -108,14 +174,15 @@ def _review_row(result, settings=None) -> dict:
         "lf_matched": _yn(enr.matched), "lf_matched_name": enr.matched_name,
         "lf_match_score": enr.match_score, "lf_name_agreement": enr.name_agreement,
         "lf_agreed_via": enr.agreed_via,
+        "lf_match_pass": enr.match_pass,
         "lf_rejected": enr.lf_rejected,
         "lf_city": company.get("City"), "lf_employees": company.get("Employee_Count"),
-        "lf_industry": company.get("Industry"), "predicted_industry": lead_field_payload(enr).get("Industry"),
+        "lf_industry": company.get("Industry"), "predicted_industry": payload.get("Industry"),
         "lf_website": company.get("Website"),
         "lf_company_id": enr.lf_company_id,
         # first LF contact email — Stage 2 writes it to the converted Contact's
         # KN_Email2__c when it differs from the Contact's primary Email
-        "lf_contact_email": ((enr.contact or {}).get("contact_emails") or "").split(";")[0].strip() or None,
+        "lf_contact_email": lf_contact_email(enr.contact),
         "kununu_profile_uuid": e.kununu_profile_uuid,
         "match_rule": result.rule,
         "match_evidence": "; ".join(result.evidence),
@@ -124,12 +191,12 @@ def _review_row(result, settings=None) -> dict:
         "contact_match_id": con.contact_id if con else None,
         "contact_score": con.score if con else None,
         "contact_reason": con.reason if con else None,
-        "convert_blockers": _convert_blockers(result),
+        "convert_blockers": _convert_blockers(result, settings, payload),
         "decision": result.decision, "Approve?": None,
     }
 
 
-def _add_sheet(wb: Workbook, title: str, columns: list[str], rows: list[list]) -> None:
+def add_sheet(wb: Workbook, title: str, columns: list[str], rows: list[list]) -> None:
     ws = wb.create_sheet(title)
     ws.append(columns)
     for cell in ws[1]:
@@ -151,19 +218,39 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     wb = Workbook()
     wb.remove(wb.active)  # drop the default empty sheet
 
+    # ONE write-back payload per result, shared by Review, Enriching and Phone_Repair —
+    # so the three sheets are guaranteed to describe the same write.
+    payloads = [lead_field_payload(r.enriched, settings) for r in results]
+
     # Review
-    review_rows = [[_review_row(r, settings).get(c) for c in REVIEW_COLUMNS] for r in results]
-    _add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
+    review_rows = [[_review_row(r, settings, p).get(c) for c in REVIEW_COLUMNS]
+                   for r, p in zip(results, payloads)]
+    add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
 
     # Enriching — the write-back payload, paste-ready. Rows whose payload is only the Id
     # are dropped: `write_back` skips them too (nothing enriched), and an all-blank row in
     # an import file is an invitation to overwrite good data with nothing.
     enriching_rows = []
-    for r in results:
-        payload = lead_field_payload(r.enriched)
+    for payload in payloads:
         if len(payload) > 1:
             enriching_rows.append([payload.get(c, "") for c in ENRICHING_COLUMNS])
-    _add_sheet(wb, "Enriching", ENRICHING_COLUMNS, enriching_rows)
+    add_sheet(wb, "Enriching", ENRICHING_COLUMNS, enriching_rows)
+
+    # Phone_Repair — the before/after of every existing phone the write-back rewrites
+    repair_rows = []
+    for r, payload in zip(results, payloads):
+        e = r.enriched.extracted
+        before = (e.lead_phone or "").strip()
+        after = payload.get("Phone")
+        if before and after and after != before:
+            repair_rows.append([e.lead_id, e.best_company,
+                                payload.get("CountryCode") or e.lead_country_code,
+                                before, after])
+    add_sheet(wb, "Phone_Repair", PHONE_REPAIR_COLUMNS, repair_rows)
+
+    # Address_Check — badge-scan address vs LeadFeeder vs the Lead's current address
+    address_rows = [address_check_row(r) for r in results]
+    add_sheet(wb, "Address_Check", ADDRESS_CHECK_COLUMNS, address_rows)
 
     # Contact split
     found_rows, nocontact_rows = [], []
@@ -176,18 +263,21 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
                 c.get("contact_emails"), c.get("best_contact_phone"), c.get("contact_linkedin"),
             ])
         else:
+            reason = (r.enriched.contact_skipped
+                      or ("not found in LeadFeeder" if r.enriched.matched
+                          else "no LeadFeeder company match"))
             nocontact_rows.append([e.lead_id, e.best_company, e.contact_name,
-                                   _yn(r.enriched.matched)])
-    _add_sheet(wb, "Contact_Found", CONTACT_FOUND_COLUMNS, found_rows)
-    _add_sheet(wb, "NoContact", NOCONTACT_COLUMNS, nocontact_rows)
+                                   _yn(r.enriched.matched), reason])
+    add_sheet(wb, "Contact_Found", CONTACT_FOUND_COLUMNS, found_rows)
+    add_sheet(wb, "NoContact", NOCONTACT_COLUMNS, nocontact_rows)
 
     # Skipped
     skipped_rows = [[s.task_id, s.lead_id, s.subject, s.reason] for s in skipped]
-    _add_sheet(wb, "Skipped", SKIPPED_COLUMNS, skipped_rows)
+    add_sheet(wb, "Skipped", SKIPPED_COLUMNS, skipped_rows)
 
     # Failures (LeadFeeder / write-back errors surfaced for the reviewer)
     failure_rows = [[f.get("lead_id"), f.get("stage"), f.get("error")] for f in failures]
-    _add_sheet(wb, "Failures", FAILURES_COLUMNS, failure_rows)
+    add_sheet(wb, "Failures", FAILURES_COLUMNS, failure_rows)
 
     # Summary
     decisions = [r.decision for r in results]
@@ -200,6 +290,12 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         ["total_leads", len(results)],
         ["lf_matched", sum(1 for r in results if r.enriched.matched)],
         ["contacts_found", sum(1 for r in results if r.enriched.contact_found)],
+        # only the config-driven skip; a missing name or a failed search is not a "lookup saved"
+        ["contact_lookups_skipped", sum(1 for r in results
+                                        if r.enriched.contact_skipped == CONTACT_SKIP_NOT_NEEDED)],
+        ["phones_repaired", len(repair_rows)],
+        *(["address_" + v, sum(1 for row in address_rows if row[-1] == v)]
+          for v in ("same", "same_city", "different", "no_task_address", "no_lf_address")),
         ["decision_link", decisions.count("link")],
         ["decision_review", decisions.count("review")],
         ["decision_create_new", decisions.count("create_new")],
@@ -210,7 +306,7 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         summary.append(["live_scope_pass", sum(
             1 for r in results if live_scope_reason(r, settings) is None)])
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
-    _add_sheet(wb, "Summary", ["metric", "value"], summary)
+    add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     return wb
 

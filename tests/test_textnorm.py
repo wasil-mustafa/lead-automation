@@ -73,13 +73,27 @@ def test_normalize_postal_strips_whitespace():
     assert normalize_postal(None) is None
 
 
-def test_normalize_city_casefolds_and_collapses():
+def test_normalize_city_is_the_one_city_identity():
+    # ONE definition of "same city" for the name_address link rule AND the Address_Check
+    # sheet (2026-09-19: the sheet had a smarter copy than the rule that links accounts).
     from leadauto.textnorm import normalize_city
     assert normalize_city("  Wien ") == "wien"
-    assert normalize_city("Frankfurt  am   Main") == "frankfurt am main"
-    assert normalize_city("MÜNCHEN") == "münchen"
+    assert normalize_city("Frankfurt  am   Main") == normalize_city("Frankfurt") == "frankfurt"
+    assert normalize_city("MÜNCHEN") == normalize_city("Muenchen") == normalize_city("Munchen")
+    assert normalize_city("Berlin-Kreuzberg") == normalize_city("Berlin")
+    # a prefix word is not the city
+    assert normalize_city("Bad Homburg") != normalize_city("Bad Kreuznach")
+    assert normalize_city("St. Gallen") != normalize_city("St. Pölten")
+    assert normalize_city("Neu-Ulm") != normalize_city("Neu-Isenburg")
     assert normalize_city("") is None
     assert normalize_city(None) is None
+
+
+def test_normalize_postal_drops_country_prefix():
+    from leadauto.textnorm import normalize_postal
+    assert normalize_postal("D-50969") == normalize_postal("50969") == "50969"
+    assert normalize_postal("CH-8001") == "8001"
+    assert normalize_postal("ab 12") == "AB12"
 
 
 # --- name_like_pattern (account-recall widening, 2026-07-10) ------------------
@@ -105,3 +119,17 @@ def test_name_like_pattern_never_emits_quotes_or_backslashes():
     p = name_like_pattern("O'Brien & Söhne\ GmbH")
     assert p is not None
     assert "'" not in p and "\\" not in p
+
+
+def test_country_iso2_knows_leadfeeder_english_names_outside_europe():
+    # 2026-09-18 ZPE dry run: LF matched Evonik to a record in "Canada", Henkel to
+    # "Bosnia and Herzegovina" and Pax to "Argentina"; all three sailed through the
+    # country sanity gate (which fails open on None) with a foreign address staged.
+    from leadauto.textnorm import country_iso2
+    assert country_iso2("Canada") == "CA"
+    assert country_iso2("Bosnia and Herzegovina") == "BA"
+    assert country_iso2("Argentina") == "AR"
+    assert country_iso2("United States of America") == "US"
+    assert country_iso2("South Korea") == "KR"
+    assert country_iso2("Australia") == "AU"
+    assert country_iso2("Nowhere Land") is None      # still fails open on the unknown

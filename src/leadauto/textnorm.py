@@ -130,9 +130,13 @@ def domain_root(value: str | None) -> str | None:
     return root if len(root) >= 5 else None
 
 
-# Common English/German (+ a few local) country names for our lead population.
-# Deliberately small: country_iso2 fails open (None) on anything unmapped, so an
-# unknown spelling can never create a false country conflict.
+# English/German (+ a few local) country names. country_iso2 fails open (None) on
+# anything unmapped, so an unknown spelling can never create a FALSE conflict — but an
+# unmapped name also lets a genuinely foreign LeadFeeder record through the sanity gate
+# with its address (2026-09-18 ZPE dry run: "Canada", "Bosnia and Herzegovina" and
+# "Argentina" each staged a foreign street/city onto a DE lead). LeadFeeder writes
+# English names, so the English list below is meant to be COMPLETE for the countries LF
+# can return; German spellings cover the org's own picklist labels.
 _COUNTRY_TO_ISO2 = {
     "germany": "DE", "deutschland": "DE",
     "austria": "AT", "österreich": "AT", "oesterreich": "AT",
@@ -150,7 +154,47 @@ _COUNTRY_TO_ISO2 = {
     "united kingdom": "GB", "great britain": "GB", "großbritannien": "GB",
     "ireland": "IE", "irland": "IE", "greece": "GR", "griechenland": "GR",
     "romania": "RO", "rumänien": "RO", "bulgaria": "BG", "bulgarien": "BG",
-    "turkey": "TR", "türkei": "TR", "united states": "US", "usa": "US",
+    "turkey": "TR", "türkei": "TR", "türkiye": "TR", "united states": "US", "usa": "US",
+    "united states of america": "US", "vereinigte staaten": "US",
+    # rest of Europe
+    "iceland": "IS", "island": "IS", "estonia": "EE", "estland": "EE", "latvia": "LV",
+    "lettland": "LV", "lithuania": "LT", "litauen": "LT", "ukraine": "UA", "belarus": "BY",
+    "moldova": "MD", "republic of moldova": "MD", "russia": "RU", "russian federation": "RU",
+    "russland": "RU", "serbia": "RS", "serbien": "RS", "bosnia and herzegovina": "BA",
+    "bosnia & herzegovina": "BA", "bosnien und herzegowina": "BA", "montenegro": "ME",
+    "north macedonia": "MK", "macedonia": "MK", "nordmazedonien": "MK", "albania": "AL",
+    "albanien": "AL", "kosovo": "XK", "malta": "MT", "cyprus": "CY", "zypern": "CY",
+    "monaco": "MC", "andorra": "AD", "san marino": "SM", "vatican city": "VA",
+    "gibraltar": "GI", "isle of man": "IM", "jersey": "JE", "guernsey": "GG",
+    "faroe islands": "FO",
+    # Americas
+    "canada": "CA", "kanada": "CA", "mexico": "MX", "mexiko": "MX", "brazil": "BR",
+    "brasilien": "BR", "argentina": "AR", "argentinien": "AR", "chile": "CL",
+    "colombia": "CO", "kolumbien": "CO", "peru": "PE", "venezuela": "VE", "ecuador": "EC",
+    "uruguay": "UY", "paraguay": "PY", "bolivia": "BO", "costa rica": "CR", "panama": "PA",
+    "guatemala": "GT", "cuba": "CU", "dominican republic": "DO", "puerto rico": "PR",
+    # Asia / Middle East
+    "china": "CN", "people's republic of china": "CN", "hong kong": "HK", "taiwan": "TW",
+    "japan": "JP", "south korea": "KR", "korea, republic of": "KR", "republic of korea": "KR",
+    "india": "IN", "indien": "IN", "singapore": "SG", "singapur": "SG", "malaysia": "MY",
+    "indonesia": "ID", "indonesien": "ID", "thailand": "TH", "vietnam": "VN",
+    "viet nam": "VN", "philippines": "PH", "philippinen": "PH", "pakistan": "PK",
+    "bangladesh": "BD", "sri lanka": "LK", "kazakhstan": "KZ", "uzbekistan": "UZ",
+    "israel": "IL", "united arab emirates": "AE", "vereinigte arabische emirate": "AE",
+    "uae": "AE", "saudi arabia": "SA", "saudi-arabien": "SA", "qatar": "QA", "katar": "QA",
+    "kuwait": "KW", "bahrain": "BH", "oman": "OM", "jordan": "JO", "jordanien": "JO",
+    "lebanon": "LB", "libanon": "LB", "iran": "IR", "iraq": "IQ", "irak": "IQ",
+    "georgia": "GE", "georgien": "GE", "armenia": "AM", "armenien": "AM", "azerbaijan": "AZ",
+    "aserbaidschan": "AZ",
+    # Africa
+    "south africa": "ZA", "südafrika": "ZA", "egypt": "EG", "ägypten": "EG", "morocco": "MA",
+    "marokko": "MA", "tunisia": "TN", "tunesien": "TN", "algeria": "DZ", "algerien": "DZ",
+    "nigeria": "NG", "kenya": "KE", "kenia": "KE", "ghana": "GH", "ethiopia": "ET",
+    "äthiopien": "ET", "tanzania": "TZ", "tansania": "TZ", "uganda": "UG", "senegal": "SN",
+    "ivory coast": "CI", "côte d'ivoire": "CI", "cameroon": "CM", "kamerun": "CM",
+    "angola": "AO", "mozambique": "MZ", "namibia": "NA", "zimbabwe": "ZW", "mauritius": "MU",
+    # Oceania
+    "australia": "AU", "australien": "AU", "new zealand": "NZ", "neuseeland": "NZ",
 }
 
 
@@ -165,16 +209,56 @@ def country_iso2(value) -> str | None:
 
 
 def normalize_postal(value: str | None) -> str | None:
-    """Postal code with ALL whitespace removed (LF and org store it inconsistently)."""
+    """Postal code for identity compare: no whitespace, upper-cased, and a leading
+    country prefix ('D-50969', 'CH-8001') dropped. LF and the org store it inconsistently."""
     if not value:
         return None
-    v = re.sub(r"\s+", "", str(value))
+    v = re.sub(r"\s+", "", str(value)).upper()
+    v = re.sub(r"^[A-Z]{1,2}-", "", v)
     return v or None
+
+
+# City-name prefixes that are not the city: 'Bad Homburg' vs 'Bad Kreuznach', 'St. Gallen'
+# vs 'St. Pölten', 'Neu-Ulm' vs 'Neu-Isenburg' must NOT collapse to 'bad' / 'st' / 'neu'.
+_CITY_PREFIXES = {"bad", "st", "sankt", "saint", "neu", "alt", "gross", "klein", "ober", "unter"}
 
 
 def normalize_city(value: str | None) -> str | None:
-    """Casefolded city name with collapsed whitespace, for address-identity compare."""
+    """City identity for address compare: the head word, ASCII-folded both ways so
+    'Düsseldorf' == 'Duesseldorf' == 'Dusseldorf'; 'Frankfurt am Main' ~ 'Frankfurt',
+    'Bonn Bad-Godesberg' ~ 'Bonn', 'Berlin-Kreuzberg' ~ 'Berlin'. A leading prefix word
+    ('Bad', 'St.', 'Neu') is kept TOGETHER with the word after it, so 'Bad Homburg' !=
+    'Bad Kreuznach'. Used by the name_address link rule and the Address_Check sheet —
+    ONE definition of "same city", on purpose (2026-09-19: there were two)."""
     if not value:
         return None
-    v = re.sub(r"\s+", " ", str(value)).strip().casefold()
-    return v or None
+    s = str(value).strip().casefold()
+    for a, b in (("ä", "a"), ("ö", "o"), ("ü", "u"), ("ß", "ss"), ("ae", "a"), ("oe", "o"),
+                 ("ue", "u")):
+        s = s.replace(a, b)
+    s = re.sub(r"[^a-z0-9 \-]", " ", s).strip()
+    words = [w for w in re.split(r"[ \-]+", s) if w]
+    if not words:
+        return None
+    if words[0] in _CITY_PREFIXES and len(words) > 1:
+        return f"{words[0]} {words[1]}"
+    return words[0]
+
+
+# --- Salesforce value coercions ---------------------------------------------------
+# Bulk API 2.0 results are CSV, so booleans arrive as 'true'/'false' STRINGS ('false' is
+# truthy!) and nulls as ''. REST returns real bools/None. Both shapes pass through here.
+
+def is_true(value) -> bool:
+    """True for a real True or the string 'true' (any case); everything else False."""
+    return value is True or str(value).strip().lower() == "true"
+
+
+def is_blank(value) -> bool:
+    """None or a whitespace-only string. A non-string non-None value is never blank."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+# KN_Checklengthpostalcode: PostalCode length the org enforces per country (Austria is
+# unchecked). One table for the write-back and the conversion preflight.
+POSTAL_LEN_BY_CC = {"DE": 5, "CH": 4}

@@ -7,7 +7,7 @@ import requests
 
 from leadauto import kununu_feed
 from leadauto.kununu_feed import ProfileInfo, base_slug, lookup_profiles, ensure_feed, load_profiles_for_leads
-from leadauto.extract.models import ExtractedLead
+from leadauto.models import ExtractedLead
 
 
 def _write_feed(tmp_path, records, extra_lines=()):
@@ -23,7 +23,9 @@ def _record(uuid="u1", name="Siemens", url="https://www.kununu.com/de/siemens",
     d = {"profile_uuid": uuid, "profile_name": name, "profile_url": url,
          "profile_city": "Muenchen", "profile_country_code": "de"}
     if companies is not None:
-        d["assigned_companies"] = companies
+        # the feed's real shape on both formats: one {company_uuid, company_name} per entry
+        d["assigned_companies"] = [{"company_uuid": f"c{i}", "company_name": c}
+                                   for i, c in enumerate(companies)]
     d.update(extra)
     return d
 
@@ -79,21 +81,6 @@ def test_lookup_missing_feed_file_returns_empty(tmp_path):
     assert lookup_profiles(tmp_path / "nope.jsonl", uuids={"u1"}, slugs=set()) == {}
 
 
-def test_company_names_field_shapes(tmp_path):
-    # The exact feed field is unconfirmed; both list-of-strings and list-of-dicts work.
-    feed = _write_feed(tmp_path, [
-        _record(uuid="a", url="https://www.kununu.com/de/a", companies=["Plain GmbH"]),
-        _record(uuid="b", url="https://www.kununu.com/de/b",
-                companies=[{"name": "Dict AG"}, {"company_name": "Alt Key SE"}, {"x": 1}]),
-        _record(uuid="c", url="https://www.kununu.com/de/c",
-                assigned_company_names=["Other Field GmbH"]),
-    ])
-    found = lookup_profiles(feed, uuids={"a", "b", "c"}, slugs=set())
-    assert found["a"].companies == ["Plain GmbH"]
-    assert found["b"].companies == ["Dict AG", "Alt Key SE"]
-    assert found["c"].companies == ["Other Field GmbH"]
-
-
 def test_lookup_captures_profile_industry(tmp_path):
     feed = _write_feed(tmp_path, [_record(profile_industry_name_de="IT")])
     found = lookup_profiles(feed, uuids={"u1"}, slugs=set())
@@ -139,8 +126,6 @@ def _settings(tmp_path, token="tok", enabled=True, max_age=24, cache="profiles.j
         kununu_feed_enabled=enabled,
         kununu_feed_cache_path=(tmp_path / cache) if cache else None,
         kununu_feed_max_age_hours=max_age,
-        kununu_feed_url=None,
-        kununu_api_token=token, kununu_api_user=None, kununu_api_password=None,
     )
 
 

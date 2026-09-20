@@ -17,7 +17,7 @@ Ordered rules mirror the business decision tree (spec: docs/superpowers/specs/
   8  name_only         normalized name equal on one account, nothing else -> review
   9  duplicate         normalized name equal on 2+ accounts, none singled
                        out — the org already holds duplicate accounts     -> review
-  10 weak_signal       only VAT/DBID/host/email-domain/fuzzy point at one -> review
+  10 weak_signal       only VAT/host/email-domain/fuzzy point at one    -> review
   11 no_match          nothing                                            -> create_new
 
 `skip` is terminal: no accepted LF match means the lead can't be identified, so it is
@@ -36,58 +36,17 @@ from dataclasses import dataclass, field
 
 from rapidfuzz import fuzz
 
-from .leadfeeder.enrich import EnrichedLead
 from .logging import get_logger
+from .models import AccountMatch, ContactMatch, EnrichedLead, MatchResult
 from .sf import soql
-# Normalizers live in textnorm so the LeadFeeder client can share them (no import cycle).
-# Re-exported under their historical names for existing callers/tests.
-from .textnorm import (  # noqa: F401
-    FREEMAIL_DOMAINS as _FREEMAIL_DOMAINS,
-    LEGAL_SUFFIXES as _LEGAL_SUFFIXES,
-    email_domain,
-    normalize_city,
-    normalize_host,
-    name_like_pattern,
-    normalize_name,
-    normalize_postal,
-    normalize_url as _normalize_url,
-)
+from .textnorm import (FREEMAIL_DOMAINS, email_domain, name_like_pattern, normalize_city,
+                       normalize_host, normalize_name, normalize_postal, normalize_url)
 
 _FUZZY_FLOOR = 0.90  # rapidfuzz ratio below this never counts as a name match
 
 
 def _norm_vat(value) -> str:
     return re.sub(r"\s+", "", str(value or "")).upper()
-
-
-def normalize_kununu_url(value: str | None) -> str | None:
-    return _normalize_url(value)
-
-
-# --- result records ----------------------------------------------------------
-
-@dataclass
-class AccountMatch:
-    account_id: str
-    score: float | None   # display metadata only; rules decide, not scores
-    reason: str
-
-
-@dataclass
-class ContactMatch:
-    contact_id: str
-    score: float
-    reason: str
-
-
-@dataclass
-class MatchResult:
-    enriched: EnrichedLead
-    account: AccountMatch | None
-    contact: ContactMatch | None
-    decision: str  # "link" | "review" | "create_new"
-    rule: str = ""
-    evidence: list[str] = field(default_factory=list)
 
 
 # --- existing-record index ---------------------------------------------------
@@ -99,7 +58,6 @@ class ExistingRecords:
     acct_by_profile_uuid: dict[str, dict] = field(default_factory=dict)
     acct_by_kununu_url: dict[str, dict] = field(default_factory=dict)
     acct_by_vat: dict[str, dict] = field(default_factory=dict)
-    acct_by_dbid: dict[str, dict] = field(default_factory=dict)
     acct_by_host: dict[str, list[dict]] = field(default_factory=dict)
     acct_by_norm_name: dict[str, list[dict]] = field(default_factory=dict)
     contact_by_user_uuid: dict[str, dict] = field(default_factory=dict)
@@ -112,22 +70,18 @@ class ExistingRecords:
         by_puid: dict[str, dict] = {}
         by_url: dict[str, dict] = {}
         by_vat: dict[str, dict] = {}
-        by_dbid: dict[str, dict] = {}
         by_host: dict[str, list[dict]] = defaultdict(list)
         by_name: dict[str, list[dict]] = defaultdict(list)
         for a in accounts:
             puid = (a.get("KN_KununuProfileUuid__c") or "").strip()
             if puid:
                 by_puid.setdefault(puid, a)
-            url = normalize_kununu_url(a.get("KN_KununuLinkProfile__c"))
+            url = normalize_url(a.get("KN_KununuLinkProfile__c"))
             if url:
                 by_url.setdefault(url, a)
             vat = _norm_vat(a.get("KN_VATNumber__c"))
             if vat:
                 by_vat.setdefault(vat, a)
-            dbid = (a.get("KN_DBID__c") or "").strip()
-            if dbid:
-                by_dbid.setdefault(dbid, a)
             host = normalize_host(a.get("Website"))
             if host:
                 by_host[host].append(a)
@@ -147,7 +101,7 @@ class ExistingRecords:
             email = (c.get("Email") or "").strip().lower()
             if email:
                 by_email[email].append(c)
-            linkedin = _normalize_url(c.get("KN_LinkedInProfile__c"))
+            linkedin = normalize_url(c.get("KN_LinkedInProfile__c"))
             if linkedin:
                 by_linkedin[linkedin].append(c)
             acc = c.get("AccountId")
@@ -157,7 +111,7 @@ class ExistingRecords:
         return cls(
             accounts=list(accounts), contacts=list(contacts),
             acct_by_profile_uuid=by_puid, acct_by_kununu_url=by_url,
-            acct_by_vat=by_vat, acct_by_dbid=by_dbid,
+            acct_by_vat=by_vat,
             acct_by_host=dict(by_host), acct_by_norm_name=dict(by_name),
             contact_by_user_uuid=by_uuid, contact_by_email=dict(by_email),
             contact_by_linkedin=dict(by_linkedin), contacts_by_account=dict(by_account),
@@ -210,7 +164,7 @@ def _kununu_account(enriched: EnrichedLead, existing: ExistingRecords):
     puid = (e.kununu_profile_uuid or "").strip()
     if puid and puid in existing.acct_by_profile_uuid:
         return existing.acct_by_profile_uuid[puid], "kununu_profile_uuid"
-    url = normalize_kununu_url(e.kununu_url)
+    url = normalize_url(e.kununu_url)
     if url and url in existing.acct_by_kununu_url:
         return existing.acct_by_kununu_url[url], "kununu_url"
     return None
@@ -250,17 +204,14 @@ def _weak_hits(enriched: EnrichedLead, existing: ExistingRecords) -> list[tuple[
     e = enriched.extracted
     company = enriched.company or {}
     hits: list[tuple[str, dict]] = []
-    vat = _norm_vat(company.get("VAT_Id") or e.vat_number)
+    vat = _norm_vat(company.get("VAT_Id"))
     if vat and vat in existing.acct_by_vat:
         hits.append(("vat", existing.acct_by_vat[vat]))
-    dbid = (company.get("Register_Id") or "").strip()
-    if dbid and dbid in existing.acct_by_dbid:
-        hits.append(("dbid", existing.acct_by_dbid[dbid]))
     host = normalize_host(company.get("Website") or e.lead_website)
     if host and host in existing.acct_by_host:
         hits.append(("website_host", existing.acct_by_host[host][0]))
     domain = email_domain(e.contact_email or e.lead_email)
-    if domain and domain not in _FREEMAIL_DOMAINS and domain in existing.acct_by_host:
+    if domain and domain not in FREEMAIL_DOMAINS and domain in existing.acct_by_host:
         hits.append(("email_domain", existing.acct_by_host[domain][0]))
     fuzzy = _best_fuzzy_account(enriched, existing)
     if fuzzy:
@@ -280,37 +231,36 @@ def _fire(enriched: EnrichedLead, existing: ExistingRecords, settings,
     for acct in name_accts:
         if _address_equal(acct, company):
             if kununu_id and kununu_id != acct["Id"]:
-                return "kununu_over_name", AccountMatch(kununu_id, None, "kununu_over_name")
-            return "name_address", AccountMatch(acct["Id"], None, "name_address")
-    vat = _norm_vat(company.get("VAT_Id") or enriched.extracted.vat_number)
+                return "kununu_over_name", AccountMatch(kununu_id, "kununu_over_name")
+            return "name_address", AccountMatch(acct["Id"], "name_address")
+    vat = _norm_vat(company.get("VAT_Id"))
     if vat:
         for acct in name_accts:
             if _norm_vat(acct.get("KN_VATNumber__c")) == vat:
                 if kununu_id and kununu_id != acct["Id"]:
-                    return "kununu_over_name", AccountMatch(kununu_id, None, "kununu_over_name")
-                return "name_vat", AccountMatch(acct["Id"], None, "name_vat")
+                    return "kununu_over_name", AccountMatch(kununu_id, "kununu_over_name")
+                return "name_vat", AccountMatch(acct["Id"], "name_vat")
     if kununu:
         acct, _sig = kununu
         agree = _kununu_name_agreement(acct, enriched)
         rule = ("kununu_agree" if agree >= settings.dedupe_name_agree_min
                 else "kununu_conflict")
-        return rule, AccountMatch(acct["Id"], None, rule)
+        return rule, AccountMatch(acct["Id"], rule)
     if name_accts:
-        # Name equality plus an independent weak signal (VAT/DBID/host/email-domain/fuzzy)
+        # Name equality plus an independent weak signal (VAT/host/email-domain/fuzzy)
         # pointing at the SAME account is two axes → link. When corroboration singles out
         # exactly one account it also disambiguates a multi-candidate name collision.
         weak_ids = {acct["Id"] for _sig, acct in weak}
         corroborated = [a for a in name_accts if a["Id"] in weak_ids]
         if len(corroborated) == 1:
-            return "name_corroborated", AccountMatch(
-                corroborated[0]["Id"], None, "name_corroborated")
+            return "name_corroborated", AccountMatch(corroborated[0]["Id"], "name_corroborated")
         if len(name_accts) > 1:
             # Several existing accounts share the normalized name and nothing singles one
             # out: the org already holds duplicate accounts — a human must resolve them.
-            return "duplicate", AccountMatch(name_accts[0]["Id"], None, "duplicate")
-        return "name_only", AccountMatch(name_accts[0]["Id"], None, "name_only")
+            return "duplicate", AccountMatch(name_accts[0]["Id"], "duplicate")
+        return "name_only", AccountMatch(name_accts[0]["Id"], "name_only")
     if weak:
-        return "weak_signal", AccountMatch(weak[0][1]["Id"], None, "weak_signal")
+        return "weak_signal", AccountMatch(weak[0][1]["Id"], "weak_signal")
     return "no_match", None
 
 
@@ -356,7 +306,7 @@ def match_contact(
         else:
             candidates.append((0.85, "contact_email_global", matches[0]))
 
-    linkedin = _normalize_url((enriched.contact or {}).get("contact_linkedin"))
+    linkedin = normalize_url((enriched.contact or {}).get("contact_linkedin"))
     if linkedin and linkedin in existing.contact_by_linkedin:
         candidates.append((0.85, "linkedin", existing.contact_by_linkedin[linkedin][0]))
 
@@ -389,7 +339,6 @@ def load_existing_records(client, enriched_leads: list[EnrichedLead], settings, 
     profile_uuids: set[str] = set()
     kununu_urls: set[str] = set()
     vats: set[str] = set()
-    dbids: set[str] = set()
     hosts: set[str] = set()
     names: set[str] = set()
     name_patterns: set[str] = set()  # normalized LIKE widening (backtest recall gap)
@@ -402,20 +351,17 @@ def load_existing_records(client, enriched_leads: list[EnrichedLead], settings, 
         company = enr.company or {}
         if e.kununu_profile_uuid:
             profile_uuids.add(e.kununu_profile_uuid.strip())
-        url = normalize_kununu_url(e.kununu_url)
+        url = normalize_url(e.kununu_url)
         if url:
             kununu_urls.add(url)
-        vat = company.get("VAT_Id") or e.vat_number
+        vat = company.get("VAT_Id")
         if vat:
             vats.add(vat.strip())
-        dbid = company.get("Register_Id")
-        if dbid:
-            dbids.add(dbid.strip())
         host = normalize_host(company.get("Website") or e.lead_website)
         if host:
             hosts.add(host)
         domain = email_domain(e.contact_email or e.lead_email)
-        if domain and domain not in _FREEMAIL_DOMAINS:
+        if domain and domain not in FREEMAIL_DOMAINS:
             hosts.add(domain)
         name = e.best_company
         if name:
@@ -435,7 +381,7 @@ def load_existing_records(client, enriched_leads: list[EnrichedLead], settings, 
     accounts: list[dict] = []
     acct_q = soql.accounts_by_signals(
         profile_uuids=sorted(profile_uuids), kununu_urls=sorted(kununu_urls),
-        vats=sorted(vats), dbids=sorted(dbids), hosts=sorted(hosts), names=sorted(names),
+        vats=sorted(vats), hosts=sorted(hosts), names=sorted(names),
         name_patterns=sorted(name_patterns),
     )
     if acct_q:

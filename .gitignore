@@ -54,3 +54,4 @@ scripts/*
 # OS
 .DS_Store
 Thumbs.db
+!scripts/event_run.py

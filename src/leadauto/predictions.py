@@ -30,6 +30,7 @@ class Prediction:
     lf_company_id: str | None = None
     lf_company_name: str | None = None
     lf_website: str | None = None
+    lf_match_pass: str = ""        # primary | wide (second-chance match) | "" (no match)
     status: str = "pending"        # pending | resolved | expired
     resolved_at: str | None = None
     outcome: dict | None = None    # filled by shadow_compare
@@ -71,6 +72,7 @@ def record_predictions(results: list, payloads: list[dict], predicted_at: str,
             lf_company_id=r.enriched.lf_company_id,
             lf_company_name=r.enriched.matched_name,
             lf_website=company.get("Website") or None,
+            lf_match_pass=r.enriched.match_pass,
         )
     save_predictions(keep + list(pending.values()), path)
     return len(pending)

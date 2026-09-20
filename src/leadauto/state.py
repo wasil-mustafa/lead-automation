@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from .config import REPO_ROOT
 DEFAULT_STATE_PATH = REPO_ROOT / "state" / "watermark.json"
 
 
@@ -22,7 +22,7 @@ class State:
     processed_task_ids: list[str] = field(default_factory=list)
 
 
-def _parse_sf_dt(value: str) -> datetime:
+def parse_sf_dt(value: str) -> datetime:
     """Parse a Salesforce datetime ('...+0000', 'Z', or fractional seconds) to aware UTC."""
     try:
         dt = datetime.fromisoformat(value.strip())
@@ -56,7 +56,7 @@ def save_state(state: State, path: str | Path | None = None) -> None:
 
 def compute_since(state: State, lookback_days: int, now: datetime | None = None) -> str:
     """SOQL datetime literal to scan from: (watermark or now) minus the overlap window."""
-    base = _parse_sf_dt(state.last_task_created) if state.last_task_created else (
+    base = parse_sf_dt(state.last_task_created) if state.last_task_created else (
         now or datetime.now(timezone.utc)
     )
     since = base.astimezone(timezone.utc) - timedelta(days=lookback_days)
@@ -70,12 +70,12 @@ def advance(state: State, processed_tasks: list[dict]) -> State:
         return State(state.last_task_created, list(state.processed_task_ids))
 
     latest_str = state.last_task_created
-    latest_dt = _parse_sf_dt(latest_str) if latest_str else None
+    latest_dt = parse_sf_dt(latest_str) if latest_str else None
     for t in processed_tasks:
         created = t.get("CreatedDate")
         if not created:
             continue
-        dt = _parse_sf_dt(created)
+        dt = parse_sf_dt(created)
         if latest_dt is None or dt > latest_dt:
             latest_dt, latest_str = dt, created
 

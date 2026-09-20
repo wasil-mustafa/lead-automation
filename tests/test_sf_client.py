@@ -1,6 +1,6 @@
 """Tests for the sf client wrapper: query routing, the direct Bulk API 2.0 read
-transport, /composite bundled reads, sObject-Collections updates, apex_run
-diagnostics/retry, auth_info and the SOAP convertLead path.
+transport, /composite bundled reads, sObject-Collections updates, auth_info and the
+SOAP convertLead path.
 """
 import json
 import types
@@ -135,16 +135,24 @@ def test_update_records_http_error_raises_with_body(monkeypatch):
         client.update_records("Lead", [{"Id": "00Q1", "Nope": "x"}])
 
 
-# --- query routing: CLI REST for short queries, direct Bulk API 2.0 for long ones ----
+# --- query routing: direct REST GET for short queries, direct Bulk API 2.0 for long ones -
 # Long IN(...) lists overflow the GET-URL header limit (HTTP 431), so they go through a
 # Bulk query job — since 2026-07-25 over direct HTTP rather than `sf data export bulk`,
-# which polled job status every 5 s and spent ~4-7 API calls where 2 suffice.
+# which polled job status every 5 s and spent ~4-7 API calls where 2 suffice. Short
+# queries stopped shelling out to the sf CLI on 2026-09-19: the CLI is now only the
+# token source (auth_info).
 
-def _fake_run(records, capture):
-    def run(cmd):
-        capture.append(cmd)
-        return types.SimpleNamespace(stdout=json.dumps({"result": {"records": records}}))
-    return run
+class _RestOrg:
+    """GET /query answering from a list of page bodies, in order."""
+    def __init__(self, bodies):
+        self.bodies = list(bodies)
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, method, url, data=None, headers=None, timeout=None):
+        path = url.split("salesforce.com", 1)[-1]
+        self.calls.append((method, path))
+        assert headers["Authorization"] == "Bearer TOK1"
+        return _FakeResponse(json.dumps(self.bodies.pop(0)))
 
 
 def _long_id_query(n=300):
@@ -196,14 +204,51 @@ def _bulk_client(monkeypatch, org):
     return client
 
 
-def test_query_short_uses_rest_and_strips_attributes(monkeypatch):
+def test_query_short_is_one_rest_get_and_strips_attributes(monkeypatch):
     client = SfClient("headless")
-    cmds: list[str] = []
-    monkeypatch.setattr(client, "_run",
-                        _fake_run([{"Id": "00Q1", "attributes": {"type": "Lead"}}], cmds))
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    org = _RestOrg([{"done": True, "totalSize": 1,
+                     "records": [{"Id": "00Q1", "attributes": {"type": "Lead"}}]}])
+    monkeypatch.setattr("leadauto.sf.client.requests.request", org)
     out = client.query("SELECT Id FROM Lead WHERE Id IN ('00Q1')")
     assert out == [{"Id": "00Q1"}]                     # attributes stripped
-    assert "data query --query" in cmds[0]
+    assert org.calls == [("GET", "/services/data/v66.0/query/?q=SELECT%20Id%20FROM%20Lead"
+                                 "%20WHERE%20Id%20IN%20%28%2700Q1%27%29")]
+
+
+def test_query_short_follows_next_records_url(monkeypatch):
+    # done=false is never the answer: a truncated read is a plausible-looking wrong one.
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    org = _RestOrg([
+        {"done": False, "nextRecordsUrl": "/services/data/v66.0/query/01g-2000",
+         "records": [{"Id": "00Q1"}]},
+        {"done": True, "records": [{"Id": "00Q2"}]},
+    ])
+    monkeypatch.setattr("leadauto.sf.client.requests.request", org)
+    assert client.query("SELECT Id FROM Lead") == [{"Id": "00Q1"}, {"Id": "00Q2"}]
+    assert org.calls[1] == ("GET", "/services/data/v66.0/query/01g-2000")
+
+
+def test_query_short_http_error_raises_with_body(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    monkeypatch.setattr("leadauto.sf.client.requests.request",
+                        lambda *a, **k: _FakeResponse(
+                            json.dumps([{"message": "No such column 'Nope'"}]), status_code=400))
+    with pytest.raises(SfError, match="No such column"):
+        client.query("SELECT Nope FROM Lead")
+
+
+def test_query_double_quotes_are_no_longer_a_shell_problem(monkeypatch):
+    # The ban existed for the shell-quoted `sf data query` string; REST carries the SOQL
+    # URL-encoded, so a double quote is just a character (SOQL itself still wants ').
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    org = _RestOrg([{"done": True, "records": []}])
+    monkeypatch.setattr("leadauto.sf.client.requests.request", org)
+    assert client.query('SELECT Id FROM Lead WHERE Name = "x"') == []
+    assert "%22x%22" in org.calls[0][1]
 
 
 def test_query_long_routes_to_bulk_job_in_two_calls(monkeypatch):
@@ -390,91 +435,6 @@ def test_query_many_empty_makes_no_call(monkeypatch):
     monkeypatch.setattr("leadauto.sf.client.requests.request",
                         lambda *a, **k: pytest.fail("must not call the org"))
     assert client.query_many({}) == {}
-
-
-# --- apex_run: diagnose failures from the --json payload, not a lack of expected output --
-
-def _fake_apex_run(payload, capture):
-    """Stand in for SfClient._run: record the cmd, return an ExecuteAnonymous --json blob."""
-    def run(cmd, check=True):
-        capture.append(cmd)
-        return types.SimpleNamespace(returncode=0 if payload.get("success") else 1,
-                                     stdout=json.dumps({"result": payload}), stderr="")
-    return run
-
-
-def test_apex_run_returns_logs_on_success(monkeypatch):
-    client = SfClient("headless")
-    cmds: list[str] = []
-    logs = "USER_DEBUG|@@LEADAUTO@@[]@@LEADAUTO@@"
-    monkeypatch.setattr(client, "_run", _fake_apex_run(
-        {"compiled": True, "success": True, "logs": logs}, cmds))
-    assert client.apex_run("System.debug('x');") == logs
-    assert "--json" in cmds[0]
-
-
-def test_apex_run_raises_on_compile_error(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr(client, "_run", _fake_apex_run(
-        {"compiled": False, "compileProblem": "Unexpected token", "success": False}, []))
-    with pytest.raises(SfError, match="did not compile"):
-        client.apex_run("this is not apex")
-
-
-def test_apex_run_raises_on_runtime_exception(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr(client, "_run", _fake_apex_run(
-        {"compiled": True, "success": False,
-         "exceptionMessage": "System.LimitException: Too many SOQL queries: 101",
-         "exceptionStackTrace": "AnonymousBlock: line 1, column 1"}, []))
-    with pytest.raises(SfError, match="Apex run failed"):
-        client.apex_run("run that throws")
-
-
-def test_apex_run_raises_on_unparseable_output(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-
-    def run(cmd, check=True):
-        return types.SimpleNamespace(returncode=1, stdout="not json", stderr="boom")
-    monkeypatch.setattr(client, "_run", run)
-    with pytest.raises(SfError, match="no parseable"):
-        client.apex_run("System.debug('x');")
-
-
-# --- apex_run retry: the sf CLI intermittently dies on CI with exit 1 and EMPTY output
-# (same class as the login hangs both workflows retry) — seen live 2026-07-10 on the
-# first Stage-2 conversion dispatch. Retrying is safe: the conversion Apex only touches
-# IsConverted=false leads and callers reconcile alreadyConverted rows.
-
-def test_apex_run_retries_on_empty_output_then_succeeds(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-    calls: list[str] = []
-    good = json.dumps({"result": {"compiled": True, "success": True, "logs": "ok-log"}})
-
-    def run(cmd, check=True):
-        calls.append(cmd)
-        if len(calls) < 3:
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout=good, stderr="")
-    monkeypatch.setattr(client, "_run", run)
-    assert client.apex_run("System.debug('x');") == "ok-log"
-    assert len(calls) == 3
-
-
-def test_apex_run_gives_up_after_three_unparseable_attempts(monkeypatch):
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-    calls: list[str] = []
-
-    def run(cmd, check=True):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-    monkeypatch.setattr(client, "_run", run)
-    with pytest.raises(SfError, match="no parseable"):
-        client.apex_run("System.debug('x');")
-    assert len(calls) == 3
 
 
 # --- auth_info + SOAP convert_lead --------------------------------------------
@@ -664,18 +624,3 @@ def test_convert_lead_empty_is_noop_without_post(monkeypatch):
     assert client.convert_lead([], converted_status="Qualified", owner_id=None) == []
 
 
-def test_apex_run_does_not_retry_apex_level_failures(monkeypatch):
-    """A parseable failure (compile error / runtime exception) is real — never re-run."""
-    client = SfClient("headless")
-    monkeypatch.setattr("leadauto.sf.client._APEX_RETRY_DELAY_S", 0)
-    calls: list[str] = []
-
-    def run(cmd, check=True):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=1, stdout=json.dumps({"result": {
-            "compiled": False, "compileProblem": "Unexpected token", "success": False}}),
-            stderr="")
-    monkeypatch.setattr(client, "_run", run)
-    with pytest.raises(SfError, match="did not compile"):
-        client.apex_run("bad apex")
-    assert len(calls) == 1

@@ -238,3 +238,22 @@ def test_read_returns_empty_when_no_subjects_enabled():
     assert result.leads == []
     assert result.skipped == []
     assert client.queries == []  # nothing enabled -> no org calls at all
+
+
+def test_event_lead_without_profile_link_is_skipped_with_link_it_is_extracted():
+    # The ZPE one-off config (2026-09-18): event enabled, marker skip bypassed.
+    settings = Settings.load("config/config.zpe-2026-09.yaml")
+    desc = "ZPE 2026; Review: 3; Position: HR Consultant; Address: Weg 1, 44801 Bochum, DE; Note: x"
+    tasks = [_task("T1", "00Q1", subject="Inbound Sales Task: Eventteilnahme", desc=desc),
+             _task("T2", "00Q2", subject="Inbound Sales Task: Eventteilnahme", desc=desc)]
+    linked = _lead("00Q2", company="SIVAplan GmbH", email="a@sivaplan.de")
+    linked["KN_KununuLinkProfile__c"] = "https://www.kununu.com/de/sivaplan"
+    client = FakeClient(tasks=tasks, leads=[_lead("00Q1"), linked])
+    res = read_extracted_leads(client, settings, SINCE)
+    assert [e.lead_id for e in res.leads] == ["00Q2"]
+    assert res.leads[0].kununu_url == "https://www.kununu.com/de/sivaplan"
+    assert [(s.task_id, s.reason) for s in res.skipped] == [
+        ("T1", "event lead without kununu profile link")]
+    # T1 is held OUT of the watermark: the operator fills the link in and re-runs, and the
+    # task must be fetched again then — every other skip still advances it (see above).
+    assert [t["Id"] for t in res.processed_tasks] == ["T2"]

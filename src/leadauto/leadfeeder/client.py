@@ -36,6 +36,23 @@ DEFAULT_TIMEOUT = (10, 180)
 _PHONE_EXCLUDE_TYPES = {"fax"}
 # Keys the gate uses locally that the match endpoint must never receive.
 _LOCAL_ONLY_MATCH_KEYS = {"alt_names"}
+
+# `max_results_per_company` on POST /companies/match. The primary pass asks for 3 and
+# must keep asking for 3: the calibration (6-month control set 2026-07-02 + the 283-case
+# backtest) was measured at that width, and widening it can only ADD candidates that
+# outrank the accepted one on `(match_score, agreement)` — i.e. it can silently move a
+# working match. The second-chance pass in `enrich` asks for MATCH_RESULTS_WIDE, and only
+# for leads the primary pass left unmatched, which have nothing to lose. Prior art and the
+# reason it works: `Contact Presence Check`'s rescue pass (2026-08-23) — LF holds several
+# company records for one company and the top 3 are often the wrong (emptier) ones.
+MATCH_RESULTS_PRIMARY = 3
+MATCH_RESULTS_WIDE = 20
+MATCH_RESULTS_MAX = 20   # machine-readable spec (openapi.yaml 2026-08-10); the prose doc says 10
+# Per-company result of `match_companies` when its CHUNK failed (transport error after
+# retries). Falsy like None, so every `if match:` caller degrades exactly as before, but
+# `is not None` — so the second-chance pass can tell "LF rejected it" (None) from "LF was
+# never asked" and not re-ask (and mislabel as `wide`) a lead the primary pass never judged.
+MATCH_CHUNK_FAILED: dict = {}
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -192,6 +209,7 @@ class LeadfeederClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
+        self.credits_charged = 0   # sum of meta.credits.charged over this client's calls
         self.min_match_score = min_match_score
         self.name_agree_min = name_agree_min
         self.name_agree_rescue = name_agree_rescue
@@ -274,10 +292,25 @@ class LeadfeederClient:
         raise LeadfeederError(f"LeadFeeder {kind} {path} exhausted retries without a response")
 
     def api_get(self, path: str, params=None) -> dict:
-        return self._request("GET", path, params=params)
+        return self._note_credits(self._request("GET", path, params=params))
 
     def api_post(self, path: str, payload, params=None) -> dict:
-        return self._request("POST", path, params=params, json=payload)
+        return self._note_credits(self._request("POST", path, params=params, json=payload))
+
+    def _note_credits(self, data: dict) -> dict:
+        """Accumulate `meta.credits.charged` into `credits_charged`, unchanged pass-through.
+
+        Every LF response carries what it billed. Summing it turns "match is free" from a
+        claim into a number a report can print, and makes an accidentally-billing call
+        visible instead of silent. Never raises on a shape it does not recognise: a
+        miscounted credit must not sink a run.
+        """
+        try:
+            charged = ((data or {}).get("meta", {}) or {}).get("credits", {}) or {}
+            self.credits_charged += int(charged.get("charged", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return data
 
     # -- account / lists --
     def get_account_id(self) -> str:
@@ -370,7 +403,8 @@ class LeadfeederClient:
                         "agreed_via": via}
         return best
 
-    def match_companies(self, payloads: list[dict]) -> list[dict | None]:
+    def match_companies(self, payloads: list[dict],
+                        max_results: int = MATCH_RESULTS_PRIMARY) -> list[dict | None]:
         """Batch company match (free). `payloads` is a list of per-company dicts
         (company_name, email, country, country_code, ...). Returns a list aligned to
         `payloads`: {company_id, match_score, matched_name, name_agreement, agreed_via}
@@ -378,9 +412,18 @@ class LeadfeederClient:
         name agrees with the payload's company_name / alt_names / email-domain root;
         `agreed_via` names which signal vouched for the match (`company_name`,
         `alt_name:<name>`, or `email_domain`), or None if nothing agreed. A chunk that
-        errors after retries degrades its entries to None (logged), never raising."""
+        errors after retries degrades its entries to None (logged), never raising.
+
+        `max_results` is LF's `max_results_per_company` (1-20 per the machine-readable
+        spec; the prose doc's 1-10 is wrong). It changes only how many candidates LF
+        RETURNS — `_best_match` already gates every one of them, so a wider call cannot
+        accept anything the narrow call would have rejected. See `MATCH_RESULTS_PRIMARY`
+        for why the primary pass keeps 3.
+        """
         if not payloads:
             return []
+        if not 1 <= max_results <= MATCH_RESULTS_MAX:
+            raise ValueError(f"max_results must be 1..{MATCH_RESULTS_MAX}, got {max_results}")
         account_id = self.get_account_id()
         results: list[dict | None] = []
         for i in range(0, len(payloads), self.match_batch):
@@ -389,26 +432,21 @@ class LeadfeederClient:
             try:
                 data = self.api_post(
                     "/companies/match", payload={"companies": api_chunk},
-                    params={"account_id": account_id, "max_results_per_company": 3},
+                    params={"account_id": account_id,
+                            "max_results_per_company": max_results},
                 )
             except requests.exceptions.RequestException as e:
                 self.log.warning("Company match chunk failed (%d companies): %s", len(chunk), e)
-                results.extend([None] * len(chunk))
+                # MATCH_CHUNK_FAILED (falsy, `is not None`) lets a caller tell "LF was
+                # asked and rejected it" (None) from "LF was never asked" — the wide
+                # pass must not re-ask the latter and then label a hit as `wide`.
+                results.extend([MATCH_CHUNK_FAILED] * len(chunk))
                 continue
             per_company = data.get("data", []) or []
             for j in range(len(chunk)):
                 matches = per_company[j] if j < len(per_company) else []
                 results.append(self._best_match(matches, chunk[j]))
         return results
-
-    def match_company(self, company_name: str, email: str | None = None,
-                      country: str | None = None, country_code: str | None = None) -> dict | None:
-        payload = {"company_name": company_name, "email": email}
-        if country:
-            payload["country"] = country
-        if country_code:
-            payload["country_code"] = country_code
-        return self.match_companies([payload])[0]
 
     def add_company_to_list(self, company_id: str, list_id: str) -> None:
         self.api_post(f"/companies/{company_id}/lists",
@@ -521,10 +559,6 @@ class LeadfeederClient:
             except requests.exceptions.RequestException as e:
                 self.log.warning("Contact retrieve batch failed: %s", e)
         return out
-
-    def get_contact_details(self, contact_id: str) -> dict:
-        attrs = self.retrieve_contacts([contact_id]).get(contact_id, {})
-        return flatten_contact_details(attrs)
 
     def find_contact_data(self, contact_ids: list[str], timeout: float = 180.0,
                           poll_interval: float = 10.0) -> bool:

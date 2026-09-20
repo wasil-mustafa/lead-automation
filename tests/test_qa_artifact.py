@@ -6,10 +6,10 @@ reasons, and the Summary counts) without writing to disk except for the round-tr
 """
 from openpyxl import load_workbook
 
-from leadauto.extract.models import ExtractedLead
+from leadauto.models import ExtractedLead
 from leadauto.extract.reader import Skipped
-from leadauto.leadfeeder.enrich import EnrichedLead
-from leadauto.match import AccountMatch, ContactMatch, MatchResult
+from leadauto.models import EnrichedLead
+from leadauto.models import AccountMatch, ContactMatch, MatchResult
 from leadauto.qa_artifact import (ENRICHING_COLUMNS, REVIEW_COLUMNS, build_workbook,
                                   write_workbook)
 from leadauto.writeback import lead_field_payload
@@ -115,7 +115,7 @@ def test_review_row_emits_predicted_industry_value():
 def test_review_row_maps_match_result():
     res = _result(
         decision="link",
-        account=AccountMatch("001A", 1.0, "kununu_profile_uuid"),
+        account=AccountMatch("001A", "kununu_profile_uuid"),
         contact=ContactMatch("003C", 1.0, "kununu_user_uuid"),
         matched=True, matched_name="Acme AG", score=0.91,
     )
@@ -222,7 +222,7 @@ def test_review_sheet_has_rule_and_evidence_columns():
     # build one result with rule="name_only", evidence=["vat→001A"]
     res = _result(
         decision="review",
-        account=AccountMatch("001A", 1.0, "kununu_profile_uuid"),
+        account=AccountMatch("001A", "kununu_profile_uuid"),
         contact=None,
     )
     res.rule = "name_only"
@@ -291,9 +291,9 @@ def test_convert_blockers_empty_when_payload_fills_gaps():
 
 
 def test_review_sheet_carries_cluster_and_conflict_keys():
-    from leadauto.extract.models import ExtractedLead
-    from leadauto.leadfeeder.enrich import EnrichedLead
-    from leadauto.match import MatchResult
+    from leadauto.models import ExtractedLead
+    from leadauto.models import EnrichedLead
+    from leadauto.models import MatchResult
     from leadauto.qa_artifact import REVIEW_COLUMNS, build_workbook
 
     assert "lf_company_id" in REVIEW_COLUMNS and "kununu_profile_uuid" in REVIEW_COLUMNS
@@ -366,10 +366,10 @@ def _settings(**live_scope):
 
 
 def _auto_results():
-    from leadauto.match import AccountMatch
+    from leadauto.models import AccountMatch
     results = [
         _result("00Q000000000001", decision="link",
-                account=AccountMatch(account_id="001000000000001", score=None,
+                account=AccountMatch(account_id="001000000000001",
                                      reason="name_address")),
         _result("00Q000000000002", decision="create_new"),
         _result("00Q000000000003", decision="review"),
@@ -440,3 +440,146 @@ def test_auto_approved_csv_roundtrips_through_stage2(tmp_path):
     assert [t.lead_id for t in targets] == ["00Q000000000001", "00Q000000000002"]
     assert targets[0].account_id == "001000000000001"
     assert targets[1].account_id is None       # create_new stays create-new
+
+
+def test_nocontact_reason_column_and_skipped_metric():
+    # Wasil, 2026-09-18: a reviewer must see WHY no LF contact is attached — the lookup
+    # was skipped (lead already has email and phone), LF held nobody, or no company match.
+    skipped = _result("00Q1", matched=True, contact_found=False)
+    skipped.enriched.contact_skipped = "lead already has email and phone"
+    nobody = _result("00Q2", matched=True, contact_found=False)
+    unmatched = _result("00Q3", matched=False, contact_found=False)
+    wb = build_workbook([skipped, nobody, unmatched], [], meta={})
+    ws = wb["NoContact"]
+    assert _headers(ws)[-1] == "reason"
+    reasons = {r[0]: r[-1] for r in _rows(ws)}
+    assert reasons["00Q1"] == "lead already has email and phone"
+    assert reasons["00Q2"] == "not found in LeadFeeder"
+    assert reasons["00Q3"] == "no LeadFeeder company match"
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["contact_lookups_skipped"] == 1
+    assert metrics["contacts_found"] == 0
+
+
+def test_phone_repair_sheet_lists_before_and_after(tmp_path):
+    # Wasil, 2026-09-18: the phone fix gets its own sheet — one row per lead whose
+    # existing `+0…` phone the write-back rewrites; leads with a correct or blank
+    # phone never appear, and with the switch off the sheet is empty.
+    import copy
+    from leadauto.config import Settings
+    raw = copy.deepcopy(Settings.load().raw)
+    raw["pipeline"]["repair_national_phone"] = True
+    on = Settings(raw=raw, leadfeeder_api_key=None, sf_auth_url=None)
+
+    national = _result("00Q1")
+    national.enriched.extracted.lead_phone = "+02091584338"
+    national.enriched.extracted.lead_country_code = "DE"
+    correct = _result("00Q2")
+    correct.enriched.extracted.lead_phone = "+4940419131"
+    correct.enriched.extracted.lead_country_code = "DE"
+    blank = _result("00Q3", contact_found=True,
+                    contact_details={"phone_direct": "+49 30 1"})
+
+    wb = build_workbook([national, correct, blank], [], meta={}, settings=on)
+    ws = wb["Phone_Repair"]
+    assert _headers(ws) == ["lead_id", "company", "country", "phone_before", "phone_after"]
+    rows = _rows(ws)
+    assert len(rows) == 1
+    assert rows[0][0] == "00Q1"
+    assert rows[0][3] == "+02091584338" and rows[0][4] == "+492091584338"
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["phones_repaired"] == 1
+
+    off = build_workbook([national, correct, blank], [], meta={})
+    assert _rows(off["Phone_Repair"]) == []
+
+
+def test_address_check_sheet_compares_task_and_leadfeeder():
+    # Wasil, 2026-09-18: badge-scan address (Task Kommentar "Address: Höninger Weg 104,
+    # 50969 Köln, DE") vs the LeadFeeder company address vs the Lead's current address.
+    same = _result("00Q1", matched=True,
+                   company={"Street": "Hoeninger Weg 104", "Postal_Code": "50969",
+                            "City": "Koeln", "Country": "Germany"})
+    same.enriched.extracted.street, same.enriched.extracted.postal_code = "Höninger Weg 104", "50969"
+    same.enriched.extracted.city, same.enriched.extracted.country_code = "Köln", "de"
+    same.enriched.extracted.lead_city = "Bonn"
+
+    city_only = _result("00Q2", matched=True,
+                        company={"Postal_Code": "50667", "City": "Köln", "Country": "DE"})
+    city_only.enriched.extracted.postal_code, city_only.enriched.extracted.city = "50969", "Köln"
+
+    different = _result("00Q3", matched=True,
+                        company={"Postal_Code": "80331", "City": "München", "Country": "DE"})
+    different.enriched.extracted.postal_code, different.enriched.extracted.city = "50969", "Köln"
+
+    no_task = _result("00Q4", matched=True, company={"Postal_Code": "80331", "City": "München"})
+    no_lf = _result("00Q5", matched=False)
+    no_lf.enriched.extracted.postal_code, no_lf.enriched.extracted.city = "50969", "Köln"
+
+    wb = build_workbook([same, city_only, different, no_task, no_lf], [], meta={})
+    ws = wb["Address_Check"]
+    hdr = _headers(ws)
+    rows = {r[0]: dict(zip(hdr, r)) for r in _rows(ws)}
+    assert rows["00Q1"]["verdict"] == "same"
+    assert rows["00Q1"]["task_cc"] == "DE" and rows["00Q1"]["lf_cc"] == "DE"
+    assert rows["00Q1"]["lead_city"] == "Bonn"            # current Lead value shown too
+    assert rows["00Q2"]["verdict"] == "same_city"
+    assert rows["00Q2"]["postal_match"] == "no" and rows["00Q2"]["city_match"] == "yes"
+    assert rows["00Q3"]["verdict"] == "different"
+    assert rows["00Q4"]["verdict"] == "no_task_address"
+    assert rows["00Q5"]["verdict"] == "no_lf_address"
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["address_same"] == 1
+    assert metrics["address_different"] == 1
+    assert metrics["address_no_lf_address"] == 1
+
+
+def test_address_check_city_compare_tolerates_umlaut_spellings_and_repeats():
+    from leadauto.textnorm import normalize_city as _norm_city
+    assert _norm_city("Dusseldorf") == _norm_city("Düsseldorf") == _norm_city("Duesseldorf")
+    assert _norm_city("Leverkusen, 51371 Leverkusen") == _norm_city("Leverkusen")
+    assert _norm_city("Bonn Bad-Godesberg") == _norm_city("Bonn")
+    assert _norm_city("Köln") == _norm_city("Koeln")
+    assert _norm_city("Berlin-Kreuzberg") == _norm_city("Berlin")
+    assert _norm_city("Stuttgart") != _norm_city("Köln")
+    # A prefix word is not the city: these pairs used to collapse to 'bad' / 'st' / 'neu'
+    # and report a false city match on the Address_Check sheet.
+    assert _norm_city("Bad Homburg") != _norm_city("Bad Kreuznach")
+    assert _norm_city("St. Gallen") != _norm_city("St. Pölten")
+    assert _norm_city("Neu-Ulm") != _norm_city("Neu-Isenburg")
+    assert _norm_city("Bad Homburg v. d. Höhe") == _norm_city("Bad Homburg")
+    assert _norm_city("Sankt Gallen") != _norm_city("Sankt Pölten")
+
+
+def test_address_check_task_cc_is_the_badge_country_not_the_url_country():
+    r = _result("00Q1", matched=True,
+                company={"Postal_Code": "8001", "City": "Zürich", "Country": "Switzerland"})
+    e = r.enriched.extracted
+    e.postal_code, e.city = "8001", "Zürich"
+    e.country_code, e.address_country_code = "DE", "CH"     # /de/ profile, CH badge
+    wb = build_workbook([r], [], meta={})
+    row = dict(zip(_headers(wb["Address_Check"]), _rows(wb["Address_Check"])[0]))
+    assert row["task_cc"] == "CH" and row["lf_cc"] == "CH"
+    # no badge country parsed -> the URL country is the fallback
+    e.address_country_code = None
+    wb = build_workbook([r], [], meta={})
+    row = dict(zip(_headers(wb["Address_Check"]), _rows(wb["Address_Check"])[0]))
+    assert row["task_cc"] == "DE"
+
+
+def test_nocontact_reason_distinguishes_never_searched_from_not_found():
+    from leadauto.models import CONTACT_SKIP_NO_NAME, CONTACT_SKIP_SEARCH_FAILED
+    searched = _result("00Q1", matched=True)                 # LF was asked, held nobody
+    no_name = _result("00Q2", matched=True)
+    no_name.enriched.contact_skipped = CONTACT_SKIP_NO_NAME
+    failed = _result("00Q3", matched=True)
+    failed.enriched.contact_skipped = CONTACT_SKIP_SEARCH_FAILED
+    wb = build_workbook([searched, no_name, failed], [], meta={})
+    ws = wb["NoContact"]
+    rows = {r[0]: dict(zip(_headers(ws), r)) for r in _rows(ws)}
+    assert rows["00Q1"]["reason"] == "not found in LeadFeeder"
+    assert rows["00Q2"]["reason"] == CONTACT_SKIP_NO_NAME
+    assert rows["00Q3"]["reason"] == CONTACT_SKIP_SEARCH_FAILED
+    # neither of the new reasons is a "lookup saved" by the config gate
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["contact_lookups_skipped"] == 0

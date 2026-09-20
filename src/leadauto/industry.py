@@ -107,6 +107,11 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFC", s).strip().casefold()
 
 
+# Every target must be a real picklist label: an off-list write is silently accepted by
+# the (unrestricted) field and pollutes reporting. Checked once, at import.
+_off_list = (set(KUNUNU_TO_SF.values()) | set(LF_TO_SF.values())) - VALID_SF_INDUSTRIES
+assert not _off_list, f"industry tables map to non-picklist labels: {sorted(_off_list)}"
+
 _KUNUNU_NORM = {_norm(k): v for k, v in KUNUNU_TO_SF.items()}
 _LF_NORM = {_norm(k): v for k, v in LF_TO_SF.items()}
 

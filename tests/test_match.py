@@ -13,22 +13,16 @@ Contact matching keeps its original identifier-signal scoring.
 import pytest
 
 from leadauto.config import Settings
-from leadauto.extract.models import ExtractedLead
-from leadauto.leadfeeder.enrich import EnrichedLead
+from leadauto.models import ExtractedLead
+from leadauto.models import AccountMatch, ContactMatch, EnrichedLead, MatchResult
+from leadauto.textnorm import email_domain, normalize_host, normalize_name, normalize_url
 from leadauto.match import (
-    AccountMatch,
-    ContactMatch,
     ExistingRecords,
-    MatchResult,
     RULE_DECISIONS,
-    email_domain,
     evaluate_account_rules,
     load_existing_records,
     match_contact,
     match_lead,
-    normalize_host,
-    normalize_kununu_url,
-    normalize_name,
 )
 
 SETTINGS = Settings.load()  # dedupe_name_agree_min 85
@@ -98,11 +92,11 @@ def test_normalize_name_strips_legal_suffix_and_case():
     assert normalize_name(None) is None
 
 
-def test_normalize_kununu_url():
-    a = normalize_kununu_url("https://www.kununu.com/de/hufeland-klinikum")
-    b = normalize_kununu_url("http://kununu.com/de/hufeland-klinikum/")
+def test_normalize_url():
+    a = normalize_url("https://www.kununu.com/de/hufeland-klinikum")
+    b = normalize_url("http://kununu.com/de/hufeland-klinikum/")
     assert a == b
-    assert normalize_kununu_url(None) is None
+    assert normalize_url(None) is None
 
 
 # --- ExistingRecords indexing ------------------------------------------------
@@ -260,22 +254,22 @@ def test_rule_name_only_reviews():
 
 
 def test_rule_name_corroborated_links():
-    # Name equality + an independent weak signal (DBID) on the SAME account = two axes → link.
-    # (VAT/address would fire the stronger rules 2/3 first, so corroborate via DBID.)
-    ex = ExistingRecords.from_records([_acct("001A", Name="Acme GmbH", KN_DBID__c="HRB123")], [])
-    enr = _lf_enriched(company={"Register_Id": "HRB123"})
+    # Name equality + an independent weak signal (website host) on the SAME account = two
+    # axes → link. (VAT/address would fire the stronger rules 2/3 first.)
+    ex = ExistingRecords.from_records([_acct("001A", Name="Acme GmbH", Website="acme.de")], [])
+    enr = _lf_enriched(company={"Website": "https://www.acme.de"})
     r = match_lead(enr, ex, SETTINGS)
     assert r.rule == "name_corroborated" and r.decision == "link"
     assert r.account.account_id == "001A"
-    assert "dbid→001A" in r.evidence
+    assert "website_host→001A" in r.evidence
 
 
 def test_rule_name_corroborated_disambiguates_collision():
     # Two accounts share the name; a weak signal singles out ONE → link to that one, not review.
     ex = ExistingRecords.from_records(
         [_acct("001A", Name="Acme GmbH"),
-         _acct("001B", Name="Acme GmbH", KN_DBID__c="HRB123")], [])
-    enr = _lf_enriched(company={"Register_Id": "HRB123"})
+         _acct("001B", Name="Acme GmbH", Website="acme.de")], [])
+    enr = _lf_enriched(company={"Website": "https://www.acme.de"})
     r = match_lead(enr, ex, SETTINGS)
     assert r.rule == "name_corroborated" and r.decision == "link"
     assert r.account.account_id == "001B"

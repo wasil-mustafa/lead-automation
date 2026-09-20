@@ -30,16 +30,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .extract.models import ExtractedLead
+from .models import EnrichedLead, ExtractedLead
 from .extract.parsers import extract_lead
 from .extract.reader import newest_task_per_who
 from .leadfeeder.enrich import enrich_leads
 from .logging import get_logger
-from .match import MatchResult, load_existing_records, match_lead
-from .qa_artifact import _add_sheet
+from .match import load_existing_records, match_lead
+from .models import MatchResult
+from .qa_artifact import add_sheet
 from .sf import soql
-from .sf.soql import _in_list
-from .shadow_compare import _is_new_account, _is_true
+from .sf.soql import in_list
+from .shadow_compare import is_new_account
+from .textnorm import is_true
 from .state import REPO_ROOT, compute_since, load_state
 from .textnorm import is_internal_email
 
@@ -48,7 +50,7 @@ DEFAULT_XLSX_PATH = REPO_ROOT / "backtest_skipped.xlsx"
 _CASE_CONTACT_FIELDS = ("Id, AccountId, Email, FirstName, LastName, "
                         "KN_KununuUserUUID__c")
 _CASE_LEAD_QUERY_FIELDS = (
-    soql._LEAD_FIELDS + ", ConvertedDate, ConvertedAccountId, ConvertedContactId"
+    soql.LEAD_FIELDS + ", ConvertedDate, ConvertedAccountId, ConvertedContactId"
 )
 
 CASES_COLUMNS = [
@@ -121,22 +123,22 @@ def build_cases(sf_client, settings, since: str, logger=None) -> tuple[list[Back
     counts["contact_whoids"] = len(contact_ids)
 
     contacts = sf_client.query(
-        f"SELECT {_CASE_CONTACT_FIELDS} FROM Contact WHERE Id IN ({_in_list(contact_ids)})"
+        f"SELECT {_CASE_CONTACT_FIELDS} FROM Contact WHERE Id IN ({in_list(contact_ids)})"
     ) if contact_ids else []
     contact_by_id = {c["Id"]: c for c in contacts}
 
     # Converted leads behind the contacts (task got re-parented at conversion).
     conv_leads = sf_client.query(
         f"SELECT {_CASE_LEAD_QUERY_FIELDS} FROM Lead "
-        f"WHERE ConvertedContactId IN ({_in_list(contact_ids)})"
+        f"WHERE ConvertedContactId IN ({in_list(contact_ids)})"
     ) if contact_ids else []
     # Lead-WhoId tasks whose lead has been converted since extraction saw them.
     if lead_ids:
         conv_leads += [
             l for l in sf_client.query(
                 f"SELECT {_CASE_LEAD_QUERY_FIELDS} FROM Lead "
-                f"WHERE Id IN ({_in_list(lead_ids)})")
-            if _is_true(l.get("IsConverted"))
+                f"WHERE Id IN ({in_list(lead_ids)})")
+            if is_true(l.get("IsConverted"))
         ]
     lead_by_contact: dict[str, dict] = {}
     for l in conv_leads:
@@ -209,7 +211,6 @@ def run_backtest(sf_client, lf_client, settings, *, since: str | None = None,
         enriched = enrich_leads(lf_client, extracteds, settings, logger=log,
                                 use_kununu_feed=kununu_feed, include_contacts=False)
     else:
-        from .leadfeeder.enrich import EnrichedLead
         log.warning("LeadFeeder disabled; every case will land on no_lf_match")
         enriched = [EnrichedLead(extracted=e) for e in extracteds]
 
@@ -232,7 +233,7 @@ def run_backtest(sf_client, lf_client, settings, *, since: str | None = None,
         acct = truth_accounts.get(case.truth_account_id)
         converted_date = (case.lead or {}).get("ConvertedDate")
         human_created_new = (case.kind == "converted_lead"
-                             and _is_new_account(acct, converted_date))
+                             and is_new_account(acct, converted_date))
         label, detail = classify_case(res, case.truth_account_id, human_created_new)
         tally[label] = tally.get(label, 0) + 1
         contact_hit = bool(res.contact and case.truth_contact_id
@@ -264,7 +265,7 @@ def _write_xlsx(rows, tally, counts, since, now, xpath: Path) -> None:
 
     wb = Workbook()
     wb.remove(wb.active)
-    _add_sheet(wb, "Cases", CASES_COLUMNS + ["detail"],
+    add_sheet(wb, "Cases", CASES_COLUMNS + ["detail"],
                [[r[c] for c in CASES_COLUMNS + ["detail"]] for r in rows])
 
     summary = [["generated_at", now.isoformat()], ["since", since]]
@@ -284,7 +285,7 @@ def _write_xlsx(rows, tally, counts, since, now, xpath: Path) -> None:
         summary.append([f"rule.{rule}.{label}", n])
     contact_hits = sum(1 for r in rows if r["contact_hit"])
     summary.append(["contact_hits", f"{contact_hits}/{len(rows)}"])
-    _add_sheet(wb, "Summary", ["metric", "value"], summary)
+    add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     xpath.parent.mkdir(parents=True, exist_ok=True)
     wb.save(xpath)

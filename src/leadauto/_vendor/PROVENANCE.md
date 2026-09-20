@@ -4,15 +4,15 @@
 |---|---|
 | Source repo | `Nicolaus-Pichorner/Main-Profile-Account` (private) |
 | Source path | `common/__init__.py`, `common/kununu_feed.py` |
-| Snapshot taken | 2026-08-19 |
-| Source repo HEAD | `8bd40190160b86e755464f5d4d436bdcd67a16ce` |
-| Last commit touching `kununu_feed.py` | `4824f0935f7703f9055e8d1a01be50a9c5f40f12` — *feat(feed): read the CSV profiles feed in every consumer, not just the tagger* (2026-08-06) |
+| Snapshot taken | 2026-09-18 (re-synced; first snapshot 2026-08-19) |
+| Source repo HEAD | `a6b66d78cbb01b7c1ec979f0a717a7133d3f27a8` |
+| Last commit touching `kununu_feed.py` | `9f9bd502aa8bba508a736c2c8b9d895c03245850` — *feat(mislink): flag accounts whose name contradicts their linked profile* (2026-08-28) |
 
 sha256 at snapshot time:
 
 ```
 e09a2496ed0502aee6ecd9999e8f615cc332836b7ba7d795c3f099f22f935982  common/__init__.py
-1fecadd6b733a9e1d6fba5d555f6f36d9c48cdad80685d599002c28170238956  common/kununu_feed.py
+8846e1c11f9faf9bb5cf94f4b3d305b20bb5b4b1d3b0c28cdcc6f1526e2bdb00  common/kununu_feed.py
 ```
 
 ## Why a copy exists at all

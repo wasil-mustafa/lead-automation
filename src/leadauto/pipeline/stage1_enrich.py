@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..extract.reader import Skipped, read_extracted_leads
-from ..leadfeeder.enrich import EnrichedLead, enrich_leads
+from ..leadfeeder.enrich import enrich_leads
+from ..models import EnrichedLead, MatchResult
 from ..live_scope import live_scope_reason
 from ..logging import get_logger
-from ..match import MatchResult, load_existing_records, match_lead
+from ..match import load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
 from ..qa_artifact import write_auto_approved_csv, write_workbook
 from ..state import REPO_ROOT, State, advance, compute_since, load_state, save_state
@@ -87,11 +88,12 @@ def run_stage1(
     # need the field values).
     reasons = [live_scope_reason(r, settings) for r in results]
     if dry_run:
-        wb = write_back(sf_client, enriched, dry_run=True, logger=log)
+        wb = write_back(sf_client, enriched, dry_run=True, logger=log, settings=settings)
     else:
         live_enriched = [r.enriched for r, reason in zip(results, reasons) if reason is None]
         log.info("Live scope: %d of %d lead(s) pass the gate", len(live_enriched), len(results))
-        wb = write_back(sf_client, live_enriched, dry_run=False, logger=log)
+        wb = write_back(sf_client, live_enriched, dry_run=False, logger=log,
+                        settings=settings)
     new_state = advance(state, extraction.processed_tasks)
 
     failures = wb.get("failures", [])
@@ -107,7 +109,7 @@ def run_stage1(
             shadow_results, shadow_payloads = results, wb.get("payloads", [])
         else:
             shadow_results = [r for r, reason in zip(results, reasons) if reason is not None]
-            shadow_payloads = [lead_field_payload(r.enriched) for r in shadow_results]
+            shadow_payloads = [lead_field_payload(r.enriched, settings) for r in shadow_results]
         if shadow_results:
             stamp = (now or datetime.now(timezone.utc)).isoformat()
             n = record_predictions(shadow_results, shadow_payloads, stamp, predictions_path)

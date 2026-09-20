@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from ..logging import get_logger
 from ..sf import soql
 from ..textnorm import is_internal_email
-from .models import ExtractedLead
+from ..models import ExtractedLead
 from .parsers import extract_lead
 
 
@@ -109,9 +109,10 @@ def read_extracted_leads(
     lead_map = {l["Id"]: l for l in leads_raw}
     log.info("Resolved %d/%d WhoId(s) to unconverted queue-owned lead(s)", len(lead_map), len(who_ids))
 
-    result = ExtractionResult(
-        processed_tasks=[{"Id": t.get("Id"), "CreatedDate": t.get("CreatedDate")} for t in tasks]
-    )
+    result = ExtractionResult()
+    # Tasks held back from the watermark: the operator is expected to complete the lead
+    # (e.g. set its profile link) and re-run, so the task must be fetched again then.
+    deferred: set[str] = set()
     for task in tasks:
         who = task.get("WhoId")
         tid = task.get("Id", "")
@@ -129,6 +130,17 @@ def read_extracted_leads(
         if extracted is None:
             result.skipped.append(Skipped(tid, who, subject, "subject out of scope"))
             continue
+        # An event (badge-scan) Task carries no kununu URL of its own; the parser reads
+        # it off the Lead's profile link. Without one there is nothing to write back as
+        # the kununu identity and no profile to enrich from — the lead stays with humans
+        # (2026-09-18: 62 of 186 ZPE leads had no exact profile match).
+        # Held OUT of the watermark: once the operator fills the link in and re-runs, the
+        # task must come back — otherwise it is dropped as "already processed" for good.
+        if extracted.task_type == "event" and not extracted.kununu_url:
+            result.skipped.append(Skipped(tid, who, subject,
+                                          "event lead without kununu profile link"))
+            deferred.add(tid)
+            continue
         internal = settings.excluded_email_domains
         if is_internal_email(extracted.lead_email, internal) or \
                 is_internal_email(extracted.contact_email, internal):
@@ -137,5 +149,10 @@ def read_extracted_leads(
             continue
         result.leads.append(extracted)
 
+    result.processed_tasks = [{"Id": t.get("Id"), "CreatedDate": t.get("CreatedDate")}
+                              for t in tasks if t.get("Id") not in deferred]
+    if deferred:
+        log.info("Held %d task(s) out of the watermark (event lead without profile link)",
+                 len(deferred))
     log.info("Extracted %d lead(s); skipped %d", len(result.leads), len(result.skipped))
     return result

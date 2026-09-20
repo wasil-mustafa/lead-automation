@@ -3,9 +3,10 @@ and the stage-1 dry-run hook."""
 from types import SimpleNamespace
 
 from leadauto.config import Settings
-from leadauto.extract.models import ExtractedLead
-from leadauto.leadfeeder.enrich import EnrichedLead
-from leadauto.match import AccountMatch, ExistingRecords, MatchResult
+from leadauto.models import ExtractedLead
+from leadauto.models import EnrichedLead
+from leadauto.match import ExistingRecords
+from leadauto.models import AccountMatch, MatchResult
 from leadauto.predictions import (
     Prediction, load_predictions, record_predictions, save_predictions,
 )
@@ -17,7 +18,7 @@ def _result(lead_id="00Q1", rule="name_only", decision="review", account_id="001
     e = ExtractedLead(lead_id=lead_id, task_id="T1", task_type="claimer")
     enr = EnrichedLead(extracted=e, matched=True, matched_name="Acme GmbH",
                        lf_company_id="lf-1", company={"Website": "https://acme.de"})
-    acct = AccountMatch(account_id, None, rule) if account_id else None
+    acct = AccountMatch(account_id, rule) if account_id else None
     return MatchResult(enriched=enr, account=acct, contact=None,
                        decision=decision, rule=rule, evidence=["vat→001A"])
 
