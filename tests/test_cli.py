@@ -43,6 +43,9 @@ def _stub_shadow_compare(monkeypatch, cli):
     stamped: list[bool] = []
     monkeypatch.setattr(cli, "_build_sf_client", lambda s, log: object())
     monkeypatch.setattr(cli, "record_compare_run", lambda: stamped.append(True))
+    # The skipped-run report writer would otherwise write the repo's real xlsx.
+    monkeypatch.setattr(cli, "write_skipped_report",
+                        lambda **kw: stamped.append(False) or {"xlsx": "shadow_comparison.xlsx"})
     monkeypatch.setattr(cli, "run_shadow_compare", lambda sf, excluded_domains, logger: {
         "checked": 3, "resolved": 2, "hits": 1, "misses": 1, "observed": 0,
         "expired": 0, "excluded": 1, "pending": 1, "xlsx": "shadow_comparison.xlsx"})
@@ -73,7 +76,11 @@ def test_shadow_compare_skips_when_not_due(monkeypatch):
                         lambda: datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc))
     result = CliRunner().invoke(cli.app, ["shadow-compare"])
     assert result.exit_code == 0
-    assert "skipped" in result.output and stamped == []
+    assert "skipped" in result.output
+    # Not stamped (False = the offline report writer ran, True would be a real compare):
+    # the artifact is uploaded on every dispatch, so the workbook must still be written.
+    assert stamped == [False]
+    assert "xlsx=shadow_comparison.xlsx" in result.output
 
 
 def test_stage2_cli_reports_preflight_skips(monkeypatch, tmp_path):

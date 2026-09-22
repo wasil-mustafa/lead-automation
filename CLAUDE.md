@@ -390,7 +390,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   running it on all 4 daily dispatches re-read the same predictions. The gate reads a committed
   timestamp (`state/shadow_state.json`, written by `record_compare_run`, committed by
   `stage1.yml`) — NOT the wall-clock hour, which silently skipped every run once (see CI &
-  scheduling) — and fails OPEN on an unreadable file.
+  scheduling) — and fails OPEN on an unreadable file. **The xlsx artifact is produced on
+  EVERY run (2026-09-22):** a gated-off or nothing-pending run writes it from committed
+  state via `write_skipped_report` (empty Decisions/Fields, rolling Summary with
+  `compare_ran=no`, `skip_reason`, `last_compare_at`; zero org calls), so a missing
+  `lead-automation-shadow-<run_id>` artifact always means the step failed, never a skip.
 
 ### Repo layout
 

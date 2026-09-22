@@ -18,7 +18,8 @@ from .logging import get_logger
 from .pipeline.stage1_enrich import run_stage1
 from .pipeline.stage2_convert import run_stage2
 from .shadow_compare import (DEFAULT_MIN_INTERVAL_HOURS, compare_is_due,
-                             last_compare_at, record_compare_run, run_shadow_compare)
+                             last_compare_at, record_compare_run, run_shadow_compare,
+                             write_skipped_report)
 from .sf.auth import ensure_org
 from .sf.client import SfClient
 from .state import DEFAULT_STATE_PATH, REPO_ROOT
@@ -172,9 +173,15 @@ def shadow_compare(
     """Score pending dry-run predictions against human conversions in the org."""
     log = get_logger("cli.shadow")
     if not compare_is_due(min_interval_hours=min_interval_hours):
+        # No org call, but the workbook is still produced: the workflow uploads it as an
+        # artifact on every dispatch, so a skipped compare must not mean a missing file.
         last = last_compare_at()
-        typer.echo(f"Shadow compare skipped: last run {last.isoformat()} is younger "
-                   f"than {min_interval_hours}h (--min-interval-hours 0 to force).")
+        res = write_skipped_report(last_run=last, min_interval_hours=min_interval_hours,
+                                   logger=log)
+        typer.echo(f"Shadow compare skipped: last run "
+                   f"{last.isoformat() if last else 'unknown'} is younger than "
+                   f"{min_interval_hours}h (--min-interval-hours 0 to force); "
+                   f"report written from committed state | xlsx={res['xlsx']}")
         return
     settings = Settings.load(config)
     sf = _build_sf_client(settings, log)
