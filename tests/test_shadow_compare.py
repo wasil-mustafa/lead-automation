@@ -2,11 +2,13 @@
 
 FakeClient routes by SObject name in the SOQL string, same idea as the matcher's
 loader tests."""
+import json
 from datetime import datetime, timedelta, timezone
 
 from leadauto.predictions import Prediction, load_predictions, save_predictions
 from leadauto.shadow_compare import (compare_fields, compare_is_due, last_compare_at,
-                                     record_compare_run, run_shadow_compare)
+                                     record_compare_run, run_shadow_compare,
+                                     write_skipped_report)
 
 NOW = datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc)
 
@@ -45,8 +47,10 @@ def test_compare_gate_can_be_forced(tmp_path):
 class FakeClient:
     def __init__(self, leads=None, accounts=None, contacts=None):
         self.leads, self.accounts, self.contacts = leads or [], accounts or [], contacts or []
+        self.calls: list[str] = []
 
     def query(self, soql):
+        self.calls.append(soql)
         if "FROM Lead" in soql:
             return self.leads
         if "FROM Account" in soql:
@@ -276,6 +280,48 @@ def test_xlsx_written(tmp_path):
     from openpyxl import load_workbook
     wb = load_workbook(xpath)
     assert set(wb.sheetnames) == {"Decisions", "Fields", "Summary"}
+
+
+def _summary(xpath) -> dict:
+    from openpyxl import load_workbook
+    ws = load_workbook(xpath)["Summary"]
+    return {row[0]: row[1] for row in ws.iter_rows(min_row=2, values_only=True)}
+
+
+def test_xlsx_written_when_nothing_is_pending(tmp_path):
+    # Stage 1 uploads the workbook on every dispatch: "nothing to score" must still
+    # produce the file, or a missing artifact becomes indistinguishable from a failure.
+    preds = [_pred("00Q1", status="resolved")]
+    client = FakeClient(leads=[], accounts=[])
+    _, _, _, xpath = _run(tmp_path, preds, client)
+    assert xpath.exists()
+    assert client.calls == []          # and it costs no org call
+    assert _summary(xpath)["compare_ran"] == "yes"
+
+
+def test_skipped_report_writes_xlsx_without_org(tmp_path):
+    from datetime import datetime, timezone
+    ppath, rpath, xpath = (tmp_path / "p.jsonl", tmp_path / "r.jsonl", tmp_path / "s.xlsx")
+    save_predictions([_pred("00Q1"), _pred("00Q2", status="resolved")], ppath)
+    rpath.write_text(json.dumps({"lead_id": "00Q2", "rule": "name_address",
+                                 "decision": "link", "result": "hit",
+                                 "fields": {}}) + "\n", encoding="utf-8")
+    last = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
+    res = write_skipped_report(predictions_path=ppath, results_path=rpath, xlsx_path=xpath,
+                               now=NOW, last_run=last)
+    assert res["compare_ran"] is False and res["pending"] == 1
+    from openpyxl import load_workbook
+    wb = load_workbook(xpath)
+    assert set(wb.sheetnames) == {"Decisions", "Fields", "Summary"}
+    assert wb["Decisions"].max_row == 1          # header only: nothing scored this run
+    summary = _summary(xpath)
+    assert summary["compare_ran"] == "no"
+    assert summary["still_pending"] == 1
+    assert summary["total_scored_ever"] == 1     # rolling history still reported
+    assert summary["last_compare_at"] == last.isoformat()
+    assert "younger than" in summary["skip_reason"]
+    # predictions are untouched (no status flips without an org read)
+    assert [p.status for p in load_predictions(ppath)] == ["pending", "resolved"]
 
 
 def test_industry_agrees_with_converted_account():

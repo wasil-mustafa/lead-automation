@@ -191,9 +191,13 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
     preds = load_predictions(ppath)
     pending = [p for p in preds if p.status == "pending"]
     stats = {"checked": len(pending), "resolved": 0, "hits": 0, "misses": 0,
-             "observed": 0, "expired": 0, "excluded": 0, "pending": 0, "xlsx": str(xpath)}
+             "observed": 0, "expired": 0, "excluded": 0, "pending": 0, "xlsx": str(xpath),
+             "compare_ran": True}
     if not pending:
+        # Still write the workbook: Stage 1 uploads it on every dispatch, and an absent
+        # artifact must mean "something failed", never "there was nothing to score".
         log.info("Shadow compare: no pending predictions")
+        _write_xlsx([], rpath, stats, now, xpath)
         return stats
 
     leads = sf_client.query(soql.leads_shadow_status([p.lead_id for p in pending]))
@@ -262,6 +266,36 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
     return stats
 
 
+def write_skipped_report(*, predictions_path=None, results_path=None, xlsx_path=None,
+                         now=None, last_run: datetime | None = None,
+                         min_interval_hours: float = DEFAULT_MIN_INTERVAL_HOURS,
+                         logger=None) -> dict:
+    """Write `shadow_comparison.xlsx` from committed state WITHOUT touching the org.
+
+    The compare self-gates to ~once a day, but Stage 1 uploads the workbook as an
+    artifact on EVERY dispatch — so the gated-off runs still get one: Decisions/Fields
+    are empty (nothing was scored this run) and the Summary carries the rolling history
+    plus `compare_ran=no`, the skip reason and the last compare's timestamp. A missing
+    artifact therefore always means a failure, never a skip. Zero Salesforce calls.
+    """
+    log = logger or get_logger("shadow")
+    ppath = Path(predictions_path) if predictions_path else DEFAULT_PREDICTIONS_PATH
+    rpath = Path(results_path) if results_path else DEFAULT_RESULTS_PATH
+    xpath = Path(xlsx_path) if xlsx_path else DEFAULT_XLSX_PATH
+    now = now or datetime.now(timezone.utc)
+    pending = sum(1 for p in load_predictions(ppath) if p.status == "pending")
+    last_txt = last_run.isoformat() if last_run else "unknown"
+    stats = {"checked": 0, "resolved": 0, "hits": 0, "misses": 0, "observed": 0,
+             "expired": 0, "excluded": 0, "pending": pending, "xlsx": str(xpath),
+             "compare_ran": False, "last_compare_at": last_txt,
+             "skip_reason": f"last compare {last_txt} is younger than "
+                            f"{min_interval_hours}h (--min-interval-hours 0 to force)"}
+    _write_xlsx([], rpath, stats, now, xpath)
+    log.info("Shadow compare skipped (%s); report written from committed state: %s",
+             stats["skip_reason"], xpath)
+    return stats
+
+
 def _load_all_results(rpath: Path) -> list[dict]:
     if not rpath.exists():
         return []
@@ -287,10 +321,14 @@ def _write_xlsx(new_results, rpath, stats, now, xpath) -> None:
     # Rolling summary over the FULL results history.
     history = _load_all_results(rpath)
     summary = [["generated_at", now.isoformat()],
+               ["compare_ran", "yes" if stats.get("compare_ran", True) else "no"],
                ["resolved_this_run", stats["resolved"]],
                ["excluded_this_run", stats["excluded"]],
                ["still_pending", stats["pending"]],
                ["total_scored_ever", len(history)]]
+    for key in ("skip_reason", "last_compare_at"):
+        if stats.get(key):
+            summary.append([key, stats[key]])
     by_rule: dict[str, dict] = {}
     field_agg: dict[str, dict] = {}
     for r in history:

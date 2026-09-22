@@ -130,7 +130,10 @@ jobs:
           PYTHONPATH: src
         # Self-gating to ~once a day (state/shadow_state.json, committed below): a compare
         # costs ~7-9 Salesforce requests and scores HUMAN conversions, which resolve over
-        # days — running it on all 4 daily dispatches re-read the same predictions.
+        # days — running it on all daily dispatches re-read the same predictions.
+        # The workbook is written on EVERY run regardless: a gated-off run produces it
+        # from committed state with Summary `compare_ran=no` (zero org calls), so the
+        # artifact below is only ever missing when this step actually failed.
         run: python -m leadauto shadow-compare
 
       - name: Upload shadow comparison
