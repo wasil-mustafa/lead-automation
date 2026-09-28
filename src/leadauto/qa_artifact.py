@@ -19,7 +19,7 @@ from openpyxl.utils import get_column_letter
 
 from .convert.preflight import check_lead
 from .models import CONTACT_SKIP_NOT_NEEDED
-from .live_scope import live_scope_reason
+from .live_scope import is_wide_match, live_scope_reason
 from .textnorm import country_iso2, normalize_city, normalize_postal
 from .match import RULE_DECISIONS
 from .writeback import lead_field_payload, lf_contact_email
@@ -162,9 +162,12 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     con = result.contact
     # live_scope: "yes" when the row would be processed live, else the exclusion
     # reason (see live_scope.py). Blank when no settings were passed (legacy callers).
+    # A second-chance ("wide") match admitted by `allow_wide_match` is flagged
+    # `yes_wide_match`, so a reviewer can tell the weaker claim from a primary one.
     live = ""
     if settings is not None:
-        live = live_scope_reason(result, settings) or "yes"
+        live = live_scope_reason(result, settings) or (
+            "yes_wide_match" if is_wide_match(result) else "yes")
     return {
         "lead_id": e.lead_id, "task_id": e.task_id, "task_type": e.task_type,
         "subject": e.subject,
@@ -303,8 +306,9 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         ["skipped", len(skipped)],
     ]
     if settings is not None:
-        summary.append(["live_scope_pass", sum(
-            1 for r in results if live_scope_reason(r, settings) is None)])
+        live = [r for r in results if live_scope_reason(r, settings) is None]
+        summary.append(["live_scope_pass", len(live)])
+        summary.append(["live_scope_wide_match", sum(1 for r in live if is_wide_match(r))])
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
     add_sheet(wb, "Summary", ["metric", "value"], summary)
 

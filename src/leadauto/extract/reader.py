@@ -113,6 +113,7 @@ def read_extracted_leads(
     # Tasks held back from the watermark: the operator is expected to complete the lead
     # (e.g. set its profile link) and re-run, so the task must be fetched again then.
     deferred: set[str] = set()
+    lead_statuses = settings.lead_statuses
     for task in tasks:
         who = task.get("WhoId")
         tid = task.get("Id", "")
@@ -121,6 +122,12 @@ def read_extracted_leads(
         if lead is None:
             result.skipped.append(Skipped(tid, who or "", subject,
                                           "lead not found or already converted"))
+            continue
+        # Optional Lead.Status allowlist (pipeline.lead_statuses) — post-query, so it
+        # costs nothing; a one-off "only Status = New" review run sets it.
+        if lead_statuses and (lead.get("Status") or "") not in lead_statuses:
+            result.skipped.append(Skipped(tid, who, subject,
+                                          f"lead status not in scope ({lead.get('Status') or 'blank'})"))
             continue
         if not settings.include_enriched_leads and is_already_enriched(lead):
             result.skipped.append(Skipped(tid, who, subject,

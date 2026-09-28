@@ -47,3 +47,19 @@ def test_kununu_feed_defaults_when_section_missing():
     assert s.kununu_feed_max_age_hours == 24
 
 
+def test_scheduled_scope_from_config_yaml():
+    # 2026-09-28 (Wasil): Status = New only, no marker skip, no score cap, wide matches
+    # admitted (flagged in the QA artifact).
+    s = Settings.load()
+    assert s.lead_statuses == ["New"]
+    assert s.include_enriched_leads is True
+    assert s.live_max_kununu_score is None
+    assert s.live_decisions == ["create_new"]
+    assert s.live_allow_wide_match is True
+
+
+def test_lead_statuses_absent_means_no_filter_and_values_are_stringified():
+    s = Settings(raw={"pipeline": {}}, leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.lead_statuses == []
+    s.raw["pipeline"]["lead_statuses"] = ["New", 1]
+    assert s.lead_statuses == ["New", "1"]

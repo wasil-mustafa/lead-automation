@@ -56,7 +56,7 @@ def _task(tid, who, subject=CLAIMER_SUBJECT, desc=CLAIMER_DESC,
 def _lead(lid, company="Acme GmbH", email="x@acme.de", enriched=None):
     return {
         "Id": lid, "FirstName": "F", "LastName": "L", "Company": company,
-        "Email": email, "Website": None, "Status": "Open", "IsConverted": False,
+        "Email": email, "Website": None, "Status": "New", "IsConverted": False,
         "LeadSource": "kununu", "KN_KununuProfileName__c": enriched,
         "KN_KununuUserUUID__c": None, "KN_KununuLinkProfile__c": None,
     }
@@ -117,7 +117,9 @@ def test_read_dedupes_to_newest_task_per_lead():
 
 
 def test_read_skips_already_enriched_lead():
+    # The skip is OFF in config.yaml since 2026-09-28; the switch still works when set.
     settings = Settings.load()
+    settings.raw["pipeline"]["include_enriched_leads"] = False
     client = FakeClient(tasks=[_task("T1", "00Q1")],
                         leads=[_lead("00Q1", enriched="Already GmbH")])
     result = read_extracted_leads(client, settings, since=SINCE)
@@ -136,6 +138,16 @@ def test_include_enriched_leads_bypasses_marker_skip():
                         leads=[_lead("00Q1", enriched="Already GmbH")])
     result = read_extracted_leads(client, settings, since=SINCE)
     assert result.skipped == []
+    assert [l.lead_id for l in result.leads] == ["00Q1"]
+
+
+def test_config_yaml_processes_already_enriched_leads():
+    # Wasil, 2026-09-28: the scheduled pipeline no longer skips marker-carrying leads.
+    settings = Settings.load()
+    assert settings.include_enriched_leads is True
+    client = FakeClient(tasks=[_task("T1", "00Q1")],
+                        leads=[_lead("00Q1", enriched="Already GmbH")])
+    result = read_extracted_leads(client, settings, since=SINCE)
     assert [l.lead_id for l in result.leads] == ["00Q1"]
 
 
@@ -197,6 +209,7 @@ def test_read_records_processed_tasks_for_watermark():
 
 def test_read_records_processed_tasks_even_when_skipped():
     settings = Settings.load()
+    settings.raw["pipeline"]["include_enriched_leads"] = False
     # lead already enriched -> skipped, but the task is still "accounted for" (advance watermark)
     client = FakeClient(tasks=[_task("T1", "00Q1")],
                         leads=[_lead("00Q1", enriched="Already GmbH")])
@@ -257,3 +270,36 @@ def test_event_lead_without_profile_link_is_skipped_with_link_it_is_extracted():
     # T1 is held OUT of the watermark: the operator fills the link in and re-runs, and the
     # task must be fetched again then — every other skip still advances it (see above).
     assert [t["Id"] for t in res.processed_tasks] == ["T2"]
+
+
+def test_lead_statuses_allowlist_skips_other_statuses_post_query():
+    # pipeline.lead_statuses (one-off "only Status = New" review runs): applied AFTER
+    # the batched lead query — Status is already selected, so no extra API call — and
+    # a lead in another status is skipped with its status named in the reason.
+    settings = Settings.load()
+    settings.raw["pipeline"]["lead_statuses"] = ["New"]
+    new_lead = dict(_lead("00Q1"), Status="New")
+    working = dict(_lead("00Q2"), Status="Working")
+    blank = dict(_lead("00Q3"), Status=None)
+    client = FakeClient(tasks=[_task("T1", "00Q1"), _task("T2", "00Q2"), _task("T3", "00Q3")],
+                        leads=[new_lead, working, blank])
+    result = read_extracted_leads(client, settings, since=SINCE)
+    assert [l.lead_id for l in result.leads] == ["00Q1"]
+    reasons = {s.lead_id: s.reason for s in result.skipped}
+    assert reasons == {"00Q2": "lead status not in scope (Working)",
+                       "00Q3": "lead status not in scope (blank)"}
+    # the filter is post-query: the lead SOQL is unchanged and still selects Status
+    lead_q = next(q for q in client.queries if "FROM Lead" in q)
+    assert "Status" in lead_q and "Working" not in lead_q
+    # skipped tasks are still accounted for (watermark semantics like any other skip)
+    assert sorted(t["Id"] for t in result.processed_tasks) == ["T1", "T2", "T3"]
+
+
+def test_lead_statuses_empty_means_no_filter():
+    settings = Settings.load()
+    settings.raw["pipeline"]["lead_statuses"] = []
+    assert settings.lead_statuses == []
+    client = FakeClient(tasks=[_task("T1", "00Q1")],
+                        leads=[dict(_lead("00Q1"), Status="Working")])
+    result = read_extracted_leads(client, settings, since=SINCE)
+    assert [l.lead_id for l in result.leads] == ["00Q1"]
