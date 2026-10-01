@@ -72,7 +72,7 @@ def _task(tid="T1", who="00Q1", created="2026-06-19T10:00:00.000+0000"):
 def _lead(lid="00Q1"):
     return {"Id": lid, "FirstName": "Ramona", "LastName": "Panknin",
             "Company": "Hufeland Klinikum GmbH", "Email": "r@hufeland.de", "Website": None,
-            "Status": "Open", "IsConverted": False, "LeadSource": "kununu",
+            "Status": "New", "IsConverted": False, "LeadSource": "kununu",
             "KN_KununuProfileName__c": None, "KN_KununuUserUUID__c": None,
             "KN_KununuLinkProfile__c": None}
 

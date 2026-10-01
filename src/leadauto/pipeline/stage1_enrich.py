@@ -14,7 +14,7 @@ from pathlib import Path
 from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import enrich_leads
 from ..models import EnrichedLead, MatchResult
-from ..live_scope import live_scope_reason
+from ..live_scope import is_wide_match, live_scope_reason
 from ..logging import get_logger
 from ..match import load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
@@ -92,6 +92,11 @@ def run_stage1(
     else:
         live_enriched = [r.enriched for r, reason in zip(results, reasons) if reason is None]
         log.info("Live scope: %d of %d lead(s) pass the gate", len(live_enriched), len(results))
+        wide = sum(1 for r, reason in zip(results, reasons)
+                   if reason is None and is_wide_match(r))
+        if wide:
+            log.warning("Live scope: %d of those rest on a second-chance (wide) LF match",
+                        wide)
         wb = write_back(sf_client, live_enriched, dry_run=False, logger=log,
                         settings=settings)
     new_state = advance(state, extraction.processed_tasks)

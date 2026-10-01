@@ -260,6 +260,17 @@ class Settings:
         return bool(self.raw["pipeline"].get("repair_national_phone", False))
 
     @property
+    def lead_statuses(self) -> list[str]:
+        """Lead `Status` allowlist for extraction (e.g. ['New']). Applied in the reader
+        AFTER the batched lead query — `Status` is already selected, so the filter costs
+        no extra API call. A lead in another status is skipped (reason names the
+        status) and its task is accounted for like any other skip. Empty => no
+        filter (the scheduled pipeline). One-off review runs set it (Wasil, 2026-09-23:
+        'where the lead has Status = New')."""
+        raw = self.raw["pipeline"].get("lead_statuses") or []
+        return [str(s) for s in raw]
+
+    @property
     def include_enriched_leads(self) -> bool:
         """True bypasses the already-enriched skip (kununu marker field set). One-off
         backlog runs set this to re-process leads the legacy manual pipeline enriched

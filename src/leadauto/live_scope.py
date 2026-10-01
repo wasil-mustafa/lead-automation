@@ -10,8 +10,16 @@ into Rohdaten-Pool-owned raw-data records.
 A missing score (profile not in the feed, feed unavailable, no reviews yet) fails the
 gate: fail-closed, the lead stays with humans. Tunables live in config.yaml under
 `pipeline.live_scope`.
+
+Widened 2026-09-28 (Wasil): config.yaml sets `max_kununu_score: null` (no score axis)
+and `allow_wide_match: true`; an admitted wide match is flagged in the QA artifact.
 """
 from __future__ import annotations
+
+
+def is_wide_match(result) -> bool:
+    """True when the accepted LF match came from the second-chance ("wide") pass."""
+    return (result.enriched.match_pass or "primary") != "primary"
 
 
 def live_scope_reason(result, settings) -> str | None:
@@ -25,8 +33,7 @@ def live_scope_reason(result, settings) -> str | None:
     # ones (`Contact Presence Check`, 2026-08-23). So they predict and shadow-score but
     # do not convert until that accuracy is measured HERE. Flip with
     # `pipeline.live_scope.allow_wide_match: true`.
-    if (not settings.live_allow_wide_match
-            and (result.enriched.match_pass or "primary") != "primary"):
+    if not settings.live_allow_wide_match and is_wide_match(result):
         return "match_pass_wide"
     if result.decision not in settings.live_decisions:
         return f"decision_{result.decision}"

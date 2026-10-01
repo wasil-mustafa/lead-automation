@@ -321,7 +321,8 @@ def test_review_sheet_shows_kununu_score_and_live_scope_verdict():
     excluded.enriched.kununu_score = 2.5
     unscored = _result("00Q3", decision="create_new")   # no feed hit -> fails closed
     ws = build_workbook([passing, excluded, unscored], [], meta={},
-                        settings=_settings())["Review"]
+                        settings=_settings(decisions=["create_new"],
+                                           max_kununu_score=3.0))["Review"]
     idx = {h: i for i, h in enumerate(_headers(ws))}
     rows = _rows(ws)
     assert rows[0][idx["kununu_score"]] == 2.5
@@ -344,9 +345,36 @@ def test_summary_counts_live_scope_pass():
     passing.enriched.kununu_score = 1.9
     excluded = _result("00Q2", decision="create_new")
     excluded.enriched.kununu_score = 4.5
-    wb = build_workbook([passing, excluded], [], meta={}, settings=_settings())
+    wb = build_workbook([passing, excluded], [], meta={},
+                        settings=_settings(decisions=["create_new"], max_kununu_score=3.0))
     metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
     assert metrics["live_scope_pass"] == 1
+
+
+def test_admitted_wide_match_is_flagged_on_review_and_summary():
+    # allow_wide_match: true (2026-09-28) lets a second-chance match go live, but the
+    # row must stay distinguishable from a primary one.
+    primary = _result("00Q1", decision="create_new")
+    wide = _result("00Q2", decision="create_new")
+    primary.enriched.match_pass, wide.enriched.match_pass = "primary", "wide"
+    wb = build_workbook([primary, wide], [], meta={},
+                        settings=_settings(decisions=["create_new"],
+                                           max_kununu_score=None, allow_wide_match=True))
+    idx = {h: i for i, h in enumerate(_headers(wb["Review"]))}
+    assert [r[idx["live_scope"]] for r in _rows(wb["Review"])] == ["yes", "yes_wide_match"]
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["live_scope_pass"] == 2
+    assert metrics["live_scope_wide_match"] == 1
+
+
+def test_held_out_wide_match_still_names_the_hold_out():
+    wide = _result("00Q1", decision="create_new")
+    wide.enriched.match_pass = "wide"
+    wb = build_workbook([wide], [], meta={},
+                        settings=_settings(decisions=["create_new"], max_kununu_score=None,
+                                           allow_wide_match=False))
+    idx = {h: i for i, h in enumerate(_headers(wb["Review"]))}
+    assert _rows(wb["Review"])[0][idx["live_scope"]] == "match_pass_wide"
 
 
 def test_summary_omits_live_scope_pass_without_settings():
@@ -410,11 +438,13 @@ def test_auto_approved_csv_widened_decisions_include_link(tmp_path):
 
 def test_auto_approved_csv_excludes_score_at_or_over_cap_and_missing(tmp_path):
     from leadauto.qa_artifact import write_auto_approved_csv
+    # config.yaml has no cap since 2026-09-28; the gate still works when one is set.
+    capped = _settings(decisions=["create_new"], max_kununu_score=3.0)
     results = _auto_results()
     results[1].enriched.kununu_score = 3.0     # boundary: 3.0 is NOT under the cap
-    assert write_auto_approved_csv(results, tmp_path / "review", _settings()) is None
+    assert write_auto_approved_csv(results, tmp_path / "review", capped) is None
     results[1].enriched.kununu_score = None    # missing score fails closed
-    assert write_auto_approved_csv(results, tmp_path / "review", _settings()) is None
+    assert write_auto_approved_csv(results, tmp_path / "review", capped) is None
 
 
 def test_auto_approved_csv_excludes_writeback_failures(tmp_path):

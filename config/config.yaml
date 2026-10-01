@@ -116,6 +116,18 @@ pipeline:
   # processed_task_ids already dedupes — 646 rows/run at 90 days, and past 2000 rows the
   # scan starts paying extra queryMore calls (API-call reduction 2026-07-25).
   task_lookback_days: 14
+  # Lead.Status allowlist, applied post-query (no extra API call). Empty = no filter.
+  # [New] since 2026-09-28 (Wasil): a lead in any other status has already been worked
+  # by a human (that is also what makes the already-enriched skip below unnecessary).
+  # Consequence: "No Demand" and other human-touched leads drop out of scope entirely,
+  # including shadow predictions.
+  lead_statuses:
+    - New
+  # true = no already-enriched skip (Wasil, 2026-09-28): lead_statuses [New] already
+  # keeps human-worked leads out, so the kununu marker (KN_KununuLinkProfile__c /
+  # KN_KununuProfileName__c) no longer gates anything. One pass per Task still holds
+  # (processed_task_ids).
+  include_enriched_leads: true
   # true lets the write-back OVERWRITE a Lead.Phone of the form +0<digits> (a national
   # number with '+' glued onto the trunk zero — passes the org's validation, dials
   # nowhere) with +49/+43/+41 + the rest, by the lead's country. Default false: Phone
@@ -125,12 +137,18 @@ pipeline:
   # Phased go-live gate (Wasil, 2026-07-18): on a non-dry run ONLY leads matching this
   # scope are written back + staged for conversion; every other lead is left untouched
   # (humans keep working it) and gets a shadow prediction instead. A missing kununu
-  # score (profile not in feed / no reviews) always fails the gate.
+  # score (profile not in feed / no reviews) fails the gate only while a cap is set.
   live_scope:
-    max_kununu_score: 3.0    # strict <; the score-3.0 boundary case stays with humans
+    # null = no score axis (Wasil, 2026-09-28): every create_new lead goes live whatever
+    # its kununu score, and a missing score no longer fails closed. Was 3.0 (strict <,
+    # the human "No Demand" line) from the 2026-07-18 go-live.
+    max_kununu_score: null
     decisions:               # widen the rollout here (e.g. add link); never skip/review
       - create_new
     # true admits second-chance ("wide") LF matches to live write-back + conversion.
     # Default false: they are predicted and shadow-scored but never written, until the
     # pass's accuracy is measured here. See live_scope.py.
-    allow_wide_match: false
+    # true since 2026-09-28 (Wasil): wide matches go live too, but are flagged —
+    # QA live_scope = yes_wide_match + Summary live_scope_wide_match. Moot while
+    # leadfeeder.match_wide_results is 0 (the pass never runs).
+    allow_wide_match: true

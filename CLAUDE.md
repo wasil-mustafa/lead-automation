@@ -92,6 +92,13 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   feed `profile_score` (stringly typed) → `ProfileInfo.score` → `EnrichedLead.kununu_score`.
   QA Review sheet gained `kununu_score` + `live_scope` (yes/exclusion-reason) columns and a
   Summary `live_scope_pass` count. Widen the rollout in config (add `link`, raise the cap).
+  **Widened 2026-09-28 (Wasil):** `max_kununu_score: null` (no score axis — a lead
+  scoring 3.0 or more, or with no score, now goes live; feed outage no longer fails closed),
+  `allow_wide_match: true` (flagged: QA `live_scope` = `yes_wide_match`, Summary
+  `live_scope_wide_match`, Stage 1 WARNING; moot while `match_wide_results: 0`), and
+  `pipeline.include_enriched_leads: true` (no already-enriched marker skip — the
+  `lead_statuses: [New]` filter already keeps human-worked leads out). Owner (Rohdaten
+  Pool) and the no-score-passes behaviour are deliberate (Wasil, same day).
 - **Write-back field spec (Wasil, 2026-07-10, `writeback.py`):** from the Task ONLY kununu URL
   (= the processed marker, replacing `KN_KununuProfileName__c` — reader accepts either), Region
   (derived from the URL's country slug: `/de/`→Germany, `/at/`→Austria, `/ch/`→Switzerland) and
@@ -220,9 +227,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   = `In Progress | in Arbeit | Not Started`. Do NOT use `IsClosed = false`: the bilingual/legacy
   picklist flags `Abgeschlossen` (Completed) as `IsClosed=false` and would leak handled tasks;
   there is no status literally named `Open`. Empty list disables the filter.
-- **Leads scope:** `leads_by_ids` filters `Owner.Type = 'Queue'`. "No Demand" leads ARE in scope
-  (humans set it for kununu score <3.0 — a triage practice that automation replaces); humans keep
-  closing those tasks, so shadow evidence comes mostly from the non-No-Demand minority. The few
+- **Leads scope:** `leads_by_ids` filters `Owner.Type = 'Queue'`, and since 2026-09-28 the
+  reader keeps only `Lead.Status = New` (`pipeline.lead_statuses: [New]`, Wasil: any other
+  status means a human already worked the lead). So "No Demand" leads are now OUT of scope —
+  no write-back, no shadow prediction; their tasks still count as processed for the watermark. The few
   pool-user-owned leads (contact-attached tasks) are out of scope for now. Config `owner_id` =
   the **'Rohdaten Pool' user since 2026-07-18** (the live scope is pool-quality leads; revisit
   when it widens — Wasil's own id is kept in the config comment).
