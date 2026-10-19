@@ -33,7 +33,7 @@ Code lives under `src/leadauto/`. Each module is independently runnable.
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — 524 pass
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — ~625 tests
 python -m pytest -q
 
 # Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
@@ -53,18 +53,23 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; 552 tests green.
+- **Built & unit-tested:** all three modules + cross-cutting; ~625 tests (6 fail locally on
+  environment — caplog, MPA snapshot, feed cache — on a clean master too).
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
 - **Scheduled:** Stage 1 is triggered by an **external cron-job.org job** (id 8029899) hitting the
-  `stage1.yml` `workflow_dispatch` at 09/12/15/18 Vienna; it POSTs `{"ref":"master"}` with no
-  inputs ⇒ `dry_run` defaults **true** — so **scheduled runs are STILL DRY even after the
-  2026-07-18 go-live**; the last step to full automation is changing the cron job's payload to
-  `{"ref":"master","inputs":{"dry_run":"false"}}` (Wasil's call). Change the schedule in *that
-  job*, not the workflow. GitHub's own `schedule:` cron was removed. Shadow files committed every
-  run; watermark only on non-dry. Stage 2 runs on manual dispatch OR chained from a live Stage-1
-  run (`workflow_call`, see the go-live bullet).
+  `stage1.yml` `workflow_dispatch` every 2 h at :48, 08:48-16:48 Vienna (5/day). **Scheduled
+  runs are LIVE since 2026-10-19:** the job POSTs `{"ref":"master","inputs":{"dry_run":"false"}}`
+  (before that it sent no inputs ⇒ `dry_run` defaulted true ⇒ every scheduled run was dry).
+  What "live" does is decided by `pipeline.live_scope` — currently **enrich-only for claimer**
+  (see the Split bullet): claimer leads are written back, nothing is converted. Change the
+  schedule/payload in *that job* (cron-job.org API `PATCH /jobs/8029899` — carry the existing
+  `extendedData.headers` over, they hold the GitHub token), not the workflow. GitHub's own
+  `schedule:` cron was removed. Shadow files committed every run; watermark only on non-dry.
+  Stage 2 runs on manual dispatch OR chained from a live Stage-1 run that staged an
+  auto-approved CSV (`workflow_call`, see the go-live bullet) — with `decisions: []` none is
+  staged, so the chain does not fire.
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `pipeline.dry_run: true`
   (local-run default; CI takes the dispatch input), `review_gate: false` (since go-live),
   `task_lookback_days: 14` (was 90 for the initial backlog sweep, which is done; the window is a
@@ -74,8 +79,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   org-verified) AND first live conversion — stage2 run 29126789599 converted
   dbeyond/coderis/econoomy via SOAP (3 converted, 0 failed/missing; owner=Wasil, Qualified,
   no Opportunity, task re-parented, KN_Email2__c on econoomy only); the live idempotency
-  re-run was a green no-op (preflight skipped all 3 as IsConverted). Scheduled runs remain
-  DRY (config `dry_run: true`); going live at scale is now a config/dispatch decision.
+  re-run was a green no-op (preflight skipped all 3 as IsConverted). Scheduled runs went
+  live (enrich-only, claimer) on 2026-10-19 — see the Scheduled bullet.
   The Dublettencheck rules were validated WITH LeadFeeder by the 2026-07-08 skipped-task
   backtest (87% correct account on 283 cases — see Matching section); the create_new path
   is shadow-scored plus this 3-lead live test.
@@ -486,7 +491,8 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `load_existing_records` in batches of 40. Full record (population breakdown, per-miss analysis,
   `backtest-skipped` mechanics): `docs/skipped-task-backtest-2026-07-08.md`.
 - **Shadow backtest:** every DRY stage-1 run appends predictions to committed
-  `state/predictions.jsonl`; `python -m leadauto shadow-compare` (in the scheduled workflow,
+  `state/predictions.jsonl` — and every LIVE run does too for the leads it does not convert
+  (written-back ones flagged `written_back`, scored on the decision only); `python -m leadauto shadow-compare` (in the scheduled workflow,
   read-only) scores them against real human conversions into `state/shadow_results.jsonl` +
   a `shadow_comparison.xlsx` artifact. `Lead.ConvertedDate` is Date-only → "human created a new
   account" = `Account.CreatedDate` same UTC day. Field checks mirror the write-back payload
@@ -520,12 +526,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    remaining follow-up batches are 36 preflight drops + 32 review + 27 link rows.
 
 1. **Phased go-live: DONE 2026-07-18** (see Status GO-LIVE bullet) — `review_gate: false`
-   committed, live-scope gate shipped, first automated E2E run converted 3/3. **The one
-   remaining move to full automation:** change the cron-job.org payload to
-   `{"ref":"master","inputs":{"dry_run":"false"}}` so scheduled runs go live (they currently
-   stay dry — dispatch with dry_run unchecked for a manual live run). Since 2026-10-19 a
-   live run is enrich-only for claimer (see the Split bullet), so flipping the payload
-   writes back claimer leads and converts nothing. Widening the scope
+   committed, live-scope gate shipped, first automated E2E run converted 3/3. **Scheduled
+   runs went live 2026-10-19** (cron-job.org payload now sends `dry_run: "false"`),
+   enrich-only for claimer (see the Split bullet): claimer leads are written back, nothing
+   converts. Watch the first live runs' QA `live_writeback` column. Widening the scope
    (add `ebp_trial` to `live_scope.task_types`, decisions back into `live_scope.decisions`
    to auto-convert) is a config commit,
    informed by shadow accuracy (item 4). A required-reviewers Environment is NOT possible
