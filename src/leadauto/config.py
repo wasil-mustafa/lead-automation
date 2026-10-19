@@ -244,10 +244,33 @@ class Settings:
 
     @property
     def live_decisions(self) -> list[str]:
-        """Match decisions eligible for live write-back + conversion. Widen the
-        rollout here (e.g. add 'link') — `skip`/`review` must never be listed."""
+        """Match decisions eligible for live CONVERSION (a converted lead is always
+        written back first). Widen the rollout here (e.g. add 'link') — `skip`/`review`
+        must never be listed. `[]` = enrich only: nothing is staged for Stage 2."""
         return list((self.raw["pipeline"].get("live_scope") or {})
                     .get("decisions", ["create_new"]))
+
+    @property
+    def live_writeback_decisions(self) -> list[str]:
+        """Match decisions whose Lead gets the live write-back. An ABSENT key falls
+        back to `decisions` (write-back scope == conversion scope, the go-live
+        behaviour). `review` may be listed here — enriching a lead converts nothing —
+        but `skip` never: a skip has no accepted LeadFeeder match."""
+        scope = self.raw["pipeline"].get("live_scope") or {}
+        if "writeback_decisions" not in scope:
+            return self.live_decisions
+        return list(scope["writeback_decisions"] or [])
+
+    @property
+    def live_task_types(self) -> list[str] | None:
+        """Parser keys (claimer | ebp_trial | ...) a non-dry run may write back. None
+        (key absent) = every enabled type. An enabled type not listed here stays dry:
+        extracted, matched and shadow-predicted, never written (Wasil, 2026-10-19:
+        claimer live, ebp_trial still dry)."""
+        scope = self.raw["pipeline"].get("live_scope") or {}
+        if scope.get("task_types") is None:
+            return None
+        return [str(t) for t in scope["task_types"]]
 
     @property
     def repair_national_phone(self) -> bool:

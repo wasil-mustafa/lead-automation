@@ -210,6 +210,20 @@ def test_field_agreement(tmp_path):
     assert "revenue_millions" not in f  # KN_DB* no longer written back
 
 
+def test_written_back_prediction_scores_the_decision_but_no_fields(tmp_path):
+    # Enrich-only live run (2026-10-19): our payload is already on the Lead, so the
+    # human conversion copies it — field agreement would only measure ourselves.
+    preds = [_pred("00Q1", account_id="001A", written_back=True,
+                   payload={"City": "Berlin"}, lf_website="https://acme.de")]
+    client = FakeClient(leads=[_lead()],
+                        accounts=[_account(BillingCity="Berlin", Website="acme.de")])
+    res, _, rpath, _ = _run(tmp_path, preds, client)
+    import json
+    rec = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])
+    assert res["hits"] == 1
+    assert rec["fields"] == {}
+
+
 def test_prefilled_lead_fields_score_prefilled_not_lf_empty(tmp_path):
     # Write-back is fill-only-blank: when the Lead already carried FirstName/Phone/City,
     # the payload omits them deliberately. That must score as "prefilled" (nothing for

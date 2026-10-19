@@ -409,11 +409,12 @@ def _auto_results():
 
 
 def test_auto_approved_csv_holds_live_scope_rows_only(tmp_path):
-    # Default live scope = create_new only: the link/review/skip rows stay out even
+    # Conversion scope = create_new only: the link/review/skip rows stay out even
     # though their kununu score is under the cap.
     import csv
     from leadauto.qa_artifact import write_auto_approved_csv
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", _settings())
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review",
+                                   _settings(decisions=["create_new"], max_kununu_score=3.0))
     assert path is not None and path.name.startswith("approved_") and "auto" in path.name
     with path.open(newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
@@ -421,6 +422,29 @@ def test_auto_approved_csv_holds_live_scope_rows_only(tmp_path):
     assert all(r["Approve?"] == "yes" for r in rows)
     assert rows[0]["decision"] == "create_new"
     assert rows[0]["live_scope"] == "yes"
+
+
+def test_scheduled_config_is_enrich_only_and_stages_nothing(tmp_path):
+    # 2026-10-19: `decisions: []` — a live run writes back but never auto-converts, so
+    # no CSV is written and stage1.yml never chains Stage 2.
+    from leadauto.qa_artifact import write_auto_approved_csv
+    review_dir = tmp_path / "review"
+    assert write_auto_approved_csv(_auto_results(), review_dir, _settings()) is None
+    assert not review_dir.exists()
+
+
+def test_review_sheet_separates_write_back_from_conversion():
+    wb = build_workbook(_auto_results(), [], meta={}, settings=_settings(
+        decisions=[], writeback_decisions=["create_new", "link", "review"],
+        task_types=["claimer"], max_kununu_score=None))
+    idx = {h: i for i, h in enumerate(_headers(wb["Review"]))}
+    rows = _rows(wb["Review"])
+    assert [r[idx["live_writeback"]] for r in rows] == ["yes", "yes", "yes", "decision_skip"]
+    assert [r[idx["live_scope"]] for r in rows] == [
+        "decision_link", "decision_create_new", "decision_review", "decision_skip"]
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["live_writeback_pass"] == 3
+    assert metrics["live_scope_pass"] == 0
 
 
 def test_auto_approved_csv_widened_decisions_include_link(tmp_path):

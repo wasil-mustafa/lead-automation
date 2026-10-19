@@ -550,10 +550,13 @@ def test_run_stage2_routes_kununu_conflict_to_failures(tmp_path, monkeypatch):
 # --- Stage 1: auto-approved CSV (review_gate: false, 2026-07-10) ---------------
 
 def _gate_settings(review_gate: bool):
-    """Settings with review_gate pinned — never depend on the config.yaml value
-    (it flipped to false at go-live 2026-07-18)."""
+    """Settings with review_gate AND the conversion scope pinned — never depend on the
+    config.yaml values (review_gate flipped to false at go-live 2026-07-18; the
+    scheduled config has converted nothing since 2026-10-19)."""
     s = Settings.load()
-    s.raw["pipeline"] = dict(s.raw["pipeline"], review_gate=review_gate)
+    s.raw["pipeline"] = dict(s.raw["pipeline"], review_gate=review_gate,
+                             live_scope={"decisions": ["create_new"],
+                                         "max_kununu_score": 3.0})
     return s
 
 
@@ -631,3 +634,50 @@ def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
                qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
                review_dir=review_dir, predictions_path=None)
     assert not review_dir.exists() or not list(review_dir.iterdir())
+
+
+# --- Stage 1: enrich-only go-live for claimer (2026-10-19) ----------------------
+# The scheduled config writes back every LF-matched claimer lead, converts nothing and
+# keeps ebp_trial dry.
+from leadauto.predictions import load_predictions  # noqa: E402
+
+def _live_run(tmp_path, monkeypatch, task_type="claimer"):
+    import dataclasses
+    from leadauto.models import EnrichedLead
+
+    def fake_enrich(lf, extracteds, settings, logger=None, **kw):
+        return [EnrichedLead(extracted=dataclasses.replace(e, task_type=task_type),
+                             matched=True, lf_company_id="123",
+                             matched_name=e.best_company, company={}, kununu_score=4.5)
+                for e in extracteds]
+
+    monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")])
+    review_dir, preds = tmp_path / "review", tmp_path / "predictions.jsonl"
+    res = run_stage1(sf, object(), Settings.load(), state=State(None, []),
+                     since="2026-05-01T00:00:00Z", dry_run=False,
+                     qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                     review_dir=review_dir, predictions_path=preds)
+    return sf, res, review_dir, preds
+
+
+def test_enrich_only_claimer_is_written_back_but_not_staged(tmp_path, monkeypatch):
+    sf, res, review_dir, preds = _live_run(tmp_path, monkeypatch)
+    assert res.results[0].decision == "create_new"
+    # score 4.5: no score axis any more, so a high-score claimer is enriched too
+    assert [r["Id"] for _, recs in sf.updates for r in recs] == ["00Q000000000001"]
+    assert not review_dir.exists() or not list(review_dir.glob("approved_*"))
+    # A human converts it, so it stays shadow evidence: decision only, no field checks.
+    pred = load_predictions(preds)
+    assert [q.lead_id for q in pred] == ["00Q000000000001"]
+    assert pred[0].written_back is True
+
+
+def test_enrich_only_leaves_ebp_trial_dry(tmp_path, monkeypatch):
+    sf, res, review_dir, preds = _live_run(tmp_path, monkeypatch, task_type="ebp_trial")
+    assert sf.updates == []
+    assert not review_dir.exists() or not list(review_dir.glob("approved_*"))
+    pred = load_predictions(preds)
+    assert [q.lead_id for q in pred] == ["00Q000000000001"]
+    assert pred[0].written_back is False
