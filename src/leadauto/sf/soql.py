@@ -59,13 +59,17 @@ def tasks_since(watermark: str, subjects: Sequence[str],
     return soql
 
 
-def leads_by_ids(ids: Sequence[str]) -> str:
+def leads_by_ids(ids: Sequence[str], exclude_campaign_ids: Sequence[str] = ()) -> str:
     """Unconverted, queue-owned Leads for the given Ids.
 
     Queue-owned only (scope decision 2026-07-03): pool-user-owned leads
     (Rohdaten/Clean Pool) carry contact-attached tasks — out of scope for now.
     A Lead's owning Group can only be a Queue, so Owner.Type = 'Queue' is exact
     (verified through the Bulk-API route against org data).
+
+    `exclude_campaign_ids` drops Leads that are already members of any of those
+    Campaigns (the LF-outcome tagging, campaigns.py) with a WHERE anti-join — free,
+    it rides this read (org-verified on Lead 2026-10-19).
     """
     if not ids:
         raise ValueError("leads_by_ids requires at least one Id")
@@ -74,6 +78,9 @@ def leads_by_ids(ids: Sequence[str]) -> str:
         f"WHERE Id IN ({in_list(ids)}) AND IsConverted = false "
         "AND Owner.Type = 'Queue'"
     )
+    if exclude_campaign_ids:
+        soql += (" AND Id NOT IN (SELECT LeadId FROM CampaignMember "
+                 f"WHERE CampaignId IN ({in_list(exclude_campaign_ids)}))")
     return soql
 
 

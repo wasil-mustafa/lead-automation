@@ -44,6 +44,7 @@ class FakeSfClient:
         self._accounts = accounts or []
         self._contacts = contacts or []
         self.updates: list[tuple] = []
+        self.creates: list[tuple] = []
 
     def query(self, soql, bulk=False):
         if "FROM Task" in soql:
@@ -62,6 +63,11 @@ class FakeSfClient:
     def update_records(self, sobject, records):
         self.updates.append((sobject, records))
         return {"processed": len(records)}
+
+    def create_records(self, sobject, records):
+        self.creates.append((sobject, records))
+        return {"processed": len(records), "created": len(records), "duplicates": 0,
+                "failed": 0, "failures": []}
 
 
 def _task(tid="T1", who="00Q1", created="2026-06-19T10:00:00.000+0000"):
@@ -681,3 +687,136 @@ def test_enrich_only_leaves_ebp_trial_dry(tmp_path, monkeypatch):
     pred = load_predictions(preds)
     assert [q.lead_id for q in pred] == ["00Q000000000001"]
     assert pred[0].written_back is False
+
+
+# --- LF-outcome campaign tagging (campaigns.py, Wasil 2026-10-19) -------------
+
+CAMPAIGNS = SETTINGS.lf_campaigns
+
+
+def _enrich_with(monkeypatch, *, matched=True, company=None):
+    from leadauto.models import EnrichedLead
+
+    def fake_enrich(lf, extracteds, settings, logger=None, **kw):
+        return [EnrichedLead(extracted=e, matched=matched,
+                             lf_company_id="123" if matched else None,
+                             matched_name=e.best_company if matched else None,
+                             company=dict(company or {}) if matched else None,
+                             kununu_score=2.5)
+                for e in extracteds]
+
+    monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)
+
+
+def _live(sf, tmp_path, lf=object(), settings=None, dry_run=False):
+    return run_stage1(sf, lf, settings or SETTINGS, state=State(None, []),
+                      since="2026-05-01T00:00:00Z", dry_run=dry_run,
+                      qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                      review_dir=tmp_path / "review", predictions_path=None)
+
+
+def test_config_carries_the_three_lf_campaigns():
+    assert CAMPAIGNS == {"matched_complete": "701Mz00001aPCDdIAO",
+                         "matched_incomplete": "701Mz00001aP9hDIAS",
+                         "unmatched": "701Mz00001aKIjZIAW"}
+
+
+@pytest.mark.parametrize("matched,company,bucket", [
+    (True, {"Street": "Hauptstr. 1", "Employee_Count": 120}, "matched_complete"),
+    (True, {"Street": "Hauptstr. 1"}, "matched_incomplete"),       # no headcount
+    (True, {"Employee_Count": 120}, "matched_incomplete"),         # no street
+    (False, None, "unmatched"),
+])
+def test_stage1_live_tags_each_lead_with_its_lf_campaign(tmp_path, monkeypatch,
+                                                         matched, company, bucket):
+    _enrich_with(monkeypatch, matched=matched, company=company)
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
+    res = _live(sf, tmp_path)
+    assert sf.creates == [("CampaignMember",
+                           [{"CampaignId": CAMPAIGNS[bucket], "LeadId": "00Q1"}])]
+    assert res.campaigns[f"campaign_{bucket}"] == 1
+    assert res.campaigns["campaign_created"] == 1
+    review = load_workbook(tmp_path / "qa.xlsx")["Review"]
+    header = [c.value for c in review[1]]
+    assert review[2][header.index("lf_campaign")].value == bucket
+
+
+def test_stage1_dry_run_tags_no_campaign(tmp_path, monkeypatch):
+    _enrich_with(monkeypatch)
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
+    res = _live(sf, tmp_path, dry_run=True)
+    assert sf.creates == [] and res.campaigns == {}
+
+
+def test_stage1_live_without_leadfeeder_tags_no_campaign(tmp_path):
+    # LF off => every lead looks unmatched; tagging them all 'unmatched' would be a lie.
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
+    res = _live(sf, tmp_path, lf=None)
+    assert sf.creates == [] and res.campaigns == {}
+
+
+def test_stage1_campaign_failure_is_reported_but_does_not_block_conversion(tmp_path,
+                                                                           monkeypatch):
+    _enrich_with(monkeypatch)
+
+    class FailingCampaignSf(FakeSfClient):
+        def create_records(self, sobject, records):
+            self.creates.append((sobject, records))
+            return {"processed": len(records), "created": 0, "duplicates": 0,
+                    "failed": len(records),
+                    "failures": [{"record": r, "error": "INSUFFICIENT_ACCESS: no"}
+                                 for r in records]}
+
+    sf = FailingCampaignSf(tasks=[_task(who="00Q000000000001")],
+                           leads=[_lead("00Q000000000001")])
+    res = _live(sf, tmp_path, settings=_no_gate_settings())
+    assert res.failures == [{"lead_id": "00Q000000000001", "stage": "campaign",
+                             "error": "INSUFFICIENT_ACCESS: no"}]
+    assert res.campaigns["campaign_failed"] == 1
+    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+
+
+def test_stage1_live_writeback_failure_is_left_untagged(tmp_path, monkeypatch):
+    # Tagging excludes a lead from every later run; a failed write-back must stay
+    # re-processable, so it gets no campaign.
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
+
+    class FailingSf(FakeSfClient):
+        def update_records(self, sobject, records):
+            return {"processed": 0, "failed": len(records),
+                    "failures": [{"id": r["Id"], "error": "boom"} for r in records]}
+
+    sf = FailingSf(tasks=[_task()], leads=[_lead()])
+    _live(sf, tmp_path)
+    assert sf.creates in ([], [("CampaignMember", [])])
+
+
+def test_stage1_out_of_scope_lead_is_judged_on_its_existing_values(tmp_path, monkeypatch):
+    # A lead outside the write-back scope (here: a still-dry task type) is never
+    # written: LF's street/headcount never reach the Lead, so a blank Lead lands in the
+    # incomplete campaign.
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
+    import leadauto.pipeline.stage1_enrich as s1
+    monkeypatch.setattr(s1, "writeback_reason", lambda r, s: "task_type_ebp_trial")
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
+    _live(sf, tmp_path)
+    assert sf.updates == []
+    assert sf.creates[0][1] == [{"CampaignId": CAMPAIGNS["matched_incomplete"],
+                                 "LeadId": "00Q1"}]
+
+
+def test_stage1_campaign_request_error_never_aborts_the_run(tmp_path, monkeypatch):
+    from leadauto.sf.client import SfError
+    _enrich_with(monkeypatch)
+
+    class ErroringSf(FakeSfClient):
+        def create_records(self, sobject, records):
+            raise SfError("Failed to sObject Collections POST (HTTP 500)")
+
+    sf = ErroringSf(tasks=[_task(who="00Q000000000001")],
+                    leads=[_lead("00Q000000000001")])
+    res = _live(sf, tmp_path, settings=_no_gate_settings())
+    assert res.campaigns["campaign_failed"] == 1
+    assert [f["stage"] for f in res.failures] == ["campaign"]
+    assert (tmp_path / "qa.xlsx").exists()                         # QA still written
+    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1

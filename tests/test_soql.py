@@ -203,3 +203,12 @@ def test_accounts_by_signals_sanitizes_patterns():
 def test_leads_by_ids_selects_industry():
     q = soql.leads_by_ids(["00Q000000000001AAA"])
     assert "Industry" in q
+
+
+def test_leads_by_ids_excludes_campaign_members_only_when_asked():
+    plain = soql.leads_by_ids(["00Q000000000001AAA"])
+    assert "CampaignMember" not in plain
+    q = soql.leads_by_ids(["00Q000000000001AAA"],
+                          exclude_campaign_ids=["701Mz00001aPCDdIAO", "701Mz00001aKIjZIAW"])
+    assert q == plain + (" AND Id NOT IN (SELECT LeadId FROM CampaignMember WHERE "
+                         "CampaignId IN ('701Mz00001aPCDdIAO', '701Mz00001aKIjZIAW'))")

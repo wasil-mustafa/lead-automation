@@ -134,6 +134,18 @@ pipeline:
   # is strictly fill-only-blank here. The one-off ZPE 2026 config sets it (46 of 109
   # badge-scan phones had that shape, Wasil 2026-09-18).
   repair_national_phone: false
+  # LeadFeeder-outcome campaign tagging (Wasil, 2026-10-19). On a NON-dry run every
+  # processed lead (write-back scope or not) becomes a CampaignMember of exactly one of
+  # these (write-back failures are left untagged, so they stay re-processable),
+  # judged on the Lead's FINAL state (write-back payload over the existing value):
+  # LF matched + KN_Employee__c and Street both filled -> matched_complete; LF matched
+  # with either blank -> matched_incomplete; no accepted LF match -> unmatched. Leads
+  # already in any of them are excluded from every later run (dry or live) by an
+  # anti-join on the lead read. Absent/empty = off. Never tags with LeadFeeder disabled.
+  lf_campaigns:
+    matched_complete: 701Mz00001aPCDdIAO     # EnrichLeadfedup
+    matched_incomplete: 701Mz00001aP9hDIAS   # EnrichLeadshortage
+    unmatched: 701Mz00001aKIjZIAW            # EnrichLeadmanually
   # Phased go-live gate (Wasil, 2026-07-18): on a non-dry run ONLY leads matching this
   # scope are written back + staged for conversion; every other lead is left untouched
   # (humans keep working it) and gets a shadow prediction instead. A missing kununu

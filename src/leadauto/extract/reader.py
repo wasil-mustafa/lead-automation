@@ -103,9 +103,15 @@ def read_extracted_leads(
     # backlog-sized IN(...) list breaches Salesforce's 100k-char SOQL limit
     # (live-proven 2026-07-15: 12,778 closed-task WhoIds in one query).
     lead_ids = [w for w in who_ids if w.startswith("00Q")]
+    # Leads already tagged with an LF-outcome campaign were handled by a live run and
+    # are excluded in the same query (they land in the not-found skip below).
+    tagged_campaigns = sorted(settings.lf_campaigns.values())
+    not_found_reason = ("lead not found, already converted or LF-campaign tagged"
+                        if tagged_campaigns else "lead not found or already converted")
     leads_raw: list[dict] = []
     for i in range(0, len(lead_ids), _LEAD_ID_CHUNK):
-        leads_raw += client.query(soql.leads_by_ids(lead_ids[i:i + _LEAD_ID_CHUNK]))
+        leads_raw += client.query(soql.leads_by_ids(
+            lead_ids[i:i + _LEAD_ID_CHUNK], exclude_campaign_ids=tagged_campaigns))
     lead_map = {l["Id"]: l for l in leads_raw}
     log.info("Resolved %d/%d WhoId(s) to unconverted queue-owned lead(s)", len(lead_map), len(who_ids))
 
@@ -121,7 +127,7 @@ def read_extracted_leads(
         lead = lead_map.get(who)
         if lead is None:
             result.skipped.append(Skipped(tid, who or "", subject,
-                                          "lead not found or already converted"))
+                                          not_found_reason))
             continue
         # Optional Lead.Status allowlist (pipeline.lead_statuses) — post-query, so it
         # costs nothing; a one-off "only Status = New" review run sets it.

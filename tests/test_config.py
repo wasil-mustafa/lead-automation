@@ -75,3 +75,13 @@ def test_lead_statuses_absent_means_no_filter_and_values_are_stringified():
     assert s.lead_statuses == []
     s.raw["pipeline"]["lead_statuses"] = ["New", 1]
     assert s.lead_statuses == ["New", "1"]
+
+
+def test_lf_campaigns_drops_blanks_and_defaults_off():
+    assert Settings(raw={"pipeline": {}}, leadfeeder_api_key=None,
+                    sf_auth_url=None).lf_campaigns == {}
+    s = Settings(raw={"pipeline": {"lf_campaigns": {"unmatched": " 701U ",
+                                                    "matched_complete": None,
+                                                    "matched_incomplete": ""}}},
+                 leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.lf_campaigns == {"unmatched": "701U"}

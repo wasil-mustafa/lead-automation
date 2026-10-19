@@ -148,6 +148,26 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   primary Email (fill-only-blank, best-effort; carried via the Review sheet's `lf_contact_email`
   column). **Stage 2 preflights** approved leads and skips+reports rule violations
   (preflight_failures.csv).
+- **LF-outcome campaign tagging (2026-10-19, `campaigns.py`, config `pipeline.lf_campaigns`):**
+  on a NON-dry Stage 1 run EVERY processed lead (write-back scope or not, every task type)
+  becomes a CampaignMember of one campaign: no accepted LF match → `unmatched`
+  701Mz00001aKIjZIAW "EnrichLeadmanually"; LF matched with final `KN_Employee__c` AND
+  `Street` filled → `matched_complete` 701Mz00001aPCDdIAO "EnrichLeadfedup"; otherwise
+  `matched_incomplete` 701Mz00001aP9hDIAS "EnrichLeadshortage". "Final" = write-back
+  payload over the existing value only for leads actually written (`written_ids`), else
+  the existing Lead value. Never tags when LeadFeeder is disabled (everything would look
+  unmatched), and never tags a lead whose write-back FAILED (tagging is permanent
+  exclusion; a failed lead must stay re-processable). Consequence of tagging leads
+  outside the write-back scope too (Wasil's call): widening `live_scope` or making
+  `ebp_trial` live later does NOT re-evaluate already-tagged leads. Insert =
+  `SfClient.create_records` (sObject Collections POST, +1 call per ≤200 leads;
+  `DUPLICATE_VALUE` counts as already-member); failures land on the QA Failures sheet
+  (stage `campaign`), never hold a lead back, and a request-level `SfError` is caught so
+  it never aborts the run. Tagged leads are excluded from every later run (dry too) by an
+  anti-join in `leads_by_ids` (0 extra calls; they show as "lead not found, already
+  converted or LF-campaign tagged"). QA Review `lf_campaign` column previews the bucket
+  on dry runs. The three campaigns were `IsActive = false` when shipped (default member
+  status `Sent`).
 - **Stage 2 pool-account enrichment + same-company dedup** (PR #18): `resolve_pool_links`
   overwrite-enriches `Rohdaten Pool`-owned linked Accounts behind a kununu identity gate, and
   `convert_leads` clusters create-new leads by `lf_company_id` into one Account + N Contacts. See
