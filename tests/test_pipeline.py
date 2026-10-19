@@ -694,10 +694,14 @@ def test_enrich_only_leaves_ebp_trial_dry(tmp_path, monkeypatch):
 CAMPAIGNS = SETTINGS.lf_campaigns
 
 
-def _enrich_with(monkeypatch, *, matched=True, company=None):
+def _enrich_with(monkeypatch, *, matched=True, company=None, task_type=None):
+    import dataclasses
+
     from leadauto.models import EnrichedLead
 
     def fake_enrich(lf, extracteds, settings, logger=None, **kw):
+        if task_type:
+            extracteds = [dataclasses.replace(e, task_type=task_type) for e in extracteds]
         return [EnrichedLead(extracted=e, matched=matched,
                              lf_company_id="123" if matched else None,
                              matched_name=e.best_company if matched else None,
@@ -791,18 +795,25 @@ def test_stage1_live_writeback_failure_is_left_untagged(tmp_path, monkeypatch):
     assert sf.creates in ([], [("CampaignMember", [])])
 
 
-def test_stage1_out_of_scope_lead_is_judged_on_its_existing_values(tmp_path, monkeypatch):
-    # A lead outside the write-back scope (here: a still-dry task type) is never
-    # written: LF's street/headcount never reach the Lead, so a blank Lead lands in the
-    # incomplete campaign.
+def test_stage1_matched_lead_outside_writeback_scope_is_not_tagged(tmp_path, monkeypatch):
+    # Matched but not written back: no campaign, so a later, wider scope can still
+    # write it (tagging is a permanent exclusion).
     _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
     import leadauto.pipeline.stage1_enrich as s1
-    monkeypatch.setattr(s1, "writeback_reason", lambda r, s: "task_type_ebp_trial")
+    monkeypatch.setattr(s1, "writeback_reason", lambda r, s: "decision_review")
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
+    res = _live(sf, tmp_path)
+    assert sf.updates == []
+    assert sf.creates in ([], [("CampaignMember", [])])
+    assert not any(k.startswith("campaign_matched") for k in res.campaigns)
+
+
+@pytest.mark.parametrize("matched", [True, False])
+def test_stage1_non_claimer_leads_are_never_tagged(tmp_path, monkeypatch, matched):
+    _enrich_with(monkeypatch, matched=matched, task_type="ebp_trial")
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
     _live(sf, tmp_path)
-    assert sf.updates == []
-    assert sf.creates[0][1] == [{"CampaignId": CAMPAIGNS["matched_incomplete"],
-                                 "LeadId": "00Q1"}]
+    assert sf.creates in ([], [("CampaignMember", [])])
 
 
 def test_stage1_campaign_request_error_never_aborts_the_run(tmp_path, monkeypatch):

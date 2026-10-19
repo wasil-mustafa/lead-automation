@@ -149,17 +149,16 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   column). **Stage 2 preflights** approved leads and skips+reports rule violations
   (preflight_failures.csv).
 - **LF-outcome campaign tagging (2026-10-19, `campaigns.py`, config `pipeline.lf_campaigns`):**
-  on a NON-dry Stage 1 run EVERY processed lead (write-back scope or not, every task type)
-  becomes a CampaignMember of one campaign: no accepted LF match → `unmatched`
-  701Mz00001aKIjZIAW "EnrichLeadmanually"; LF matched with final `KN_Employee__c` AND
-  `Street` filled → `matched_complete` 701Mz00001aPCDdIAO "EnrichLeadfedup"; otherwise
-  `matched_incomplete` 701Mz00001aP9hDIAS "EnrichLeadshortage". "Final" = write-back
-  payload over the existing value only for leads actually written (`written_ids`), else
-  the existing Lead value. Never tags when LeadFeeder is disabled (everything would look
-  unmatched), and never tags a lead whose write-back FAILED (tagging is permanent
-  exclusion; a failed lead must stay re-processable). Consequence of tagging leads
-  outside the write-back scope too (Wasil's call): widening `live_scope` or making
-  `ebp_trial` live later does NOT re-evaluate already-tagged leads. Insert =
+  on a NON-dry Stage 1 run, `claimer` leads only (`pipeline.lf_campaign_task_types`)
+  that were either WRITTEN BACK or not LF-matched become a CampaignMember of one
+  campaign: no accepted LF match → `unmatched` 701Mz00001aKIjZIAW "EnrichLeadmanually";
+  written back with final `KN_Employee__c` AND `Street` filled (payload over the
+  existing value) → `matched_complete` 701Mz00001aPCDdIAO "EnrichLeadfedup"; written
+  back with either blank → `matched_incomplete` 701Mz00001aP9hDIAS "EnrichLeadshortage"
+  (Wasil, 2026-10-19). An LF-matched lead NOT written back (out of write-back scope,
+  failed write-back) gets no campaign, so tagging — a permanent exclusion — never
+  swallows a lead a wider scope could still write. Never tags with LeadFeeder disabled
+  (everything would look unmatched). Insert =
   `SfClient.create_records` (sObject Collections POST, +1 call per ≤200 leads;
   `DUPLICATE_VALUE` counts as already-member); failures land on the QA Failures sheet
   (stage `campaign`), never hold a lead back, and a request-level `SfError` is caught so

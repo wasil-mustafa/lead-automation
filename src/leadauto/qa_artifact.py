@@ -173,10 +173,12 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
         live = live_scope_reason(result, settings) or yes
         live_wb = writeback_reason(result, settings) or yes
     # lf_campaign: the LeadFeeder-outcome campaign a live run tags this lead with
-    # (campaigns.py), judged as if the write-back succeeded. Blank when tagging is off.
+    # (campaigns.py), judged as if the write-back succeeded. Blank when the lead is not
+    # tagged (matched but not written back, other task type) or tagging is off.
     campaign = ""
     if settings is not None and settings.lf_campaigns:
-        campaign = campaign_bucket(result, payload, written=live_wb.startswith("yes"))
+        campaign = campaign_bucket(result, payload, written=live_wb.startswith("yes"),
+                                   task_types=settings.lf_campaign_task_types) or ""
     return {
         "lead_id": e.lead_id, "task_id": e.task_id, "task_type": e.task_type,
         "subject": e.subject,

@@ -180,21 +180,19 @@ def run_stage1(
 
 
 def _tag_campaigns(sf_client, results, written_ids, failures, settings, log) -> dict:
-    """Add every processed lead to its LeadFeeder-outcome campaign (campaigns.py):
-    one sObject-Collections POST per <=200 leads. A lead's write-back payload decides
-    its bucket only when it was actually written (`written_ids`); every other lead is
-    judged on its existing values. A lead whose write-back FAILED is not tagged at all:
-    tagging excludes it from every later run, and a failed lead must stay
-    re-processable. Insert failures join `failures` (QA Failures sheet, stage
-    'campaign') but never hold a lead back, and a failed request never aborts the
-    run: the tag is informational.
+    """Add the taggable leads to their LeadFeeder-outcome campaign (campaigns.py):
+    one sObject-Collections POST per <=200 leads. Taggable = a tagged task type AND
+    either written back this run (`written_ids`, which already excludes write-back
+    failures) or unmatched in LeadFeeder; an untagged lead stays eligible for later
+    runs. Insert failures join `failures` (QA Failures sheet, stage 'campaign') but
+    never hold a lead back, and a failed request never aborts the run: the tag is
+    informational.
     """
-    failed_wb = {f.get("lead_id") for f in failures}
-    tag = [r for r in results if r.enriched.extracted.lead_id not in failed_wb]
-    # payloads only matter for written leads; the rest are judged on existing values
+    # only written leads' payloads decide a bucket; nobody else's is built
     payloads = [lead_field_payload(r.enriched, settings)
-                if r.enriched.extracted.lead_id in written_ids else None for r in tag]
-    rows, counts = campaign_members(tag, payloads, written_ids, settings.lf_campaigns)
+                if r.enriched.extracted.lead_id in written_ids else None for r in results]
+    rows, counts = campaign_members(results, payloads, written_ids, settings.lf_campaigns,
+                                    settings.lf_campaign_task_types)
     try:
         res = sf_client.create_records("CampaignMember", rows)
     except SfError as exc:

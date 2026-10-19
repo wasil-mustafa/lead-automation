@@ -85,3 +85,9 @@ def test_lf_campaigns_drops_blanks_and_defaults_off():
                                                     "matched_incomplete": ""}}},
                  leadfeeder_api_key=None, sf_auth_url=None)
     assert s.lf_campaigns == {"unmatched": "701U"}
+
+
+def test_lf_campaign_task_types_from_config_and_absent_means_all():
+    assert Settings.load().lf_campaign_task_types == ["claimer"]
+    assert Settings(raw={"pipeline": {}}, leadfeeder_api_key=None,
+                    sf_auth_url=None).lf_campaign_task_types is None
