@@ -17,6 +17,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
+from .campaigns import BUCKETS, campaign_bucket
 from .convert.preflight import check_lead
 from .models import CONTACT_SKIP_NOT_NEEDED
 from .live_scope import is_wide_match, live_scope_reason, writeback_reason
@@ -36,7 +37,7 @@ REVIEW_COLUMNS = [
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
     "convert_blockers",
-    "live_writeback", "live_scope", "decision", "Approve?",
+    "live_writeback", "live_scope", "lf_campaign", "decision", "Approve?",
 ]
 # The "Enriching" sheet: Salesforce field API names, in the order a reviewer reads them.
 # One row per Lead the write-back would touch, carrying EXACTLY the values
@@ -171,11 +172,19 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
         yes = "yes_wide_match" if is_wide_match(result) else "yes"
         live = live_scope_reason(result, settings) or yes
         live_wb = writeback_reason(result, settings) or yes
+    # lf_campaign: the LeadFeeder-outcome campaign a live run tags this lead with
+    # (campaigns.py), judged as if the write-back succeeded. Blank when the lead is not
+    # tagged (matched but not written back, other task type) or tagging is off.
+    campaign = ""
+    if settings is not None and settings.lf_campaigns:
+        campaign = campaign_bucket(result, payload, written=live_wb.startswith("yes"),
+                                   task_types=settings.lf_campaign_task_types) or ""
     return {
         "lead_id": e.lead_id, "task_id": e.task_id, "task_type": e.task_type,
         "subject": e.subject,
         "company": e.best_company, "kununu_url": e.kununu_url, "region": e.region,
         "kununu_score": enr.kununu_score, "live_scope": live, "live_writeback": live_wb,
+        "lf_campaign": campaign,
         "contact_name": e.contact_name, "contact_email": e.contact_email or e.lead_email,
         "lf_matched": _yn(enr.matched), "lf_matched_name": enr.matched_name,
         "lf_match_score": enr.match_score, "lf_name_agreement": enr.name_agreement,
@@ -229,8 +238,8 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     payloads = [lead_field_payload(r.enriched, settings) for r in results]
 
     # Review
-    review_rows = [[_review_row(r, settings, p).get(c) for c in REVIEW_COLUMNS]
-                   for r, p in zip(results, payloads)]
+    review_dicts = [_review_row(r, settings, p) for r, p in zip(results, payloads)]
+    review_rows = [[d.get(c) for c in REVIEW_COLUMNS] for d in review_dicts]
     add_sheet(wb, "Review", REVIEW_COLUMNS, review_rows)
 
     # Enriching — the write-back payload, paste-ready. Rows whose payload is only the Id
@@ -314,6 +323,14 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         live = [r for r in results if live_scope_reason(r, settings) is None]
         summary.append(["live_scope_pass", len(live)])
         summary.append(["live_scope_wide_match", sum(1 for r in live if is_wide_match(r))])
+        if settings.lf_campaigns:
+            summary.extend(["campaign_" + b, sum(1 for d in review_dicts
+                                                  if d["lf_campaign"] == b)]
+                           for b in BUCKETS)
+            # live runs only: what the CampaignMember insert actually did
+            summary.extend([k, meta[k]] for k in ("campaign_created",
+                                                  "campaign_already_member",
+                                                  "campaign_failed") if k in meta)
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
     add_sheet(wb, "Summary", ["metric", "value"], summary)
 

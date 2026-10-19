@@ -112,6 +112,21 @@ class Settings:
                     .get("allow_wide_match", False))
 
     @property
+    def lf_campaigns(self) -> dict[str, str]:
+        """Bucket -> CampaignId for the live-run LeadFeeder-outcome tagging
+        (campaigns.py). Blank ids are dropped; an absent block means the feature is
+        off — no tagging and no campaign exclusion on the lead read."""
+        block = (self.raw.get("pipeline") or {}).get("lf_campaigns") or {}
+        return {k: str(v).strip() for k, v in block.items() if v and str(v).strip()}
+
+    @property
+    def lf_campaign_task_types(self) -> list[str] | None:
+        """Parser keys whose leads get an LF-outcome campaign; None (key absent) =
+        every enabled type. `claimer` only since 2026-10-19 (Wasil)."""
+        types = (self.raw.get("pipeline") or {}).get("lf_campaign_task_types")
+        return None if types is None else [str(t) for t in types]
+
+    @property
     def lf_contact_lookup_only_when_needed(self) -> bool:
         """True runs the LF contact cascade (search + 1-credit retrieve + find-contact-data)
         ONLY for leads whose Lead record still lacks an email or a phone — the two fields

@@ -153,6 +153,25 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   primary Email (fill-only-blank, best-effort; carried via the Review sheet's `lf_contact_email`
   column). **Stage 2 preflights** approved leads and skips+reports rule violations
   (preflight_failures.csv).
+- **LF-outcome campaign tagging (2026-10-19, `campaigns.py`, config `pipeline.lf_campaigns`):**
+  on a NON-dry Stage 1 run, `claimer` leads only (`pipeline.lf_campaign_task_types`)
+  that were either WRITTEN BACK or not LF-matched become a CampaignMember of one
+  campaign: no accepted LF match → `unmatched` 701Mz00001aKIjZIAW "EnrichLeadmanually";
+  written back with final `KN_Employee__c` AND `Street` filled (payload over the
+  existing value) → `matched_complete` 701Mz00001aPCDdIAO "EnrichLeadfedup"; written
+  back with either blank → `matched_incomplete` 701Mz00001aP9hDIAS "EnrichLeadshortage"
+  (Wasil, 2026-10-19). An LF-matched lead NOT written back (out of write-back scope,
+  failed write-back) gets no campaign, so tagging — a permanent exclusion — never
+  swallows a lead a wider scope could still write. Never tags with LeadFeeder disabled
+  (everything would look unmatched). Insert =
+  `SfClient.create_records` (sObject Collections POST, +1 call per ≤200 leads;
+  `DUPLICATE_VALUE` counts as already-member); failures land on the QA Failures sheet
+  (stage `campaign`), never hold a lead back, and a request-level `SfError` is caught so
+  it never aborts the run. Tagged leads are excluded from every later run (dry too) by an
+  anti-join in `leads_by_ids` (0 extra calls; they show as "lead not found, already
+  converted or LF-campaign tagged"). QA Review `lf_campaign` column previews the bucket
+  on dry runs. The three campaigns were `IsActive = false` when shipped (default member
+  status `Sent`).
 - **Stage 2 pool-account enrichment + same-company dedup** (PR #18): `resolve_pool_links`
   overwrite-enriches `Rohdaten Pool`-owned linked Accounts behind a kununu identity gate, and
   `convert_leads` clusters create-new leads by `lf_company_id` into one Account + N Contacts. See

@@ -70,6 +70,13 @@ _SOAP_CONVERT_MAX = 100
 # REST sObject Collections accepts at most 200 records per request.
 _COLLECTIONS_MAX = 200
 
+
+def _collection_error(row: dict) -> str:
+    """'CODE: message; …' for one failed sObject-Collections result row."""
+    return "; ".join(f"{e.get('statusCode', '')}: {e.get('message', '')}"
+                     for e in row.get("errors") or []) or "unknown error"
+
+
 # A /composite request carries at most 25 subrequests and — unlike /composite/batch,
 # which bills each subrequest — "the entire series of requests counts as a single call
 # toward your API limits". That is the whole point of query_many.
@@ -317,21 +324,48 @@ class SfClient:
             chunk = records[start:start + _COLLECTIONS_MAX]
             payload = {"allOrNone": False,
                        "records": [{"attributes": {"type": sobject}, **r} for r in chunk]}
-            rows = self._patch_collections(payload)
+            rows = self._send_collections("PATCH", payload)
             for rec, row in zip(chunk, rows):
                 if row.get("success"):
                     continue
-                msg = "; ".join(f"{e.get('statusCode', '')}: {e.get('message', '')}"
-                                for e in row.get("errors") or []) or "unknown error"
-                failures.append({"id": row.get("id") or rec["Id"], "error": msg})
+                failures.append({"id": row.get("id") or rec["Id"],
+                                 "error": _collection_error(row)})
         return {"processed": len(records), "failed": len(failures),
                 "failures": failures, "confirmed": True}
 
-    def _patch_collections(self, payload: dict) -> list[dict]:
-        """One sObject-Collections PATCH (1 API call for up to 200 records)."""
-        response = self._request("PATCH", self._data_path("/composite/sobjects"),
+    def create_records(self, sobject: str, records: list[dict]) -> dict:
+        """Insert records over REST sObject Collections (one POST per ≤200 records,
+        allOrNone=false) — the insert sibling of update_records, 1 API call per chunk.
+
+        Returns {processed, created, duplicates, failed, failures: [{record, error}]}.
+        Failed rows carry no id, so each failure names its request-order record. A row
+        rejected ONLY with DUPLICATE_VALUE (e.g. a lead that is already a member of the
+        campaign) counts under `duplicates`, not as a failure: the record exists.
+        """
+        result = {"processed": len(records), "created": 0, "duplicates": 0,
+                  "failed": 0, "failures": []}
+        for start in range(0, len(records), _COLLECTIONS_MAX):
+            chunk = records[start:start + _COLLECTIONS_MAX]
+            payload = {"allOrNone": False,
+                       "records": [{"attributes": {"type": sobject}, **r} for r in chunk]}
+            rows = self._send_collections("POST", payload)
+            for rec, row in zip(chunk, rows):
+                codes = {e.get("statusCode") for e in row.get("errors") or []}
+                if row.get("success"):
+                    result["created"] += 1
+                elif codes == {"DUPLICATE_VALUE"}:
+                    result["duplicates"] += 1
+                else:
+                    result["failures"].append({"record": rec,
+                                               "error": _collection_error(row)})
+        result["failed"] = len(result["failures"])
+        return result
+
+    def _send_collections(self, method: str, payload: dict) -> list[dict]:
+        """One sObject-Collections request (1 API call for up to 200 records)."""
+        response = self._request(method, self._data_path("/composite/sobjects"),
                                  body=json.dumps(payload))
-        self._raise_for_status(response, "sObject Collections PATCH")
+        self._raise_for_status(response, f"sObject Collections {method}")
         rows = json.loads(response.text)
         if not isinstance(rows, list):
             raise SfError(f"Unexpected sObject Collections response shape:\n"

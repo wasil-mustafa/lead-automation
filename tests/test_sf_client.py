@@ -135,6 +135,65 @@ def test_update_records_http_error_raises_with_body(monkeypatch):
         client.update_records("Lead", [{"Id": "00Q1", "Nope": "x"}])
 
 
+# --- create_records: REST sObject Collections POST ----------------------------
+
+def _fake_post(responder, capture):
+    def request(method, url, data=None, headers=None, timeout=None):
+        assert method == "POST"
+        body = json.loads(data)
+        capture.append({"url": url, "body": body})
+        return responder(body, headers)
+    return request
+
+
+def test_create_records_posts_composite_sobjects(monkeypatch):
+    client = SfClient("headless", api_version="66.0")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    calls: list[dict] = []
+    monkeypatch.setattr("leadauto.sf.client.requests.request", _fake_post(
+        lambda body, h: _FakeResponse(json.dumps(
+            [{"id": "00v1", "success": True, "errors": []}])), calls))
+    r = client.create_records("CampaignMember", [{"CampaignId": "701C", "LeadId": "00Q1"}])
+    assert r == {"processed": 1, "created": 1, "duplicates": 0, "failed": 0, "failures": []}
+    assert calls[0]["url"].endswith("/services/data/v66.0/composite/sobjects")
+    assert calls[0]["body"] == {"allOrNone": False, "records": [
+        {"attributes": {"type": "CampaignMember"}, "CampaignId": "701C", "LeadId": "00Q1"}]}
+
+
+def test_create_records_duplicate_is_benign_and_failures_name_their_record(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    monkeypatch.setattr("leadauto.sf.client.requests.request", _fake_post(
+        lambda body, h: _FakeResponse(json.dumps([
+            {"id": "00v1", "success": True, "errors": []},
+            {"id": None, "success": False, "errors": [
+                {"statusCode": "DUPLICATE_VALUE", "message": "Already a campaign member."}]},
+            {"id": None, "success": False, "errors": [
+                {"statusCode": "INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY",
+                 "message": "no access"}]},
+        ])), []))
+    recs = [{"CampaignId": "701C", "LeadId": f"00Q{i}"} for i in (1, 2, 3)]
+    r = client.create_records("CampaignMember", recs)
+    assert (r["created"], r["duplicates"], r["failed"]) == (1, 1, 1)
+    assert r["failures"] == [{
+        "record": recs[2],
+        "error": "INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY: no access"}]
+
+
+def test_create_records_chunks_at_200_and_empty_makes_no_call(monkeypatch):
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    calls: list[dict] = []
+    monkeypatch.setattr("leadauto.sf.client.requests.request", _fake_post(
+        lambda body, h: _FakeResponse(json.dumps(
+            [{"id": "x", "success": True, "errors": []} for _ in body["records"]])), calls))
+    assert client.create_records("CampaignMember", [])["processed"] == 0 and calls == []
+    r = client.create_records("CampaignMember",
+                              [{"CampaignId": "701C", "LeadId": f"00Q{i}"} for i in range(250)])
+    assert r["created"] == 250
+    assert [len(c["body"]["records"]) for c in calls] == [200, 50]
+
+
 # --- query routing: direct REST GET for short queries, direct Bulk API 2.0 for long ones -
 # Long IN(...) lists overflow the GET-URL header limit (HTTP 431), so they go through a
 # Bulk query job — since 2026-07-25 over direct HTTP rather than `sf data export bulk`,

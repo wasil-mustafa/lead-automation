@@ -134,6 +134,22 @@ pipeline:
   # is strictly fill-only-blank here. The one-off ZPE 2026 config sets it (46 of 109
   # badge-scan phones had that shape, Wasil 2026-09-18).
   repair_national_phone: false
+  # LeadFeeder-outcome campaign tagging (Wasil, 2026-10-19). On a NON-dry run a lead
+  # of a task type below becomes a CampaignMember of exactly one of these: no accepted
+  # LF match -> unmatched; WRITTEN BACK this run with KN_Employee__c and Street both
+  # filled afterwards -> matched_complete; written back with either blank ->
+  # matched_incomplete. An LF-matched lead that was not written back (out of the
+  # write-back scope, or a failed write-back) gets no campaign. Leads already in any of
+  # them are excluded from every later run (dry or live) by an anti-join on the lead
+  # read. Absent/empty = off. Never tags with LeadFeeder disabled.
+  lf_campaigns:
+    matched_complete: 701Mz00001aPCDdIAO     # EnrichLeadfedup
+    matched_incomplete: 701Mz00001aP9hDIAS   # EnrichLeadshortage
+    unmatched: 701Mz00001aKIjZIAW            # EnrichLeadmanually
+  # Task types (parser keys) that are tagged; absent = every enabled type.
+  # claimer = "Inbound Sales Task: New Claimed Profile" (Wasil, 2026-10-19).
+  lf_campaign_task_types:
+    - claimer
   # Phased go-live gate (Wasil, 2026-07-18): on a non-dry run ONLY leads matching this
   # scope are written back + staged for conversion; every other lead is left untouched
   # (humans keep working it) and gets a shadow prediction instead. A missing kununu

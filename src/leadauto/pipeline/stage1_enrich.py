@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..campaigns import campaign_members
 from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import enrich_leads
 from ..models import EnrichedLead, MatchResult
@@ -18,6 +19,7 @@ from ..live_scope import is_wide_match, live_scope_reason, writeback_reason
 from ..logging import get_logger
 from ..match import load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
+from ..sf.client import SfError
 from ..qa_artifact import write_auto_approved_csv, write_workbook
 from ..state import REPO_ROOT, State, advance, compute_since, load_state, save_state
 from ..writeback import lead_field_payload, write_back
@@ -37,6 +39,7 @@ class Stage1Result:
     failures: list = field(default_factory=list)
     qa_path: Path | None = None
     dry_run: bool = False
+    campaigns: dict = field(default_factory=dict)  # bucket counts + created/failed
 
 
 def run_stage1(
@@ -109,9 +112,18 @@ def run_stage1(
         written_ids = {e.extracted.lead_id for e in live_enriched} - failed
     new_state = advance(state, extraction.processed_tasks)
 
-    failures = wb.get("failures", [])
+    failures = list(wb.get("failures", []))
     if failures:
         log.warning("%d write-back failure(s) recorded in the QA Failures sheet", len(failures))
+
+    campaigns: dict = {}
+    if not dry_run and settings.lf_campaigns and results:
+        if lf_client is None:
+            # Without LeadFeeder every lead looks unmatched — tagging would mislabel the run.
+            log.warning("LF campaign tagging skipped: LeadFeeder is disabled for this run")
+        else:
+            campaigns = _tag_campaigns(sf_client, results, written_ids, failures,
+                                       settings, log)
 
     # Shadow predictions: on a dry run every lead is recorded (nothing was touched);
     # on a live run only leads the pipeline does NOT convert are — humans convert
@@ -139,6 +151,7 @@ def run_stage1(
             "since": since,
             "new_watermark": new_state.last_task_created,
             "dry_run": dry_run,
+            **campaigns,
         }
         qa_out = write_workbook(results, extraction.skipped, meta, qa_path,
                                 failures=failures, settings=settings)
@@ -148,7 +161,7 @@ def run_stage1(
     # Stage 2 without a human touching Approve?. Write-back failures are held back —
     # their lead fields would fail the conversion validation rules anyway.
     if not dry_run and not settings.review_gate:
-        failed_ids = {f.get("lead_id") for f in failures}
+        failed_ids = {f.get("lead_id") for f in failures if f.get("stage") != "campaign"}
         auto_csv = write_auto_approved_csv(results, review_dir, settings,
                                            exclude_lead_ids=failed_ids)
         if auto_csv:
@@ -162,4 +175,39 @@ def run_stage1(
     return Stage1Result(
         results=results, skipped=extraction.skipped, new_state=new_state,
         writeback=wb, failures=failures, qa_path=qa_out, dry_run=dry_run,
+        campaigns=campaigns,
     )
+
+
+def _tag_campaigns(sf_client, results, written_ids, failures, settings, log) -> dict:
+    """Add the taggable leads to their LeadFeeder-outcome campaign (campaigns.py):
+    one sObject-Collections POST per <=200 leads. Taggable = a tagged task type AND
+    either written back this run (`written_ids`, which already excludes write-back
+    failures) or unmatched in LeadFeeder; an untagged lead stays eligible for later
+    runs. Insert failures join `failures` (QA Failures sheet, stage 'campaign') but
+    never hold a lead back, and a failed request never aborts the run: the tag is
+    informational.
+    """
+    # only written leads' payloads decide a bucket; nobody else's is built
+    payloads = [lead_field_payload(r.enriched, settings)
+                if r.enriched.extracted.lead_id in written_ids else None for r in results]
+    rows, counts = campaign_members(results, payloads, written_ids, settings.lf_campaigns,
+                                    settings.lf_campaign_task_types)
+    try:
+        res = sf_client.create_records("CampaignMember", rows)
+    except SfError as exc:
+        log.warning("LF campaign tagging failed for all %d lead(s): %s", len(rows), exc)
+        res = {"created": 0, "duplicates": 0, "failed": len(rows),
+               "failures": [{"record": row, "error": str(exc)[:500]} for row in rows]}
+    for f in res.get("failures", []):
+        failures.append({"lead_id": f["record"].get("LeadId"), "stage": "campaign",
+                         "error": f["error"]})
+    summary = {**{f"campaign_{b}": n for b, n in sorted(counts.items())},
+               "campaign_created": res.get("created", 0),
+               "campaign_already_member": res.get("duplicates", 0),
+               "campaign_failed": res.get("failed", 0)}
+    log.info("LF campaign tagging: %s", ", ".join(f"{k}={v}" for k, v in summary.items()))
+    if res.get("failed"):
+        log.warning("%d campaign insert failure(s) recorded in the QA Failures sheet",
+                    res["failed"])
+    return summary
