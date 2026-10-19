@@ -13,6 +13,12 @@ gate: fail-closed, the lead stays with humans. Tunables live in config.yaml unde
 
 Widened 2026-09-28 (Wasil): config.yaml sets `max_kununu_score: null` (no score axis)
 and `allow_wide_match: true`; an admitted wide match is flagged in the QA artifact.
+
+Split 2026-10-19 (Wasil): write-back and conversion are separate scopes.
+`writeback_reason` gates the Lead write-back (`live_scope.task_types` +
+`writeback_decisions`); `live_scope_reason` gates conversion, which additionally needs
+the decision in `decisions` — so a lead can be enriched live and still left for a human
+to convert. `decisions: []` = enrich only, nothing is staged for Stage 2.
 """
 from __future__ import annotations
 
@@ -22,10 +28,10 @@ def is_wide_match(result) -> bool:
     return (result.enriched.match_pass or "primary") != "primary"
 
 
-def live_scope_reason(result, settings) -> str | None:
-    """None => the MatchResult is in live scope; else a short exclusion reason
-    (`decision_<d>` / `score_missing` / `score_<value>` / `match_pass_wide`) for the QA
-    artifact."""
+def writeback_reason(result, settings) -> str | None:
+    """None => a non-dry run writes this lead's enrichment back to Salesforce; else a
+    short exclusion reason (`match_pass_wide` / `task_type_<t>` / `decision_<d>` /
+    `score_missing` / `score_<value>`) for the QA artifact."""
     # A second-chance ("wide") LF match is a weaker claim than a primary one — it is the
     # candidate LF ranked 4th-20th — and every downstream write (firmographics onto the
     # Lead, a new Account on conversion) trusts the match completely. Prior art measured
@@ -35,7 +41,14 @@ def live_scope_reason(result, settings) -> str | None:
     # `pipeline.live_scope.allow_wide_match: true`.
     if not settings.live_allow_wide_match and is_wide_match(result):
         return "match_pass_wide"
-    if result.decision not in settings.live_decisions:
+    # None = no task-type axis (the key is absent): every enabled type may go live.
+    # A type that is enabled but not listed is still extracted, matched and
+    # shadow-predicted — it just stays dry while the others go live.
+    task_types = settings.live_task_types
+    task_type = result.enriched.extracted.task_type
+    if task_types is not None and task_type not in task_types:
+        return f"task_type_{task_type}"
+    if result.decision not in settings.live_writeback_decisions:
         return f"decision_{result.decision}"
     # `max_kununu_score: null` (Settings -> None) switches the score axis OFF for a run
     # whose population is NOT the No-Demand triage — e.g. the 2026-09 ZPE event leads,
@@ -49,4 +62,16 @@ def live_scope_reason(result, settings) -> str | None:
         return "score_missing"
     if score >= cap:
         return f"score_{score:g}"
+    return None
+
+
+def live_scope_reason(result, settings) -> str | None:
+    """None => the lead is written back AND staged for conversion; else the exclusion
+    reason. Conversion needs everything the write-back needs (the converted Account is
+    built from the written-back Lead) plus the decision in `live_scope.decisions`."""
+    reason = writeback_reason(result, settings)
+    if reason is not None:
+        return reason
+    if result.decision not in settings.live_decisions:
+        return f"decision_{result.decision}"
     return None

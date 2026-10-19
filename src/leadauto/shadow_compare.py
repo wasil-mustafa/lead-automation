@@ -233,7 +233,9 @@ def run_shadow_compare(sf_client, *, predictions_path=None, results_path=None,
         account = acct_by_id.get(lead.get("ConvertedAccountId"))
         contact = contact_by_id.get(lead.get("ConvertedContactId"))
         result, detail = classify_decision(pred, lead, account)
-        fields = compare_fields(pred, lead, account, contact)
+        # A written-back lead's payload is already on the Lead, so the human conversion
+        # copies it onto the Account/Contact: comparing would score us against ourselves.
+        fields = {} if pred.written_back else compare_fields(pred, lead, account, contact)
         record = {
             "lead_id": pred.lead_id, "resolved_at": now.isoformat(),
             "rule": pred.rule, "decision": pred.decision,

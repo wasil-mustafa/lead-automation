@@ -31,6 +31,7 @@ class Prediction:
     lf_company_name: str | None = None
     lf_website: str | None = None
     lf_match_pass: str = ""        # primary | wide (second-chance match) | "" (no match)
+    written_back: bool = False     # live run wrote the payload to the Lead: no field checks
     status: str = "pending"        # pending | resolved | expired
     resolved_at: str | None = None
     outcome: dict | None = None    # filled by shadow_compare
@@ -52,8 +53,12 @@ def save_predictions(preds: list[Prediction], path: str | Path | None = None) ->
 
 
 def record_predictions(results: list, payloads: list[dict], predicted_at: str,
-                       path: str | Path | None = None) -> int:
-    """Upsert one pending Prediction per MatchResult; non-pending records are kept."""
+                       path: str | Path | None = None, *,
+                       written_back_ids: set[str] | frozenset[str] = frozenset()) -> int:
+    """Upsert one pending Prediction per MatchResult; non-pending records are kept.
+    Leads in `written_back_ids` were enriched live, so their payload is already on the
+    Lead and the human conversion carries it — flagged, shadow-compare scores only the
+    account decision."""
     payload_by_lead = {p["Id"]: {k: v for k, v in p.items() if k != "Id"}
                        for p in payloads if p.get("Id")}
     existing = load_predictions(path)
@@ -73,6 +78,7 @@ def record_predictions(results: list, payloads: list[dict], predicted_at: str,
             lf_company_name=r.enriched.matched_name,
             lf_website=company.get("Website") or None,
             lf_match_pass=r.enriched.match_pass,
+            written_back=e.lead_id in written_back_ids,
         )
     save_predictions(keep + list(pending.values()), path)
     return len(pending)

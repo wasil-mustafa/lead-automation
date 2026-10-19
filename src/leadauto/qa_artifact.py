@@ -19,7 +19,7 @@ from openpyxl.utils import get_column_letter
 
 from .convert.preflight import check_lead
 from .models import CONTACT_SKIP_NOT_NEEDED
-from .live_scope import is_wide_match, live_scope_reason
+from .live_scope import is_wide_match, live_scope_reason, writeback_reason
 from .textnorm import country_iso2, normalize_city, normalize_postal
 from .match import RULE_DECISIONS
 from .writeback import lead_field_payload, lf_contact_email
@@ -36,7 +36,7 @@ REVIEW_COLUMNS = [
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
     "convert_blockers",
-    "live_scope", "decision", "Approve?",
+    "live_writeback", "live_scope", "decision", "Approve?",
 ]
 # The "Enriching" sheet: Salesforce field API names, in the order a reviewer reads them.
 # One row per Lead the write-back would touch, carrying EXACTLY the values
@@ -164,15 +164,18 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     # reason (see live_scope.py). Blank when no settings were passed (legacy callers).
     # A second-chance ("wide") match admitted by `allow_wide_match` is flagged
     # `yes_wide_match`, so a reviewer can tell the weaker claim from a primary one.
-    live = ""
+    # live_writeback is the same verdict for the narrower-or-equal write-back gate:
+    # "yes" with live_scope "decision_link" = enriched live, converted by a human.
+    live = live_wb = ""
     if settings is not None:
-        live = live_scope_reason(result, settings) or (
-            "yes_wide_match" if is_wide_match(result) else "yes")
+        yes = "yes_wide_match" if is_wide_match(result) else "yes"
+        live = live_scope_reason(result, settings) or yes
+        live_wb = writeback_reason(result, settings) or yes
     return {
         "lead_id": e.lead_id, "task_id": e.task_id, "task_type": e.task_type,
         "subject": e.subject,
         "company": e.best_company, "kununu_url": e.kununu_url, "region": e.region,
-        "kununu_score": enr.kununu_score, "live_scope": live,
+        "kununu_score": enr.kununu_score, "live_scope": live, "live_writeback": live_wb,
         "contact_name": e.contact_name, "contact_email": e.contact_email or e.lead_email,
         "lf_matched": _yn(enr.matched), "lf_matched_name": enr.matched_name,
         "lf_match_score": enr.match_score, "lf_name_agreement": enr.name_agreement,
@@ -306,6 +309,8 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
         ["skipped", len(skipped)],
     ]
     if settings is not None:
+        summary.append(["live_writeback_pass",
+                        sum(1 for r in results if writeback_reason(r, settings) is None)])
         live = [r for r in results if live_scope_reason(r, settings) is None]
         summary.append(["live_scope_pass", len(live)])
         summary.append(["live_scope_wide_match", sum(1 for r in live if is_wide_match(r))])

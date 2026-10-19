@@ -99,6 +99,15 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `pipeline.include_enriched_leads: true` (no already-enriched marker skip — the
   `lead_statuses: [New]` filter already keeps human-worked leads out). Owner (Rohdaten
   Pool) and the no-score-passes behaviour are deliberate (Wasil, same day).
+  **Split + enrich-only 2026-10-19 (Wasil):** write-back and conversion are now separate
+  gates (`live_scope.writeback_reason` vs `live_scope_reason`). Config: `task_types:
+  [claimer]` (ebp_trial stays dry — predicted, never written), `writeback_decisions:
+  [create_new, link, review]` (every LF-matched claimer is enriched; never `skip`) and
+  `decisions: []` (nothing auto-converts ⇒ no auto CSV ⇒ no chained Stage 2; humans
+  convert). QA gained a `live_writeback` column + Summary `live_writeback_pass`. A
+  written-back lead still gets a shadow prediction flagged `written_back`, and
+  shadow-compare scores only its decision (its fields would match our own write-back).
+  Absent keys keep the old behaviour (write-back scope = `decisions`, every task type).
 - **Write-back field spec (Wasil, 2026-07-10, `writeback.py`):** from the Task ONLY kununu URL
   (= the processed marker, replacing `KN_KununuProfileName__c` — reader accepts either), Region
   (derived from the URL's country slug: `/de/`→Germany, `/at/`→Austria, `/ch/`→Switzerland) and
@@ -514,8 +523,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    committed, live-scope gate shipped, first automated E2E run converted 3/3. **The one
    remaining move to full automation:** change the cron-job.org payload to
    `{"ref":"master","inputs":{"dry_run":"false"}}` so scheduled runs go live (they currently
-   stay dry — dispatch with dry_run unchecked for a manual live run). Widening the scope
-   (add `link` to `live_scope.decisions`, raise `max_kununu_score`) is a config commit,
+   stay dry — dispatch with dry_run unchecked for a manual live run). Since 2026-10-19 a
+   live run is enrich-only for claimer (see the Split bullet), so flipping the payload
+   writes back claimer leads and converts nothing. Widening the scope
+   (add `ebp_trial` to `live_scope.task_types`, decisions back into `live_scope.decisions`
+   to auto-convert) is a config commit,
    informed by shadow accuracy (item 4). A required-reviewers Environment is NOT possible
    (needs a paid plan on private repos, verified 2026-07-10).
 2. **Port `lf_name_dropped` from `Contact Presence Check`** — the highest-value LF-matching

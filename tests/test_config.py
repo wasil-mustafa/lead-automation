@@ -54,8 +54,20 @@ def test_scheduled_scope_from_config_yaml():
     assert s.lead_statuses == ["New"]
     assert s.include_enriched_leads is True
     assert s.live_max_kununu_score is None
-    assert s.live_decisions == ["create_new"]
     assert s.live_allow_wide_match is True
+    # 2026-10-19 (Wasil): enrich-only go-live for claimer — every LF-matched decision is
+    # written back, nothing converts, ebp_trial stays dry.
+    assert s.live_decisions == []
+    assert s.live_writeback_decisions == ["create_new", "link", "review"]
+    assert s.live_task_types == ["claimer"]
+
+
+def test_live_scope_split_defaults_preserve_go_live_behaviour():
+    # Absent keys: write-back scope == conversion scope, every task type.
+    s = Settings(raw={"pipeline": {"live_scope": {"decisions": ["create_new"]}}},
+                 leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.live_writeback_decisions == ["create_new"]
+    assert s.live_task_types is None
 
 
 def test_lead_statuses_absent_means_no_filter_and_values_are_stringified():

@@ -6,19 +6,25 @@ for MatchResult and Settings.
 """
 from types import SimpleNamespace
 
-from leadauto.live_scope import live_scope_reason
+from leadauto.live_scope import live_scope_reason, writeback_reason
 
 
-def _settings(decisions=("create_new",), max_score=3.0, allow_wide=False):
+def _settings(decisions=("create_new",), max_score=3.0, allow_wide=False,
+              writeback_decisions=None, task_types=None):
+    # writeback_decisions=None mirrors Settings: an absent key falls back to decisions.
+    wb = decisions if writeback_decisions is None else writeback_decisions
     return SimpleNamespace(live_decisions=list(decisions),
+                           live_writeback_decisions=list(wb),
+                           live_task_types=None if task_types is None else list(task_types),
                            live_max_kununu_score=max_score,
                            live_allow_wide_match=allow_wide)
 
 
-def _result(decision="create_new", score=2.5, match_pass="primary"):
+def _result(decision="create_new", score=2.5, match_pass="primary", task_type="claimer"):
     return SimpleNamespace(decision=decision,
-                           enriched=SimpleNamespace(kununu_score=score,
-                                                    match_pass=match_pass))
+                           enriched=SimpleNamespace(
+                               kununu_score=score, match_pass=match_pass,
+                               extracted=SimpleNamespace(task_type=task_type)))
 
 
 def test_in_scope_returns_none():
@@ -103,3 +109,48 @@ def test_null_cap_switches_the_score_axis_off():
     # ...but the decision gate and the wide-match hold are untouched.
     assert live_scope_reason(_result(decision="review", score=None), s) == "decision_review"
     assert live_scope_reason(_result(score=None, match_pass="wide"), s) == "match_pass_wide"
+
+
+# --- write-back scope vs conversion scope (2026-10-19) ------------------------------
+# Enrich-only go-live: claimer leads of every LF-matched decision are written back,
+# nothing is converted, ebp_trial stays dry.
+
+def _enrich_only():
+    return _settings(decisions=(), max_score=None, allow_wide=True,
+                     writeback_decisions=("create_new", "link", "review"),
+                     task_types=("claimer",))
+
+
+def test_enrich_only_writes_back_every_matched_claimer_decision():
+    s = _enrich_only()
+    for d in ("create_new", "link", "review"):
+        assert writeback_reason(_result(decision=d), s) is None
+        # ...and converts none of them.
+        assert live_scope_reason(_result(decision=d), s) == f"decision_{d}"
+
+
+def test_skip_is_never_written_back():
+    assert writeback_reason(_result(decision="skip"), _enrich_only()) == "decision_skip"
+
+
+def test_unlisted_task_type_stays_dry():
+    s = _enrich_only()
+    assert writeback_reason(_result(task_type="ebp_trial"), s) == "task_type_ebp_trial"
+    assert live_scope_reason(_result(task_type="ebp_trial"), s) == "task_type_ebp_trial"
+
+
+def test_absent_task_types_means_every_type():
+    assert writeback_reason(_result(task_type="ebp_trial"), _settings()) is None
+
+
+def test_absent_writeback_decisions_falls_back_to_conversion_scope():
+    # The go-live behaviour: write-back scope == conversion scope.
+    s = _settings()
+    assert writeback_reason(_result(decision="create_new"), s) is None
+    assert writeback_reason(_result(decision="link"), s) == "decision_link"
+
+
+def test_conversion_still_requires_the_write_back_gate():
+    # A decision in the conversion scope but outside the write-back scope never converts.
+    s = _settings(decisions=("create_new",), writeback_decisions=("link",))
+    assert live_scope_reason(_result(decision="create_new"), s) == "decision_create_new"

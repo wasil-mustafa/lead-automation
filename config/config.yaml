@@ -143,8 +143,23 @@ pipeline:
     # its kununu score, and a missing score no longer fails closed. Was 3.0 (strict <,
     # the human "No Demand" line) from the 2026-07-18 go-live.
     max_kununu_score: null
-    decisions:               # widen the rollout here (e.g. add link); never skip/review
+    # CONVERSION scope: decisions a live run stages for Stage 2. Empty since 2026-10-19
+    # (Wasil): live runs enrich only — nothing is auto-converted, no Stage 2 chain;
+    # humans keep converting. Was [create_new] from the 2026-07-18 go-live. Never
+    # list skip/review here.
+    decisions: []
+    # WRITE-BACK scope (2026-10-19, Wasil): every LF-matched decision gets the live
+    # Lead write-back — the account decision only matters for conversion. Never skip
+    # (no accepted LF match). Absent = same as `decisions`.
+    writeback_decisions:
       - create_new
+      - link
+      - review
+    # Task types a live run may write back; an enabled type not listed stays dry
+    # (shadow prediction only). Absent = every enabled type. 2026-10-19 (Wasil):
+    # claimer live, ebp_trial still dry.
+    task_types:
+      - claimer
     # true admits second-chance ("wide") LF matches to live write-back + conversion.
     # Default false: they are predicted and shadow-scored but never written, until the
     # pass's accuracy is measured here. See live_scope.py.

@@ -14,7 +14,7 @@ from pathlib import Path
 from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import enrich_leads
 from ..models import EnrichedLead, MatchResult
-from ..live_scope import is_wide_match, live_scope_reason
+from ..live_scope import is_wide_match, live_scope_reason, writeback_reason
 from ..logging import get_logger
 from ..match import load_existing_records, match_lead
 from ..predictions import DEFAULT_PREDICTIONS_PATH, record_predictions
@@ -82,23 +82,31 @@ def run_stage1(
         existing = load_existing_records(sf_client, batch, settings, logger=log)
         results += [match_lead(e, existing, settings) for e in batch]
 
-    # Live-scope gate (phased go-live): on a non-dry run only in-scope leads (see
-    # live_scope.py) are written back; everything else stays untouched in Salesforce.
-    # Dry runs keep writing back nothing but computing every payload (predictions
+    # Live-scope gates (phased go-live, see live_scope.py): on a non-dry run only leads
+    # passing the WRITE-BACK gate are written; the conversion gate (`reasons`) is
+    # narrower and decides what is staged for Stage 2. Everything else stays untouched
+    # in Salesforce. Dry runs write nothing but compute every payload (predictions
     # need the field values).
     reasons = [live_scope_reason(r, settings) for r in results]
+    wb_reasons = [writeback_reason(r, settings) for r in results]
+    written_ids: set[str] = set()
     if dry_run:
         wb = write_back(sf_client, enriched, dry_run=True, logger=log, settings=settings)
     else:
-        live_enriched = [r.enriched for r, reason in zip(results, reasons) if reason is None]
-        log.info("Live scope: %d of %d lead(s) pass the gate", len(live_enriched), len(results))
-        wide = sum(1 for r, reason in zip(results, reasons)
+        live_enriched = [r.enriched for r, reason in zip(results, wb_reasons)
+                         if reason is None]
+        log.info("Live scope: %d of %d lead(s) pass the write-back gate, %d the "
+                 "conversion gate", len(live_enriched), len(results),
+                 sum(1 for reason in reasons if reason is None))
+        wide = sum(1 for r, reason in zip(results, wb_reasons)
                    if reason is None and is_wide_match(r))
         if wide:
             log.warning("Live scope: %d of those rest on a second-chance (wide) LF match",
                         wide)
         wb = write_back(sf_client, live_enriched, dry_run=False, logger=log,
                         settings=settings)
+        failed = {f.get("lead_id") for f in wb.get("failures", [])}
+        written_ids = {e.extracted.lead_id for e in live_enriched} - failed
     new_state = advance(state, extraction.processed_tasks)
 
     failures = wb.get("failures", [])
@@ -106,9 +114,12 @@ def run_stage1(
         log.warning("%d write-back failure(s) recorded in the QA Failures sheet", len(failures))
 
     # Shadow predictions: on a dry run every lead is recorded (nothing was touched);
-    # on a live run only out-of-scope leads are — humans convert those, so they stay
-    # valid shadow evidence, while live-scope leads are converted by the pipeline
-    # itself and must never be scored as human decisions.
+    # on a live run only leads the pipeline does NOT convert are — humans convert
+    # those, so they stay valid shadow evidence, while conversion-scope leads are
+    # converted by the pipeline itself and must never be scored as human decisions.
+    # A lead we wrote back but left for a human still scores its account decision;
+    # `written_ids` marks it so shadow-compare skips its field checks, which would
+    # only re-read our own write-back off the converted records.
     if predictions_path is not None and settings.record_predictions:
         if dry_run:
             shadow_results, shadow_payloads = results, wb.get("payloads", [])
@@ -117,7 +128,8 @@ def run_stage1(
             shadow_payloads = [lead_field_payload(r.enriched, settings) for r in shadow_results]
         if shadow_results:
             stamp = (now or datetime.now(timezone.utc)).isoformat()
-            n = record_predictions(shadow_results, shadow_payloads, stamp, predictions_path)
+            n = record_predictions(shadow_results, shadow_payloads, stamp, predictions_path,
+                                   written_back_ids=written_ids)
             log.info("Recorded %d pending prediction(s) -> %s", n, predictions_path)
 
     qa_out: Path | None = None
