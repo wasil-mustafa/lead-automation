@@ -836,9 +836,26 @@ def test_stage1_matched_lead_outside_writeback_scope_is_not_tagged(tmp_path, mon
     assert not any(k.startswith("campaign_matched") for k in res.campaigns)
 
 
+@pytest.mark.parametrize("matched,company,bucket", [
+    (True, {"Street": "Hauptstr. 1", "Employee_Count": 120}, "matched_complete"),
+    (True, {"Street": "Hauptstr. 1"}, "matched_incomplete"),
+    (False, None, "unmatched"),
+])
+def test_stage1_ebp_trial_leads_get_the_same_campaigns(tmp_path, monkeypatch,
+                                                       matched, company, bucket):
+    # 2026-10-20 (Wasil): ebp_trial is tagged exactly like claimer.
+    _enrich_with(monkeypatch, matched=matched, company=company, task_type="ebp_trial")
+    sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
+    res = _live(sf, tmp_path)
+    assert sf.creates == [("CampaignMember",
+                           [{"CampaignId": CAMPAIGNS[bucket], "LeadId": "00Q1"}])]
+    assert res.campaigns[f"campaign_{bucket}"] == 1
+
+
 @pytest.mark.parametrize("matched", [True, False])
-def test_stage1_non_claimer_leads_are_never_tagged(tmp_path, monkeypatch, matched):
-    _enrich_with(monkeypatch, matched=matched, task_type="ebp_trial")
+def test_stage1_untagged_task_type_is_never_tagged(tmp_path, monkeypatch, matched):
+    # 'event' is not in lf_campaign_task_types, so even an unmatched lead gets none.
+    _enrich_with(monkeypatch, matched=matched, task_type="event")
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
     _live(sf, tmp_path)
     assert sf.creates in ([], [("CampaignMember", [])])

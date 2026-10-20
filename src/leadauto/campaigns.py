@@ -1,7 +1,8 @@
 """LeadFeeder-outcome campaign tagging (Wasil, 2026-10-19).
 
 On a NON-dry Stage 1 run a lead of a tagged task type (config
-`pipeline.lf_campaign_task_types`, `claimer` = "New Claimed Profile") becomes a
+`pipeline.lf_campaign_task_types`: `claimer` = "New Claimed Profile", and since
+2026-10-20 `ebp_trial` = "EBP Trial") becomes a
 CampaignMember of exactly one of three campaigns (config `pipeline.lf_campaigns`), so
 sales can work the leads by how LeadFeeder did:
 
