@@ -4,11 +4,13 @@ KN_Employee__c / Street decide complete vs incomplete."""
 import pytest
 
 from leadauto.campaigns import (
+    DUPLICATE_DETECTED,
     MATCHED_COMPLETE,
     MATCHED_INCOMPLETE,
     UNMATCHED,
     campaign_bucket,
     campaign_members,
+    duplicate_failure_ids,
 )
 from leadauto.models import EnrichedLead, ExtractedLead, MatchResult
 
@@ -75,6 +77,36 @@ def test_members_one_row_per_lead_with_counts():
                     {"CampaignId": "701C", "LeadId": "00Q2"},
                     {"CampaignId": "701I", "LeadId": "00Q3"}]
     assert counts == {UNMATCHED: 1, MATCHED_COMPLETE: 1, MATCHED_INCOMPLETE: 1}
+
+
+def test_duplicate_detected_failure_goes_to_the_unmatched_campaign():
+    # Wasil, 2026-10-20: a matched lead whose write-back a duplicate rule blocked is not
+    # left for a rerun (it would be blocked again) but handed to "EnrichLeadmanually".
+    assert campaign_bucket(_result(), FULL, written=False,
+                           duplicate=True) == DUPLICATE_DETECTED
+    rows, counts = campaign_members([_result("00Q1"), _result("00Q2")], [None, None], [],
+                                    CAMPAIGNS, task_types=["claimer"],
+                                    duplicate_ids=["00Q1"])
+    assert rows == [{"CampaignId": "701U", "LeadId": "00Q1"}]   # 00Q2: other failure
+    assert counts == {DUPLICATE_DETECTED: 1}
+
+
+def test_duplicate_detected_still_respects_the_task_type_axis():
+    r = _result(task_type="ebp_trial")
+    assert campaign_bucket(r, None, False, task_types=["claimer"], duplicate=True) is None
+
+
+def test_duplicate_failure_ids_reads_only_writeback_duplicate_errors():
+    failures = [
+        {"lead_id": "00Q1", "stage": "writeback",
+         "error": "DUPLICATES_DETECTED: Use one of these records?"},
+        {"lead_id": "00Q2", "stage": "writeback", "error": "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST: x"},
+        {"lead_id": "00Q3", "stage": "campaign", "error": "DUPLICATES_DETECTED: x"},
+        {"lead_id": "00Q4", "stage": "writeback",
+         "error": "FIELD_CUSTOM_VALIDATION_EXCEPTION: a; DUPLICATES_DETECTED: b"},
+        {"lead_id": None, "stage": "writeback", "error": "DUPLICATES_DETECTED: x"},
+    ]
+    assert duplicate_failure_ids(failures) == {"00Q1", "00Q4"}
 
 
 def test_bucket_without_a_campaign_id_is_not_tagged():

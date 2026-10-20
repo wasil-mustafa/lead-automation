@@ -164,7 +164,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   back with either blank → `matched_incomplete` 701Mz00001aP9hDIAS "EnrichLeadshortage"
   (Wasil, 2026-10-19). An LF-matched lead NOT written back (out of write-back scope,
   failed write-back) gets no campaign, so tagging — a permanent exclusion — never
-  swallows a lead a wider scope could still write. Never tags with LeadFeeder disabled
+  swallows a lead a wider scope could still write — **except a write-back that failed
+  with `DUPLICATES_DETECTED`** (Wasil, 2026-10-20): a duplicate rule blocks it on every
+  rerun, so it goes to the `unmatched` "EnrichLeadmanually" campaign (counted as
+  `campaign_duplicate_detected` in the Summary; still held out of the auto-approved
+  CSV). Never tags with LeadFeeder disabled
   (everything would look unmatched). Insert =
   `SfClient.create_records` (sObject Collections POST, +1 call per ≤200 leads;
   `DUPLICATE_VALUE` counts as already-member); failures land on the QA Failures sheet
