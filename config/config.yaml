@@ -147,9 +147,11 @@ pipeline:
     matched_incomplete: 701Mz00001aP9hDIAS   # EnrichLeadshortage
     unmatched: 701Mz00001aKIjZIAW            # EnrichLeadmanually
   # Task types (parser keys) that are tagged; absent = every enabled type.
-  # claimer = "Inbound Sales Task: New Claimed Profile" (Wasil, 2026-10-19).
+  # claimer = "Inbound Sales Task: New Claimed Profile" (Wasil, 2026-10-19);
+  # ebp_trial = "Inbound Sales Task: EBP Trial", same campaigns (Wasil, 2026-10-20).
   lf_campaign_task_types:
     - claimer
+    - ebp_trial
   # Phased go-live gate (Wasil, 2026-07-18): on a non-dry run ONLY leads matching this
   # scope are written back + staged for conversion; every other lead is left untouched
   # (humans keep working it) and gets a shadow prediction instead. A missing kununu

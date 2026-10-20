@@ -88,6 +88,6 @@ def test_lf_campaigns_drops_blanks_and_defaults_off():
 
 
 def test_lf_campaign_task_types_from_config_and_absent_means_all():
-    assert Settings.load().lf_campaign_task_types == ["claimer"]
+    assert Settings.load().lf_campaign_task_types == ["claimer", "ebp_trial"]
     assert Settings(raw={"pipeline": {}}, leadfeeder_api_key=None,
                     sf_auth_url=None).lf_campaign_task_types is None

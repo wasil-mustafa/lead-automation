@@ -122,7 +122,8 @@ class Settings:
     @property
     def lf_campaign_task_types(self) -> list[str] | None:
         """Parser keys whose leads get an LF-outcome campaign; None (key absent) =
-        every enabled type. `claimer` only since 2026-10-19 (Wasil)."""
+        every enabled type. `claimer` since 2026-10-19, `ebp_trial` too since
+        2026-10-20 (Wasil)."""
         types = (self.raw.get("pipeline") or {}).get("lf_campaign_task_types")
         return None if types is None else [str(t) for t in types]
 
