@@ -643,8 +643,8 @@ def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
 
 
 # --- Stage 1: enrich-only go-live for claimer (2026-10-19) ----------------------
-# The scheduled config writes back every LF-matched claimer lead, converts nothing and
-# keeps ebp_trial dry.
+# The scheduled config writes back every LF-matched claimer lead, converts nothing.
+# ebp_trial was kept dry until 2026-10-20, when it joined the write-back scope.
 from leadauto.predictions import load_predictions  # noqa: E402
 
 def _live_run(tmp_path, monkeypatch, task_type="claimer"):
@@ -680,13 +680,15 @@ def test_enrich_only_claimer_is_written_back_but_not_staged(tmp_path, monkeypatc
     assert pred[0].written_back is True
 
 
-def test_enrich_only_leaves_ebp_trial_dry(tmp_path, monkeypatch):
+def test_enrich_only_writes_back_ebp_trial_too(tmp_path, monkeypatch):
+    # 2026-10-20 (Wasil): ebp_trial joined the live write-back scope. An unlisted type
+    # staying dry is pinned in test_live_scope.test_unlisted_task_type_stays_dry.
     sf, res, review_dir, preds = _live_run(tmp_path, monkeypatch, task_type="ebp_trial")
-    assert sf.updates == []
+    assert [r["Id"] for _, recs in sf.updates for r in recs] == ["00Q000000000001"]
     assert not review_dir.exists() or not list(review_dir.glob("approved_*"))
     pred = load_predictions(preds)
     assert [q.lead_id for q in pred] == ["00Q000000000001"]
-    assert pred[0].written_back is False
+    assert pred[0].written_back is True
 
 
 # --- LF-outcome campaign tagging (campaigns.py, Wasil 2026-10-19) -------------

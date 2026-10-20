@@ -106,7 +106,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Pool) and the no-score-passes behaviour are deliberate (Wasil, same day).
   **Split + enrich-only 2026-10-19 (Wasil):** write-back and conversion are now separate
   gates (`live_scope.writeback_reason` vs `live_scope_reason`). Config: `task_types:
-  [claimer]` (ebp_trial stays dry — predicted, never written), `writeback_decisions:
+  [claimer]` (ebp_trial stayed dry until **2026-10-20, when Wasil added it to
+  `task_types` — both types are now enriched live**; campaign tagging is still
+  `lf_campaign_task_types: [claimer]`), `writeback_decisions:
   [create_new, link, review]` (every LF-matched claimer is enriched; never `skip`) and
   `decisions: []` (nothing auto-converts ⇒ no auto CSV ⇒ no chained Stage 2; humans
   convert). QA gained a `live_writeback` column + Summary `live_writeback_pass`. A
@@ -553,9 +555,9 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 1. **Phased go-live: DONE 2026-07-18** (see Status GO-LIVE bullet) — `review_gate: false`
    committed, live-scope gate shipped, first automated E2E run converted 3/3. **Scheduled
    runs went live 2026-10-19** (cron-job.org payload now sends `dry_run: "false"`),
-   enrich-only for claimer (see the Split bullet): claimer leads are written back, nothing
-   converts. Watch the first live runs' QA `live_writeback` column. Widening the scope
-   (add `ebp_trial` to `live_scope.task_types`, decisions back into `live_scope.decisions`
+   enrich-only (see the Split bullet): claimer — and since 2026-10-20 ebp_trial — leads
+   are written back, nothing converts. Watch the first live runs' QA `live_writeback`
+   column. Widening the scope (decisions back into `live_scope.decisions`
    to auto-convert) is a config commit,
    informed by shadow accuracy (item 4). A required-reviewers Environment is NOT possible
    (needs a paid plan on private repos, verified 2026-07-10).

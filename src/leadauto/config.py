@@ -281,7 +281,7 @@ class Settings:
         """Parser keys (claimer | ebp_trial | ...) a non-dry run may write back. None
         (key absent) = every enabled type. An enabled type not listed here stays dry:
         extracted, matched and shadow-predicted, never written (Wasil, 2026-10-19:
-        claimer live, ebp_trial still dry)."""
+        claimer live; 2026-10-20: ebp_trial live too)."""
         scope = self.raw["pipeline"].get("live_scope") or {}
         if scope.get("task_types") is None:
             return None
