@@ -173,9 +173,10 @@ pipeline:
       - review
     # Task types a live run may write back; an enabled type not listed stays dry
     # (shadow prediction only). Absent = every enabled type. 2026-10-19 (Wasil):
-    # claimer live, ebp_trial still dry.
+    # claimer live, ebp_trial still dry. 2026-10-20 (Wasil): ebp_trial enriched live too.
     task_types:
       - claimer
+      - ebp_trial
     # true admits second-chance ("wide") LF matches to live write-back + conversion.
     # Default false: they are predicted and shadow-scored but never written, until the
     # pass's accuracy is measured here. See live_scope.py.

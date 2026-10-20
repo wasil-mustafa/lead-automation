@@ -56,10 +56,10 @@ def test_scheduled_scope_from_config_yaml():
     assert s.live_max_kununu_score is None
     assert s.live_allow_wide_match is True
     # 2026-10-19 (Wasil): enrich-only go-live for claimer — every LF-matched decision is
-    # written back, nothing converts, ebp_trial stays dry.
+    # written back, nothing converts. 2026-10-20 (Wasil): ebp_trial is enriched too.
     assert s.live_decisions == []
     assert s.live_writeback_decisions == ["create_new", "link", "review"]
-    assert s.live_task_types == ["claimer"]
+    assert s.live_task_types == ["claimer", "ebp_trial"]
 
 
 def test_live_scope_split_defaults_preserve_go_live_behaviour():
