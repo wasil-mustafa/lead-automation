@@ -167,9 +167,11 @@ leads sit unaffected until then. Population counts = all 25,040 unconverted queu
 
 Fire at conversion (must be satisfied by write-back first):
 - **`KN_DbIdValidation` — EXACTLY ONE of `KN_DBID__c` / `KN_NoOwnDBID__c=true`** (XOR: both set
-  is also an error). 71% of leads currently violate it. Write-back now sets `KN_NoOwnDBID__c=true`
-  whenever the Lead's `KN_DBID__c` is blank (closed 2026-07-05; `KN_DBID__c` itself is
-  D&B-integration-owned and never written).
+  is also an error). 71% of leads violated it on 2026-07-05. Write-back set
+  `KN_NoOwnDBID__c=true` on every DBID-less lead from 2026-07-05 until **2026-10-20, when Wasil
+  stopped it: the pipeline now leaves `KN_NoOwnDBID__c` alone**, so a lead with neither field
+  is dropped by preflight `dbid_xor` (`KN_DBID__c` itself is D&B-integration-owned and never
+  written). Rule re-checked active on Lead 2026-10-20.
 - **`KN_EmployeeCategoryMandatory` — `KN_Employee__c` required.** 97% currently blank; write-back
   fills it from LF `Employee_Count`, falling back to the claimer task's parsed company size
   (closed 2026-07-05; leads with neither source are caught by preflight).
@@ -202,7 +204,7 @@ NOT enforced by any rule (layout-only, does not block API conversion): `KN_Regio
 The Lead→Contact field mapping works (incl. the `KN_LinkedInProfileLink__c` question —
 confirmed by Wasil 2026-07-10; note write-back now only ever puts *contact* LinkedIn URLs
 there, per the db76d3e spec).
-Stage-1 write-back now fills KN_NoOwnDBID__c / address (CountryCode) / KN_Employee__c fallback /
+Stage-1 write-back now fills address (CountryCode) / KN_Employee__c fallback /
 FirstName / Phone (fill-only-blank; spec docs/superpowers/specs/2026-07-05-writeback-gaps-and-stage2-preflight-design.md),
 and the QA Review sheet previews these checks in convert_blockers.
 

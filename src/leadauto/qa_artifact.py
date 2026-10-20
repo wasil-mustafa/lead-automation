@@ -328,7 +328,8 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
                                                   if d["lf_campaign"] == b)]
                            for b in BUCKETS)
             # live runs only: what the CampaignMember insert actually did
-            summary.extend([k, meta[k]] for k in ("campaign_created",
+            summary.extend([k, meta[k]] for k in ("campaign_duplicate_detected",
+                                                  "campaign_created",
                                                   "campaign_already_member",
                                                   "campaign_failed") if k in meta)
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)

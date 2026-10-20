@@ -201,8 +201,9 @@ def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
     _fill(payload, "Title", e.lead_title, e.position or contact.get("position"))
 
     # conversion requirements (org validation rules; all fill-only-blank)
-    if is_blank(e.lead_dbid) and not e.lead_no_own_dbid:
-        payload["KN_NoOwnDBID__c"] = "true"  # KN_DbIdValidation XOR
+    # KN_NoOwnDBID__c is deliberately NOT written (Wasil, 2026-10-20): it used to be ticked
+    # for every DBID-less lead to satisfy KN_DbIdValidation; now it is left alone, so such a
+    # lead fails Stage 2 preflight `dbid_xor` until a human or D&B resolves it.
     # address: always LeadFeeder (spec 2026-07-10, pinned by TestAddressFill). The event
     # parser stores the badge address in the parsed fields only; it is deliberately NOT
     # used here — changing that means changing the spec and its test together.

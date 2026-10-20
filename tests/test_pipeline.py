@@ -795,6 +795,32 @@ def test_stage1_live_writeback_failure_is_left_untagged(tmp_path, monkeypatch):
     assert sf.creates in ([], [("CampaignMember", [])])
 
 
+def test_stage1_duplicate_detected_writeback_failure_goes_to_unmatched_campaign(
+        tmp_path, monkeypatch):
+    # Wasil, 2026-10-20: a duplicate rule blocks the write-back on every rerun, so the
+    # lead is handed to "EnrichLeadmanually" instead of staying re-processable. It is
+    # still a write-back failure: held out of the auto-approved conversion CSV.
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
+
+    class DuplicateSf(FakeSfClient):
+        def update_records(self, sobject, records):
+            return {"processed": 0, "failed": len(records),
+                    "failures": [{"id": r["Id"],
+                                  "error": "DUPLICATES_DETECTED: Use one of these records?"}
+                                 for r in records]}
+
+    sf = DuplicateSf(tasks=[_task(who="00Q000000000001")],
+                     leads=[_lead("00Q000000000001")])
+    res = _live(sf, tmp_path, settings=_no_gate_settings())
+    assert sf.creates == [("CampaignMember", [{"CampaignId": CAMPAIGNS["unmatched"],
+                                               "LeadId": "00Q000000000001"}])]
+    assert res.campaigns["campaign_duplicate_detected"] == 1
+    summary = {r[0].value: r[1].value
+               for r in load_workbook(tmp_path / "qa.xlsx")["Summary"].iter_rows(min_row=2)}
+    assert summary["campaign_duplicate_detected"] == 1
+    assert list((tmp_path / "review").glob("approved_*auto*.csv")) == []
+
+
 def test_stage1_matched_lead_outside_writeback_scope_is_not_tagged(tmp_path, monkeypatch):
     # Matched but not written back: no campaign, so a later, wider scope can still
     # write it (tagging is a permanent exclusion).

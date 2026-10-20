@@ -128,8 +128,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (company LinkedIn/email never), `Phone` = direct-dial-typed number first (LF types phones;
   `direct` > `office`/`landline`; NEVER mobile) → LF company phone; a found contact without a
   direct dial triggers the async **find-contact-data job** (`client.find_contact_data`, 1 credit
-  only when data is actually found; tunables `leadfeeder.find_*`). Plus NoOwnDBID tick +
-  FirstName (nice-to-have). **Email from LeadFeeder (2026-09-18, event leads):** when the
+  only when data is actually found; tunables `leadfeeder.find_*`). Plus FirstName
+  (nice-to-have). **`KN_NoOwnDBID__c` is never written (Wasil, 2026-10-20)** — it used to
+  be ticked on every DBID-less lead; now a lead with neither DBID nor tick fails Stage 2
+  preflight `dbid_xor` (`KN_DbIdValidation`, still active on Lead) and is not converted. **Email from LeadFeeder (2026-09-18, event leads):** when the
   Task carries no email, the LF contact's first email (`writeback.lf_contact_email`) fills a
   BLANK `Email` only — never overwrites. **Contact lookup only when needed**
   (`leadfeeder.contact_lookup_only_when_needed`, default false; true in the ZPE config): the
@@ -162,7 +164,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   back with either blank → `matched_incomplete` 701Mz00001aP9hDIAS "EnrichLeadshortage"
   (Wasil, 2026-10-19). An LF-matched lead NOT written back (out of write-back scope,
   failed write-back) gets no campaign, so tagging — a permanent exclusion — never
-  swallows a lead a wider scope could still write. Never tags with LeadFeeder disabled
+  swallows a lead a wider scope could still write — **except a write-back that failed
+  with `DUPLICATES_DETECTED`** (Wasil, 2026-10-20): a duplicate rule blocks it on every
+  rerun, so it goes to the `unmatched` "EnrichLeadmanually" campaign (counted as
+  `campaign_duplicate_detected` in the Summary; still held out of the auto-approved
+  CSV). Never tags with LeadFeeder disabled
   (everything would look unmatched). Insert =
   `SfClient.create_records` (sObject Collections POST, +1 call per ≤200 leads;
   `DUPLICATE_VALUE` counts as already-member); failures land on the QA Failures sheet

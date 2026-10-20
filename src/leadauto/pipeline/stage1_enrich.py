@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..campaigns import campaign_members
+from ..campaigns import campaign_members, duplicate_failure_ids
 from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import enrich_leads
 from ..models import EnrichedLead, MatchResult
@@ -183,7 +183,8 @@ def _tag_campaigns(sf_client, results, written_ids, failures, settings, log) -> 
     """Add the taggable leads to their LeadFeeder-outcome campaign (campaigns.py):
     one sObject-Collections POST per <=200 leads. Taggable = a tagged task type AND
     either written back this run (`written_ids`, which already excludes write-back
-    failures) or unmatched in LeadFeeder; an untagged lead stays eligible for later
+    failures), unmatched in LeadFeeder, or blocked by a duplicate rule on write-back
+    (-> the unmatched campaign); an untagged lead stays eligible for later
     runs. Insert failures join `failures` (QA Failures sheet, stage 'campaign') but
     never hold a lead back, and a failed request never aborts the run: the tag is
     informational.
@@ -192,7 +193,8 @@ def _tag_campaigns(sf_client, results, written_ids, failures, settings, log) -> 
     payloads = [lead_field_payload(r.enriched, settings)
                 if r.enriched.extracted.lead_id in written_ids else None for r in results]
     rows, counts = campaign_members(results, payloads, written_ids, settings.lf_campaigns,
-                                    settings.lf_campaign_task_types)
+                                    settings.lf_campaign_task_types,
+                                    duplicate_ids=duplicate_failure_ids(failures))
     try:
         res = sf_client.create_records("CampaignMember", rows)
     except SfError as exc:

@@ -11,9 +11,12 @@ sales can work the leads by how LeadFeeder did:
                         and `Street` are both filled
 - `matched_incomplete`  written back, but either is still blank
 
-Only those two populations are tagged: a lead LeadFeeder matched but this run did not
+Only those populations are tagged: a lead LeadFeeder matched but this run did not
 write back (outside the write-back scope, or a failed write-back) gets no campaign, so
-it stays eligible for a later run. "Final" = the write-back payload over the Lead's
+it stays eligible for a later run — EXCEPT a write-back that failed with
+`DUPLICATES_DETECTED` (bucket `duplicate_detected`, Wasil 2026-10-20): a duplicate rule
+blocks that lead on every rerun, so it goes to the `unmatched` campaign
+("EnrichLeadmanually") for a human instead. "Final" = the write-back payload over the Lead's
 existing value. `Street` is the Lead field that becomes the Account's BillingStreet on
 conversion.
 
@@ -29,11 +32,21 @@ MATCHED_COMPLETE = "matched_complete"
 MATCHED_INCOMPLETE = "matched_incomplete"
 UNMATCHED = "unmatched"
 BUCKETS = (MATCHED_COMPLETE, MATCHED_INCOMPLETE, UNMATCHED)
+# Not a campaign of its own: counted separately, tagged into the `unmatched` campaign.
+DUPLICATE_DETECTED = "duplicate_detected"
+_CAMPAIGN_OF = {DUPLICATE_DETECTED: UNMATCHED}
 
 
 def _filled(value) -> bool:
     # Bulk reads deliver nulls as '' — a blank string is not a value.
     return bool(str(value).strip()) if value is not None else False
+
+
+def duplicate_failure_ids(failures: Iterable[dict]) -> set[str]:
+    """Lead ids whose write-back a duplicate rule blocked (`DUPLICATES_DETECTED`)."""
+    return {f.get("lead_id") for f in failures
+            if f.get("stage") == "writeback" and f.get("lead_id")
+            and "DUPLICATES_DETECTED" in (f.get("error") or "")}
 
 
 def final_lead_fields(enriched, payload: dict | None) -> tuple:
@@ -45,14 +58,18 @@ def final_lead_fields(enriched, payload: dict | None) -> tuple:
 
 
 def campaign_bucket(result, payload: dict | None, written: bool,
-                    task_types: Sequence[str] | None = None) -> str | None:
+                    task_types: Sequence[str] | None = None,
+                    duplicate: bool = False) -> str | None:
     """The campaign bucket for one MatchResult, or None when it is not tagged: a task
     type outside `task_types` (None = every type), or an LF-matched lead that was not
-    written back (see the module docstring)."""
+    written back (see the module docstring). `duplicate` = its write-back failed with
+    DUPLICATES_DETECTED."""
     if task_types is not None and result.enriched.extracted.task_type not in task_types:
         return None
     if not result.enriched.matched:
         return UNMATCHED
+    if duplicate:
+        return DUPLICATE_DETECTED
     if not written:
         return None
     employee, street = final_lead_fields(result.enriched, payload)
@@ -61,16 +78,19 @@ def campaign_bucket(result, payload: dict | None, written: bool,
 
 def campaign_members(results: Sequence, payloads: Sequence[dict | None],
                      written_ids: Iterable[str], campaigns: dict[str, str],
-                     task_types: Sequence[str] | None = None
+                     task_types: Sequence[str] | None = None,
+                     duplicate_ids: Iterable[str] = ()
                      ) -> tuple[list[dict], Counter]:
     """CampaignMember rows ({CampaignId, LeadId}) for the taggable results, one per lead.
 
     `payloads` is index-aligned with `results` (only written leads' are read);
     `campaigns` maps bucket -> CampaignId (`Settings.lf_campaigns`) and a bucket without
-    an id is not tagged. Status is left to the campaign's default member status.
+    an id is not tagged; `duplicate_ids` (`duplicate_failure_ids`) go to the `unmatched`
+    campaign. Status is left to the campaign's default member status.
     Returns (rows, per-bucket counts).
     """
     written = set(written_ids)
+    duplicates = set(duplicate_ids)
     rows: list[dict] = []
     counts: Counter = Counter()
     seen: set[str] = set()
@@ -79,8 +99,9 @@ def campaign_members(results: Sequence, payloads: Sequence[dict | None],
         if lead_id in seen:
             continue
         seen.add(lead_id)
-        bucket = campaign_bucket(r, payload, lead_id in written, task_types)
-        campaign_id = campaigns.get(bucket) if bucket else None
+        bucket = campaign_bucket(r, payload, lead_id in written, task_types,
+                                 duplicate=lead_id in duplicates)
+        campaign_id = campaigns.get(_CAMPAIGN_OF.get(bucket, bucket)) if bucket else None
         if not campaign_id:
             continue
         rows.append({"CampaignId": campaign_id, "LeadId": lead_id})
