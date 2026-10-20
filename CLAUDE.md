@@ -128,8 +128,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   (company LinkedIn/email never), `Phone` = direct-dial-typed number first (LF types phones;
   `direct` > `office`/`landline`; NEVER mobile) → LF company phone; a found contact without a
   direct dial triggers the async **find-contact-data job** (`client.find_contact_data`, 1 credit
-  only when data is actually found; tunables `leadfeeder.find_*`). Plus NoOwnDBID tick +
-  FirstName (nice-to-have). **Email from LeadFeeder (2026-09-18, event leads):** when the
+  only when data is actually found; tunables `leadfeeder.find_*`). Plus FirstName
+  (nice-to-have). **`KN_NoOwnDBID__c` is never written (Wasil, 2026-10-20)** — it used to
+  be ticked on every DBID-less lead; now a lead with neither DBID nor tick fails Stage 2
+  preflight `dbid_xor` (`KN_DbIdValidation`, still active on Lead) and is not converted. **Email from LeadFeeder (2026-09-18, event leads):** when the
   Task carries no email, the LF contact's first email (`writeback.lf_contact_email`) fills a
   BLANK `Email` only — never overwrites. **Contact lookup only when needed**
   (`leadfeeder.contact_lookup_only_when_needed`, default false; true in the ZPE config): the

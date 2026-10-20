@@ -85,8 +85,7 @@ def test_task_email_overwrites_differing_lead_email():
 
 
 def test_payload_omits_empty_fields():
-    # lead_dbid set so KN_NoOwnDBID__c (fill-only-blank) has nothing to fill either.
-    e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="content", lead_dbid="12345")
+    e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="content")
     payload = lead_field_payload(_enriched(e))
     assert payload == {"Id": "00Q1"}  # nothing to write but the key
 
@@ -170,7 +169,7 @@ def test_write_back_dry_run_makes_no_calls():
 def test_write_back_live_calls_update_records_once():
     client = FakeClient()
     e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="claimer",
-                      company_name="Acme GmbH")
+                      company_name="Acme GmbH", kununu_url="https://www.kununu.com/de/acme")
     result = write_back(client, [_enriched(e)], dry_run=False)
     assert len(client.calls) == 1
     sobject, records = client.calls[0]
@@ -187,7 +186,8 @@ class FailingClient:
 
 
 def test_write_back_surfaces_row_failures():
-    e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="claimer", company_name="Acme")
+    e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="claimer", company_name="Acme",
+                      kununu_url="https://www.kununu.com/de/acme")
     res = write_back(FailingClient(), [_enriched(e)], dry_run=False)
     assert res["failed"] == 1
     assert res["failures"][0]["lead_id"] == "00Q1"
@@ -196,9 +196,7 @@ def test_write_back_surfaces_row_failures():
 
 def test_write_back_skips_leads_with_no_enrichment():
     client = FakeClient()
-    # lead_dbid set so KN_NoOwnDBID__c (fill-only-blank) has nothing to fill either.
-    bare = ExtractedLead(lead_id="00Q9", task_id="T9", task_type="content",
-                         lead_dbid="12345")  # nothing parsed
+    bare = ExtractedLead(lead_id="00Q9", task_id="T9", task_type="content")  # nothing parsed
     result = write_back(client, [_enriched(bare)], dry_run=False)
     assert client.calls == []  # only the Id, nothing to write -> skipped
     assert result["processed"] == 0
@@ -272,16 +270,18 @@ class TestPayloadDropsDbFields:
         assert not any(k.startswith("KN_DB") for k in payload)
 
 
-class TestNoOwnDbidTick:
-    def test_set_true_when_lead_dbid_blank(self):
+class TestNoOwnDbidLeftAlone:
+    # Wasil, 2026-10-20: write-back never touches KN_NoOwnDBID__c (it used to tick it
+    # for every DBID-less lead).
+    def test_not_written_when_lead_dbid_blank(self):
         enr = EnrichedLead(extracted=_extracted())
-        assert lead_field_payload(enr)["KN_NoOwnDBID__c"] == "true"
+        assert "KN_NoOwnDBID__c" not in lead_field_payload(enr)
 
     def test_not_written_when_lead_has_dbid(self):
         enr = EnrichedLead(extracted=_extracted(lead_dbid="12345"))
         assert "KN_NoOwnDBID__c" not in lead_field_payload(enr)
 
-    def test_not_rewritten_when_already_ticked(self):
+    def test_not_written_when_already_ticked(self):
         enr = EnrichedLead(extracted=_extracted(lead_no_own_dbid=True))
         assert "KN_NoOwnDBID__c" not in lead_field_payload(enr)
 

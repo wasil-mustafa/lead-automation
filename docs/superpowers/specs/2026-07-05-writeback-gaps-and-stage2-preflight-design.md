@@ -17,7 +17,8 @@ org's D&B integration and must not be written by us (per Wasil, 2026-07-05).
 - Fix in BOTH stages: write-back closes the gaps at stage 1; a read-only preflight verifies
   actual field state at stage 2 and skips+reports failures (approach A).
 - All new write-back fields are **fill-only-blank** — never overwrite an existing value.
-- `KN_NoOwnDBID__c = true` always, unless the Lead's `KN_DBID__c` is populated.
+- ~~`KN_NoOwnDBID__c = true` always, unless the Lead's `KN_DBID__c` is populated.~~
+  Reversed 2026-10-20 (Wasil): write-back never touches `KN_NoOwnDBID__c`.
 - Everything `KN_DB*` is dropped from write-back (D&B auto-populates it), incl. `KN_DBID__c`
   (LF `Register_Id` is not needed).
 - Email/freemail handling deferred to a later stage — preflight only *reports* freemail.
@@ -40,7 +41,7 @@ org's D&B integration and must not be written by us (per Wasil, 2026-07-05).
 
 | Field | Source (priority) | Guards |
 |---|---|---|
-| `KN_NoOwnDBID__c` | constant `true` | only when Lead `KN_DBID__c` blank AND tick not already set; written for every processed lead, LF-matched or not |
+| `KN_NoOwnDBID__c` | ~~constant `true`~~ **never written since 2026-10-20 (Wasil)** | was: only when Lead `KN_DBID__c` blank AND tick not already set; now left alone, preflight `dbid_xor` catches leads with neither |
 | `Street` | Task-parsed `street` → LF `Street` | truncate at 100 chars (`KN_Addresstoolong`) |
 | `City` | Task-parsed `city` → LF `City` | — |
 | `PostalCode` | Task-parsed `postal_code` → LF `Postal_Code` | skip unless length valid for country: DE=5, CH=4, others unchecked (`KN_Checklengthpostalcode`) |

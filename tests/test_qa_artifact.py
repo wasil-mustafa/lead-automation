@@ -73,17 +73,12 @@ def test_enriching_sheet_drops_rows_with_nothing_to_write():
     """A payload of only the Id means nothing was enriched, and the sheet must mirror
     `write_back`, which filters on exactly the same `len(p) > 1` (writeback.py:212).
     Keeping the row would put an all-blank line in an import file — an invitation to
-    overwrite good data with nothing.
-
-    Emptying such a lead takes some doing, which is the point: `KN_NoOwnDBID__c` is set
-    for any lead WITHOUT a DBID, so a lead needs one before the payload can shrink to the
-    Id alone. That is rare in practice, so the guard fires rarely — it is not dead."""
+    overwrite good data with nothing."""
     bare = _result(lead_id="00Q_BARE")
     bare.enriched.extracted.kununu_url = None      # KN_KununuLinkProfile__c + CountryCode
     bare.enriched.extracted.region = None          # KN_Region__c
     bare.enriched.extracted.contact_email = None   # Email
     bare.enriched.extracted.contact_name = None    # FirstName
-    bare.enriched.extracted.lead_dbid = "123456"   # suppresses the KN_NoOwnDBID__c tick
     assert set(lead_field_payload(bare.enriched)) == {"Id"}
     rich = _result(lead_id="00Q_RICH", company={"VAT_Id": "DE9"})
     ws = build_workbook([bare, rich], [], meta={})["Enriching"]
@@ -274,9 +269,10 @@ def test_convert_blockers_column_lists_failed_checks():
 def test_convert_blockers_empty_when_payload_fills_gaps():
     # Address comes from the LF company now (tasks carry none) — the payload can only
     # satisfy the address checks when the enrichment did.
+    # KN_NoOwnDBID__c is no longer written (2026-10-20), so the lead must already carry it.
     e = ExtractedLead(lead_id="00Q1", task_id="00T1", task_type="claimer",
                       lead_last_name="Muster", lead_language="German",
-                      lead_source="Web", country_code="DE")
+                      lead_source="Web", country_code="DE", lead_no_own_dbid=True)
     # Employee band comes only from the LF headcount now (task size is never used).
     enr = EnrichedLead(extracted=e, company={"Street": "Weg 1", "City": "HH",
                                              "Postal_Code": "20095", "Country": "DE",
@@ -287,7 +283,23 @@ def test_convert_blockers_empty_when_payload_fills_gaps():
     ws = wb["Review"]
     header = [c.value for c in ws[1]]
     blockers = ws.cell(row=2, column=header.index("convert_blockers") + 1).value
-    assert not blockers  # write-back payload satisfies employee/dbid/address checks
+    assert not blockers  # write-back payload satisfies employee/address checks
+
+
+def test_convert_blockers_flag_dbid_xor_when_lead_has_neither():
+    # Write-back leaves KN_NoOwnDBID__c alone (Wasil, 2026-10-20): a lead with no DBID and
+    # no tick now shows the KN_DbIdValidation blocker instead of having it filled.
+    e = ExtractedLead(lead_id="00Q1", task_id="00T1", task_type="claimer",
+                      lead_last_name="Muster", lead_language="German",
+                      lead_source="Web", country_code="DE")
+    enr = EnrichedLead(extracted=e, company={"Street": "Weg 1", "City": "HH",
+                                             "Postal_Code": "20095", "Country": "DE",
+                                             "Employee_Count": 40})
+    result = MatchResult(enriched=enr, account=None, contact=None,
+                         decision="review", rule="no_lf_match", evidence=[])
+    ws = build_workbook([result], skipped=[])["Review"]
+    header = [c.value for c in ws[1]]
+    assert ws.cell(row=2, column=header.index("convert_blockers") + 1).value == "dbid_xor"
 
 
 def test_review_sheet_carries_cluster_and_conflict_keys():
