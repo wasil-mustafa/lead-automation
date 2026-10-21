@@ -134,6 +134,12 @@ pipeline:
   # is strictly fill-only-blank here. The one-off ZPE 2026 config sets it (46 of 109
   # badge-scan phones had that shape, Wasil 2026-09-18).
   repair_national_phone: false
+  # true sends `Sforce-Duplicate-Rule-Header: allowSave=true` on the Lead write-back, so
+  # the org's Alert-mode Lead duplicate rules no longer fail it with DUPLICATES_DETECTED
+  # (Wasil, 2026-10-21: 31 of 56 backlog write-backs died there; live-proven on one
+  # lead). A Block-mode rule still rejects -> that lead still goes to the `unmatched`
+  # campaign. false = the rules apply as before.
+  writeback_allow_duplicates: true
   # LeadFeeder-outcome campaign tagging (Wasil, 2026-10-19). On a NON-dry run a lead
   # of a task type below becomes a CampaignMember of exactly one of these: no accepted
   # LF match -> unmatched; WRITTEN BACK this run with KN_Employee__c and Street both

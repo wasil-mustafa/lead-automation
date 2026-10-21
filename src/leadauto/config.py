@@ -299,6 +299,15 @@ class Settings:
         return bool(self.raw["pipeline"].get("repair_national_phone", False))
 
     @property
+    def writeback_allow_duplicates(self) -> bool:
+        """True sends `Sforce-Duplicate-Rule-Header: allowSave=true` on the Lead
+        write-back, so an Alert-mode duplicate rule no longer fails the row with
+        DUPLICATES_DETECTED (Wasil, 2026-10-21: 31 of 56 backlog write-backs died there;
+        a Block-mode rule still rejects). Default False: the org's duplicate rules apply
+        as before and such a lead goes to the `unmatched` campaign (campaigns.py)."""
+        return bool(self.raw["pipeline"].get("writeback_allow_duplicates", False))
+
+    @property
     def lead_statuses(self) -> list[str]:
         """Lead `Status` allowlist for extraction (e.g. ['New']). Applied in the reader
         AFTER the batched lead query — `Status` is already selected, so the filter costs

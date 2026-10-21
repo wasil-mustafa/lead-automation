@@ -36,6 +36,11 @@ _ENV = {**os.environ, "SF_AUTOUPDATE_DISABLE": "true",
 # keep using the faster synchronous REST path.
 _BULK_QUERY_THRESHOLD = 2000
 
+# REST twin of the SOAP DuplicateRuleHeader (allowSave) that Salesforce Inspector sends:
+# saves a record an ALERT-mode duplicate rule would reject with DUPLICATES_DETECTED. A
+# BLOCK-mode rule still rejects. Live-proven on sObject Collections PATCH 2026-10-21
+# (Lead 00QMz00000hXiVqMAK: DUPLICATES_DETECTED without it, success with it).
+_ALLOW_DUPLICATES_HEADER = {"Sforce-Duplicate-Rule-Header": "allowSave=true"}
 
 
 class SfError(RuntimeError):
@@ -303,7 +308,8 @@ class SfClient:
         return records
 
     # --- writes ---
-    def update_records(self, sobject: str, records: list[dict]) -> dict:
+    def update_records(self, sobject: str, records: list[dict], *,
+                       allow_duplicates: bool = False) -> dict:
         """Update existing records over REST sObject Collections (one PATCH per ≤200
         records, allOrNone=false) — replaces the Bulk API job the CLI ran per update
         (5-7 round trips + polling each; API-call reduction 2026-07-18).
@@ -314,6 +320,9 @@ class SfClient:
         inline per-row result. Failed rows come back with a null id, so failures are
         keyed to the request-order record Id. A 401 (stale cached CLI token) gets one
         auth re-fetch + retry, like convert_lead.
+
+        `allow_duplicates` sends `Sforce-Duplicate-Rule-Header: allowSave=true`, so an
+        Alert-mode duplicate rule no longer fails the row (a Block-mode one still does).
         """
         if not records:
             return {"processed": 0, "failed": 0, "failures": [], "confirmed": True}
@@ -324,7 +333,9 @@ class SfClient:
             chunk = records[start:start + _COLLECTIONS_MAX]
             payload = {"allOrNone": False,
                        "records": [{"attributes": {"type": sobject}, **r} for r in chunk]}
-            rows = self._send_collections("PATCH", payload)
+            rows = self._send_collections(
+                "PATCH", payload,
+                headers=_ALLOW_DUPLICATES_HEADER if allow_duplicates else None)
             for rec, row in zip(chunk, rows):
                 if row.get("success"):
                     continue
@@ -361,10 +372,11 @@ class SfClient:
         result["failed"] = len(result["failures"])
         return result
 
-    def _send_collections(self, method: str, payload: dict) -> list[dict]:
+    def _send_collections(self, method: str, payload: dict,
+                          headers: dict | None = None) -> list[dict]:
         """One sObject-Collections request (1 API call for up to 200 records)."""
         response = self._request(method, self._data_path("/composite/sobjects"),
-                                 body=json.dumps(payload))
+                                 body=json.dumps(payload), headers=headers)
         self._raise_for_status(response, f"sObject Collections {method}")
         rows = json.loads(response.text)
         if not isinstance(rows, list):
@@ -378,25 +390,28 @@ class SfClient:
         return f"/services/data/v{self.api_version}{suffix}"
 
     def _request(self, method: str, path: str, *, body: str | None = None,
-                 accept: str = "application/json"):
+                 accept: str = "application/json", headers: dict | None = None):
         """One authenticated request against an org path, retried ONCE with a refreshed
         token on HTTP 401 (a run can outlive the CLI's cached access token).
 
+        `headers` are extra request headers (e.g. the duplicate-rule header).
         Returns the response as-is — callers decide what a non-2xx means, because the
         bulk results probe treats a first-page 4xx as "job not ready", not as failure.
         """
-        response = self._request_once(method, path, body, accept, refresh=False)
+        response = self._request_once(method, path, body, accept, headers, refresh=False)
         if response.status_code == 401:
             if self.log:
                 self.log.warning("%s %s got 401; refreshing auth and retrying",
                                  method, path.split("?")[0])
-            response = self._request_once(method, path, body, accept, refresh=True)
+            response = self._request_once(method, path, body, accept, headers,
+                                          refresh=True)
         return response
 
     def _request_once(self, method: str, path: str, body: str | None,
-                      accept: str, *, refresh: bool):
+                      accept: str, extra_headers: dict | None = None, *, refresh: bool):
         auth = self.auth_info(refresh=refresh)
-        headers = {"Authorization": f"Bearer {auth['access_token']}", "Accept": accept}
+        headers = {"Authorization": f"Bearer {auth['access_token']}", "Accept": accept,
+                   **(extra_headers or {})}
         if body is not None:
             headers["Content-Type"] = "application/json"
         return requests.request(method, f"{auth['instance_url']}{path}", data=body,

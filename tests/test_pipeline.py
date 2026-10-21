@@ -60,8 +60,9 @@ class FakeSfClient:
     def query_many(self, queries):
         return {label: self.query(soql) for label, soql in queries.items()}
 
-    def update_records(self, sobject, records):
+    def update_records(self, sobject, records, allow_duplicates=False):
         self.updates.append((sobject, records))
+        self.allow_duplicates = allow_duplicates
         return {"processed": len(records)}
 
     def create_records(self, sobject, records):
@@ -410,7 +411,7 @@ def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
                      "accountId": "001NEW", "contactId": "003NEW"}
                     for c in conversions]
 
-        def update_records(self, sobject, records):
+        def update_records(self, sobject, records, allow_duplicates=False):
             self.updates.append((sobject, records))
             return {"processed": len(records), "failed": 0}
 
@@ -627,8 +628,8 @@ def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
     _matched_enrich(monkeypatch)
 
     class FailingSf(FakeSfClient):
-        def update_records(self, sobject, records):
-            super().update_records(sobject, records)
+        def update_records(self, sobject, records, allow_duplicates=False):
+            super().update_records(sobject, records, allow_duplicates)
             return {"processed": 0, "failed": len(records),
                     "failures": [{"id": r["Id"], "error": "boom"} for r in records]}
 
@@ -788,7 +789,7 @@ def test_stage1_live_writeback_failure_is_left_untagged(tmp_path, monkeypatch):
     _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
 
     class FailingSf(FakeSfClient):
-        def update_records(self, sobject, records):
+        def update_records(self, sobject, records, allow_duplicates=False):
             return {"processed": 0, "failed": len(records),
                     "failures": [{"id": r["Id"], "error": "boom"} for r in records]}
 
@@ -805,7 +806,7 @@ def test_stage1_duplicate_detected_writeback_failure_goes_to_unmatched_campaign(
     _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
 
     class DuplicateSf(FakeSfClient):
-        def update_records(self, sobject, records):
+        def update_records(self, sobject, records, allow_duplicates=False):
             return {"processed": 0, "failed": len(records),
                     "failures": [{"id": r["Id"],
                                   "error": "DUPLICATES_DETECTED: Use one of these records?"}

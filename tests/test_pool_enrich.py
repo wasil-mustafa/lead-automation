@@ -89,7 +89,7 @@ class _FakeSf:
         # resolve_pool_links bundles its two independent reads into one /composite call.
         return {label: self.query(soql) for label, soql in queries.items()}
 
-    def update_records(self, sobject, records):
+    def update_records(self, sobject, records, allow_duplicates=False):
         self.updated = (sobject, records)
         return {"processed": len(records), "failed": 0, "failures": [], "confirmed": True}
 
