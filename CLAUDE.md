@@ -171,7 +171,13 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   with `DUPLICATES_DETECTED`** (Wasil, 2026-10-20): a duplicate rule blocks it on every
   rerun, so it goes to the `unmatched` "EnrichLeadmanually" campaign (counted as
   `campaign_duplicate_detected` in the Summary; still held out of the auto-approved
-  CSV). Never tags with LeadFeeder disabled
+  CSV). **Since 2026-10-21 (Wasil) the Lead write-back sends
+  `Sforce-Duplicate-Rule-Header: allowSave=true`** (`pipeline.writeback_allow_duplicates:
+  true`, `SfClient.update_records(allow_duplicates=)`): the org's Lead duplicate rules are
+  Alert-mode, so those leads are now written back and bucketed normally — 31 of 56
+  backlog write-backs had died on it; live-proven on sObject Collections the same day.
+  A Block-mode rule still rejects and still routes to `unmatched`. Contact/Account
+  updates do not send the header. Never tags with LeadFeeder disabled
   (everything would look unmatched). Insert =
   `SfClient.create_records` (sObject Collections POST, +1 call per ≤200 leads;
   `DUPLICATE_VALUE` counts as already-member); failures land on the QA Failures sheet

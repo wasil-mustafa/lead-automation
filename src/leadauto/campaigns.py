@@ -17,7 +17,9 @@ write back (outside the write-back scope, or a failed write-back) gets no campai
 it stays eligible for a later run — EXCEPT a write-back that failed with
 `DUPLICATES_DETECTED` (bucket `duplicate_detected`, Wasil 2026-10-20): a duplicate rule
 blocks that lead on every rerun, so it goes to the `unmatched` campaign
-("EnrichLeadmanually") for a human instead. "Final" = the write-back payload over the Lead's
+("EnrichLeadmanually") for a human instead. Since 2026-10-21 the write-back sends the
+duplicate-rule allowSave header (`pipeline.writeback_allow_duplicates`), so only a
+Block-mode rule still lands a lead here. "Final" = the write-back payload over the Lead's
 existing value. `Street` is the Lead field that becomes the Account's BillingStreet on
 conversion.
 

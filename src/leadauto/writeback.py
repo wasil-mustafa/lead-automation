@@ -259,7 +259,8 @@ def write_back(client, enriched_leads: list[EnrichedLead], dry_run: bool = False
         log.info("Nothing to write back (%d lead(s) had no enrichment)", len(payloads))
         return {"processed": 0, "failed": 0, "failures": [], "payloads": payloads}
 
-    res = client.update_records("Lead", writable)
+    allow_duplicates = bool(settings is not None and settings.writeback_allow_duplicates)
+    res = client.update_records("Lead", writable, allow_duplicates=allow_duplicates)
     failures = [{"lead_id": f.get("id"), "stage": "writeback", "error": f.get("error", "")}
                 for f in res.get("failures", [])]
     failed = res.get("failed", 0)

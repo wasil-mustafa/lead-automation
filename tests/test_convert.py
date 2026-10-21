@@ -352,7 +352,7 @@ class _Email2Client:
         self.queries.append(soql)
         return [dict(c) for c in self.contacts]
 
-    def update_records(self, sobject, records):
+    def update_records(self, sobject, records, allow_duplicates=False):
         self.updates.append((sobject, records))
         return {"processed": len(records), "failed": 0}
 

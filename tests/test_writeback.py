@@ -149,9 +149,11 @@ def test_task_parsed_position_beats_lf_contact_title_but_never_a_set_lead_title(
 class FakeClient:
     def __init__(self):
         self.calls: list[tuple] = []
+        self.allow_duplicates: list[bool] = []
 
-    def update_records(self, sobject, records):
+    def update_records(self, sobject, records, allow_duplicates=False):
         self.calls.append((sobject, records))
+        self.allow_duplicates.append(allow_duplicates)
         return {"processed": len(records)}
 
 
@@ -178,8 +180,26 @@ def test_write_back_live_calls_update_records_once():
     assert result["processed"] == 1
 
 
+def test_write_back_allows_duplicates_only_when_configured():
+    e = ExtractedLead(lead_id="00Q1", task_id="T1", task_type="claimer",
+                      company_name="Acme GmbH", kununu_url="https://www.kununu.com/de/acme")
+    client = FakeClient()
+    write_back(client, [_enriched(e)], dry_run=False)   # no settings => rules apply
+    write_back(client, [_enriched(e)], dry_run=False,
+               settings=_settings(writeback_allow_duplicates=False))
+    write_back(client, [_enriched(e)], dry_run=False,
+               settings=_settings(writeback_allow_duplicates=True))
+    assert client.allow_duplicates == [False, False, True]
+
+
+def test_writeback_allow_duplicates_defaults_off_when_key_absent():
+    s = _settings()
+    s.raw["pipeline"].pop("writeback_allow_duplicates", None)
+    assert s.writeback_allow_duplicates is False
+
+
 class FailingClient:
-    def update_records(self, sobject, records):
+    def update_records(self, sobject, records, allow_duplicates=False):
         return {"processed": len(records), "failed": 1,
                 "failures": [{"id": records[0]["Id"], "error": "BAD_PICKLIST"}],
                 "confirmed": True}
@@ -551,7 +571,7 @@ class TestRepairNationalPhone:
             def __init__(self):
                 self.payloads = None
 
-            def update_records(self, sobject, payloads):
+            def update_records(self, sobject, payloads, allow_duplicates=False):
                 self.payloads = payloads
                 return {"processed": len(payloads), "failed": 0, "failures": [], "confirmed": True}
 

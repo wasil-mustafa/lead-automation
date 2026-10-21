@@ -89,6 +89,22 @@ def test_update_records_empty_is_noop_without_patch(monkeypatch):
         "processed": 0, "failed": 0, "failures": [], "confirmed": True}
 
 
+def test_update_records_duplicate_header_only_when_allowed(monkeypatch):
+    # Sforce-Duplicate-Rule-Header lets an Alert-mode duplicate rule save the row
+    # (live-proven 2026-10-21); it must never ride an update that did not ask for it.
+    client = SfClient("headless")
+    monkeypatch.setattr(client, "_run", _fake_org_display([]))
+    calls: list[dict] = []
+    monkeypatch.setattr("leadauto.sf.client.requests.request",
+                        _fake_patch(_collections_ok, calls))
+    client.update_records("Lead", [{"Id": "00Q1", "Email": "a@b.c"}])
+    client.update_records("Lead", [{"Id": "00Q1", "Email": "a@b.c"}],
+                          allow_duplicates=True)
+    assert "Sforce-Duplicate-Rule-Header" not in calls[0]["headers"]
+    assert calls[1]["headers"]["Sforce-Duplicate-Rule-Header"] == "allowSave=true"
+    assert calls[1]["headers"]["Authorization"] == "Bearer TOK1"
+
+
 def test_update_records_requires_id():
     client = SfClient("headless")
     with pytest.raises(SfError, match="Id"):
