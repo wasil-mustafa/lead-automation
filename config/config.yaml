@@ -167,11 +167,23 @@ pipeline:
     # its kununu score, and a missing score no longer fails closed. Was 3.0 (strict <,
     # the human "No Demand" line) from the 2026-07-18 go-live.
     max_kununu_score: null
-    # CONVERSION scope: decisions a live run stages for Stage 2. Empty since 2026-10-19
-    # (Wasil): live runs enrich only — nothing is auto-converted, no Stage 2 chain;
-    # humans keep converting. Was [create_new] from the 2026-07-18 go-live. Never
-    # list skip/review here.
-    decisions: []
+    # CONVERSION scope: decisions a live run stages for Stage 2. [create_new] again
+    # since 2026-10-31 (Wasil): shadow-compare scored create_new at 44/46 = 95.7 %
+    # agreement with humans since 2026-10-19 (300/304 all-time), so those leads
+    # auto-convert — gated further by `convert_campaigns` below. Was [] (enrich only)
+    # 2026-10-19..31, [create_new] from the 2026-07-18 go-live. Never list skip/review.
+    decisions:
+      - create_new
+    # CAMPAIGN gate (Wasil, 2026-10-31): a lead is staged for Stage 2 only when THIS run
+    # made it a member of one of these LF-outcome campaign buckets (lf_campaigns below).
+    # matched_complete = "EnrichLeadfedup" = written back with KN_Employee__c AND Street
+    # filled. Workflow: Stage 1 -> write-back -> campaign -> convert the fedup leads.
+    # Such a lead also gets KN_NoOwnDBID__c ticked on write-back when it has no DBID
+    # (KN_DbIdValidation); leads left to humans never do (2026-10-20 rule). Absent key =
+    # no campaign axis (the conversion scope alone decides). Insert failure, LeadFeeder
+    # off, or a dry run => nothing is staged.
+    convert_campaigns:
+      - matched_complete
     # WRITE-BACK scope (2026-10-19, Wasil): every LF-matched decision gets the live
     # Lead write-back — the account decision only matters for conversion. Never skip
     # (no accepted LF match). Absent = same as `decisions`.

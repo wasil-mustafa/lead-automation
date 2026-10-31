@@ -6,7 +6,31 @@ for MatchResult and Settings.
 """
 from types import SimpleNamespace
 
-from leadauto.live_scope import live_scope_reason, writeback_reason
+from leadauto.live_scope import campaign_gate_reason, live_scope_reason, writeback_reason
+
+
+# --- campaign gate (Wasil, 2026-10-31) ----------------------------------------------
+
+def _gate(buckets):
+    return SimpleNamespace(live_convert_buckets=buckets)
+
+
+def test_campaign_gate_absent_key_passes_everything():
+    assert campaign_gate_reason("matched_incomplete", _gate(None)) is None
+    assert campaign_gate_reason(None, _gate(None)) is None
+
+
+def test_campaign_gate_passes_only_listed_buckets():
+    gate = _gate(["matched_complete"])
+    assert campaign_gate_reason("matched_complete", gate) is None
+    assert campaign_gate_reason("matched_incomplete", gate) == "campaign_matched_incomplete"
+    assert campaign_gate_reason("unmatched", gate) == "campaign_unmatched"
+
+
+def test_campaign_gate_untagged_lead_fails_closed():
+    # No bucket = not tagged (tagging off, LF disabled, write-back or insert failed).
+    assert campaign_gate_reason(None, _gate(["matched_complete"])) == "campaign_none"
+    assert campaign_gate_reason("", _gate(["matched_complete"])) == "campaign_none"
 
 
 def _settings(decisions=("create_new",), max_score=3.0, allow_wide=False,

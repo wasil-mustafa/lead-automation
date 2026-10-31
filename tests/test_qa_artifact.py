@@ -436,13 +436,45 @@ def test_auto_approved_csv_holds_live_scope_rows_only(tmp_path):
     assert rows[0]["live_scope"] == "yes"
 
 
-def test_scheduled_config_is_enrich_only_and_stages_nothing(tmp_path):
-    # 2026-10-19: `decisions: []` — a live run writes back but never auto-converts, so
-    # no CSV is written and stage1.yml never chains Stage 2.
+def test_scheduled_config_campaign_gate_fails_closed_without_tagged_ids(tmp_path):
+    # 2026-10-31: `convert_campaigns: [matched_complete]` — the CSV holds only leads the
+    # caller names as tagged this run. No set passed = nobody was tagged = nothing staged,
+    # so stage1.yml never chains Stage 2 on a run where tagging did not happen.
     from leadauto.qa_artifact import write_auto_approved_csv
     review_dir = tmp_path / "review"
     assert write_auto_approved_csv(_auto_results(), review_dir, _settings()) is None
     assert not review_dir.exists()
+    assert write_auto_approved_csv(_auto_results(), review_dir, _settings(),
+                                   only_lead_ids=set()) is None
+
+
+def test_scheduled_config_stages_the_tagged_create_new_lead(tmp_path):
+    import csv
+    from leadauto.qa_artifact import write_auto_approved_csv
+    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", _settings(),
+                                   only_lead_ids={"00Q000000000002", "00Q000000000001"})
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    # the link row is named but outside the conversion scope -> still out
+    assert [r["lead_id"] for r in rows] == ["00Q000000000002"]
+
+
+def test_review_live_scope_names_the_campaign_gate():
+    # Scheduled config: a create_new lead written back with Street+Employee is
+    # "yes"; one missing either is enriched live but left to a human.
+    complete = _result("00Q1", decision="create_new", matched=True,
+                       company={"Street": "Hauptstr. 1", "Employee_Count": 120})
+    incomplete = _result("00Q2", decision="create_new", matched=True,
+                         company={"Street": "Hauptstr. 1"})
+    wb = build_workbook([complete, incomplete], [], meta={}, settings=_settings())
+    idx = {h: i for i, h in enumerate(_headers(wb["Review"]))}
+    rows = _rows(wb["Review"])
+    assert [r[idx["live_writeback"]] for r in rows] == ["yes", "yes"]
+    assert [r[idx["lf_campaign"]] for r in rows] == ["matched_complete", "matched_incomplete"]
+    assert [r[idx["live_scope"]] for r in rows] == ["yes", "campaign_matched_incomplete"]
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert metrics["live_writeback_pass"] == 2
+    assert metrics["live_scope_pass"] == 1
 
 
 def test_review_sheet_separates_write_back_from_conversion():

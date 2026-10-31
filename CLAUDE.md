@@ -62,14 +62,15 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `stage1.yml` `workflow_dispatch` every 2 h at :48, 08:48-16:48 Vienna (5/day). **Scheduled
   runs are LIVE since 2026-10-19:** the job POSTs `{"ref":"master","inputs":{"dry_run":"false"}}`
   (before that it sent no inputs ⇒ `dry_run` defaulted true ⇒ every scheduled run was dry).
-  What "live" does is decided by `pipeline.live_scope` — currently **enrich-only for claimer**
-  (see the Split bullet): claimer leads are written back, nothing is converted. Change the
+  What "live" does is decided by `pipeline.live_scope` — since 2026-10-31 **enrich every
+  LF-matched claimer/ebp_trial lead, auto-convert the `create_new` ones tagged
+  "EnrichLeadfedup"** (see the Campaign-gate bullet). Change the
   schedule/payload in *that job* (cron-job.org API `PATCH /jobs/8029899` — carry the existing
   `extendedData.headers` over, they hold the GitHub token), not the workflow. GitHub's own
   `schedule:` cron was removed. Shadow files committed every run; watermark only on non-dry.
   Stage 2 runs on manual dispatch OR chained from a live Stage-1 run that staged an
-  auto-approved CSV (`workflow_call`, see the go-live bullet) — with `decisions: []` none is
-  staged, so the chain does not fire.
+  auto-approved CSV (`workflow_call`, see the go-live bullet) — the chain fires only on a
+  run that tagged at least one create_new lead `matched_complete`.
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `pipeline.dry_run: true`
   (local-run default; CI takes the dispatch input), `review_gate: false` (since go-live),
   `task_lookback_days: 14` (was 90 for the initial backlog sweep, which is done; the window is a
@@ -111,10 +112,32 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `writeback_decisions:
   [create_new, link, review]` (every LF-matched claimer is enriched; never `skip`) and
   `decisions: []` (nothing auto-converts ⇒ no auto CSV ⇒ no chained Stage 2; humans
-  convert). QA gained a `live_writeback` column + Summary `live_writeback_pass`. A
+  convert — **until 2026-10-31, see the next bullet**). QA gained a `live_writeback`
+  column + Summary `live_writeback_pass`. A
   written-back lead still gets a shadow prediction flagged `written_back`, and
   shadow-compare scores only its decision (its fields would match our own write-back).
   Absent keys keep the old behaviour (write-back scope = `decisions`, every task type).
+  **Campaign-gated auto-conversion 2026-10-31 (Wasil):** shadow-compare scored
+  `create_new` at **44 hit / 2 miss (95.7 %) since 2026-10-19, 300/304 all-time** (a hit =
+  the human also created a new Account that day; both misses were `no_match` with empty
+  evidence — a renamed company and one with no name signal, so nothing in the pipeline
+  could have held them), so `decisions: [create_new]` is back, with a THIRD axis:
+  `live_scope.convert_campaigns: [matched_complete]` — a lead is staged for Stage 2 only
+  when THIS run made it a CampaignMember of that bucket ("EnrichLeadfedup" = written
+  back with `KN_Employee__c` and `Street` filled). The workflow is therefore Stage 1 →
+  write-back → campaign tag → convert the fedup leads; `matched_incomplete`
+  ("EnrichLeadshortage") leads are enriched and left to humans. Mechanics
+  (`live_scope.campaign_gate_reason`, `Settings.live_convert_buckets`): the bucket is
+  predicted on the payload BEFORE the write so the payload can tick `KN_NoOwnDBID__c`
+  (next bullet), then the gate reads what the CampaignMember insert actually did —
+  an insert failure, LeadFeeder disabled, no campaigns configured or a dry run all
+  stage NOTHING (fail closed, Stage 1 WARNING), `DUPLICATE_VALUE` counts as tagged.
+  Leads the gate leaves to humans stay shadow evidence (`written_back`); staged ones
+  never do. QA Review `live_scope` shows `campaign_<bucket>`/`campaign_none` as the
+  exclusion reason, Summary gained `convert_staged`. An unknown bucket name in the
+  config raises at load; an ABSENT key = no campaign axis (the 2026-07-18 behaviour),
+  which is what the `_no_gate_settings` tests pin. Stage 2 itself is unchanged (batch
+  size 3, owner Rohdaten Pool, Qualified, no Opportunity).
 - **Write-back field spec (Wasil, 2026-07-10, `writeback.py`):** from the Task ONLY kununu URL
   (= the processed marker, replacing `KN_KununuProfileName__c` — reader accepts either), Region
   (derived from the URL's country slug: `/de/`→Germany, `/at/`→Austria, `/ch/`→Switzerland) and
@@ -131,8 +154,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `direct` > `office`/`landline`; NEVER mobile) → LF company phone; a found contact without a
   direct dial triggers the async **find-contact-data job** (`client.find_contact_data`, 1 credit
   only when data is actually found; tunables `leadfeeder.find_*`). Plus FirstName
-  (nice-to-have). **`KN_NoOwnDBID__c` is never written (Wasil, 2026-10-20)** — it used to
-  be ticked on every DBID-less lead; now a lead with neither DBID nor tick fails Stage 2
+  (nice-to-have). **`KN_NoOwnDBID__c` is written ONLY for a lead the pipeline converts
+  itself** (`lead_field_payload(for_conversion=True)`, i.e. the campaign-gate candidates
+  of a live run, Wasil 2026-10-31; ticked when the Lead has neither DBID nor tick). For
+  every other lead it is never written (Wasil, 2026-10-20) — it used to be ticked on
+  every DBID-less lead; a human-converted lead with neither DBID nor tick fails Stage 2
   preflight `dbid_xor` (`KN_DbIdValidation`, still active on Lead) and is not converted. **Email from LeadFeeder (2026-09-18, event leads):** when the
   Task carries no email, the LF contact's first email (`writeback.lf_contact_email`) fills a
   BLANK `Email` only — never overwrites. **Contact lookup only when needed**
@@ -563,11 +589,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    committed, live-scope gate shipped, first automated E2E run converted 3/3. **Scheduled
    runs went live 2026-10-19** (cron-job.org payload now sends `dry_run: "false"`),
    enrich-only (see the Split bullet): claimer — and since 2026-10-20 ebp_trial — leads
-   are written back, nothing converts. Watch the first live runs' QA `live_writeback`
-   column. Widening the scope (decisions back into `live_scope.decisions`
-   to auto-convert) is a config commit,
-   informed by shadow accuracy (item 4). A required-reviewers Environment is NOT possible
-   (needs a paid plan on private repos, verified 2026-07-10).
+   are written back. **Auto-conversion resumed 2026-10-31** for create_new leads
+   tagged "EnrichLeadfedup" (Campaign-gate bullet; 95.7 % shadow agreement was the
+   evidence). Watch the first live runs: Summary `convert_staged`, the chained Stage 2
+   run's `preflight_failures.csv` (expect `dbid_xor` to be gone) and duplicates among
+   the new Accounts. The first live run also converts the backlog of pending create_new
+   leads still in `Status = New` within the 14-day window. Widening further
+   (`matched_incomplete`, `link`) is a config commit. A required-reviewers Environment
+   is NOT possible (needs a paid plan on private repos, verified 2026-07-10).
 2. **Port `lf_name_dropped` from `Contact Presence Check`** — the highest-value LF-matching
    work here, and the 2026-08-25 backtest is why. `lf_name_agreement = 100` does NOT mean
    the right company: the gate scores a TRUNCATED name as perfect agreement, so

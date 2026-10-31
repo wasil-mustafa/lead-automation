@@ -169,9 +169,12 @@ Fire at conversion (must be satisfied by write-back first):
 - **`KN_DbIdValidation` — EXACTLY ONE of `KN_DBID__c` / `KN_NoOwnDBID__c=true`** (XOR: both set
   is also an error). 71% of leads violated it on 2026-07-05. Write-back set
   `KN_NoOwnDBID__c=true` on every DBID-less lead from 2026-07-05 until **2026-10-20, when Wasil
-  stopped it: the pipeline now leaves `KN_NoOwnDBID__c` alone**, so a lead with neither field
-  is dropped by preflight `dbid_xor` (`KN_DBID__c` itself is D&B-integration-owned and never
-  written). Rule re-checked active on Lead 2026-10-20.
+  stopped it: the pipeline leaves `KN_NoOwnDBID__c` alone for leads humans convert**, so such
+  a lead with neither field is dropped by preflight `dbid_xor` (`KN_DBID__c` itself is
+  D&B-integration-owned and never written). **Since 2026-10-31 the write-back ticks it again
+  for the leads Stage 1 stages for auto-conversion** (campaign-gate candidates,
+  `lead_field_payload(for_conversion=True)`), so the chained Stage 2 passes this rule.
+  Rule re-checked active on Lead 2026-10-20.
 - **`KN_EmployeeCategoryMandatory` — `KN_Employee__c` required.** 97% currently blank; write-back
   fills it from LF `Employee_Count`, falling back to the claimer task's parsed company size
   (closed 2026-07-05; leads with neither source are caught by preflight).

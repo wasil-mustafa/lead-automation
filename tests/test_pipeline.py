@@ -643,9 +643,10 @@ def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
     assert not review_dir.exists() or not list(review_dir.iterdir())
 
 
-# --- Stage 1: enrich-only go-live for claimer (2026-10-19) ----------------------
-# The scheduled config writes back every LF-matched claimer lead, converts nothing.
-# ebp_trial was kept dry until 2026-10-20, when it joined the write-back scope.
+# --- Stage 1: scheduled config, claimer + ebp_trial (2026-10-19 / -20 / -31) -------
+# The scheduled config writes back every LF-matched claimer/ebp_trial lead. Since
+# 2026-10-31 a create_new lead converts only when this run tagged it matched_complete
+# ("EnrichLeadfedup"); these two runs use company={} -> matched_incomplete -> human.
 from leadauto.predictions import load_predictions  # noqa: E402
 
 def _live_run(tmp_path, monkeypatch, task_type="claimer"):
@@ -674,6 +675,8 @@ def test_enrich_only_claimer_is_written_back_but_not_staged(tmp_path, monkeypatc
     assert res.results[0].decision == "create_new"
     # score 4.5: no score axis any more, so a high-score claimer is enriched too
     assert [r["Id"] for _, recs in sf.updates for r in recs] == ["00Q000000000001"]
+    # matched_incomplete (no LF street/headcount): no DBID tick, not staged
+    assert "KN_NoOwnDBID__c" not in sf.updates[0][1][0]
     assert not review_dir.exists() or not list(review_dir.glob("approved_*"))
     # A human converts it, so it stays shadow evidence: decision only, no field checks.
     pred = load_predictions(preds)
@@ -877,3 +880,113 @@ def test_stage1_campaign_request_error_never_aborts_the_run(tmp_path, monkeypatc
     assert [f["stage"] for f in res.failures] == ["campaign"]
     assert (tmp_path / "qa.xlsx").exists()                         # QA still written
     assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+
+
+# --- Campaign conversion gate (Wasil, 2026-10-31) ----------------------------------
+# Stage 1 -> write-back -> campaign -> convert ONLY the leads tagged matched_complete
+# ("EnrichLeadfedup") this run. Scheduled config (SETTINGS) throughout.
+
+COMPLETE = {"Street": "Hauptstr. 1", "Employee_Count": 120}
+
+
+def _live_preds(sf, tmp_path, **kw):
+    preds = tmp_path / "predictions.jsonl"
+    res = run_stage1(sf, kw.pop("lf", object()), kw.pop("settings", SETTINGS),
+                     state=State(None, []), since="2026-05-01T00:00:00Z", dry_run=False,
+                     qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                     review_dir=tmp_path / "review", predictions_path=preds)
+    return res, preds
+
+
+def _summary(tmp_path):
+    return {r[0].value: r[1].value
+            for r in load_workbook(tmp_path / "qa.xlsx")["Summary"].iter_rows(min_row=2)}
+
+
+def test_campaign_gate_stages_the_fedup_lead_with_dbid_tick(tmp_path, monkeypatch):
+    _enrich_with(monkeypatch, company=COMPLETE)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    res, preds = _live_preds(sf, tmp_path)
+    assert res.results[0].decision == "create_new"
+    written = sf.updates[0][1][0]
+    assert written["KN_NoOwnDBID__c"] is True            # dbid_xor passes in Stage 2
+    assert sf.creates == [("CampaignMember", [{"CampaignId": CAMPAIGNS["matched_complete"],
+                                               "LeadId": "00Q000000000001"}])]
+    files = list((tmp_path / "review").glob("approved_*auto*.csv"))
+    assert [r["lead_id"] for r in read_approved(files[0])] == ["00Q000000000001"]
+    assert _summary(tmp_path)["convert_staged"] == 1
+    # converted by us -> never shadow evidence
+    assert not preds.exists() or load_predictions(preds) == []
+
+
+def test_campaign_gate_leaves_the_shortage_lead_to_a_human(tmp_path, monkeypatch):
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})    # no headcount
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    res, preds = _live_preds(sf, tmp_path)
+    written = sf.updates[0][1][0]
+    assert "KN_NoOwnDBID__c" not in written                # human-converted rule holds
+    assert sf.creates[0][1][0]["CampaignId"] == CAMPAIGNS["matched_incomplete"]
+    assert list((tmp_path / "review").glob("approved_*")) == []
+    assert _summary(tmp_path)["convert_staged"] == 0
+    review = load_workbook(tmp_path / "qa.xlsx")["Review"]
+    header = [c.value for c in review[1]]
+    assert review[2][header.index("live_scope")].value == "campaign_matched_incomplete"
+    pred = load_predictions(preds)
+    assert [q.lead_id for q in pred] == ["00Q000000000001"] and pred[0].written_back is True
+
+
+def test_campaign_gate_holds_back_a_lead_whose_campaign_insert_failed(tmp_path, monkeypatch):
+    # "Only convert leads that HAVE the campaign": a failed CampaignMember insert
+    # means the lead is not in it, so it stays with a human (and in shadow).
+    _enrich_with(monkeypatch, company=COMPLETE)
+
+    class FailingCampaignSf(FakeSfClient):
+        def create_records(self, sobject, records):
+            self.creates.append((sobject, records))
+            return {"processed": len(records), "created": 0, "duplicates": 0,
+                    "failed": len(records),
+                    "failures": [{"record": r, "error": "INSUFFICIENT_ACCESS: no"}
+                                 for r in records]}
+
+    sf = FailingCampaignSf(tasks=[_task(who="00Q000000000001")],
+                           leads=[_lead("00Q000000000001")])
+    res, preds = _live_preds(sf, tmp_path)
+    assert res.campaigns["campaign_failed"] == 1
+    assert list((tmp_path / "review").glob("approved_*")) == []
+    assert [q.lead_id for q in load_predictions(preds)] == ["00Q000000000001"]
+
+
+def test_campaign_gate_treats_already_member_as_tagged(tmp_path, monkeypatch):
+    _enrich_with(monkeypatch, company=COMPLETE)
+
+    class DupSf(FakeSfClient):
+        def create_records(self, sobject, records):
+            self.creates.append((sobject, records))
+            return {"processed": len(records), "created": 0, "duplicates": len(records),
+                    "failed": 0, "failures": []}
+
+    sf = DupSf(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    _live_preds(sf, tmp_path)
+    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+
+
+def test_campaign_gate_stages_nothing_without_leadfeeder(tmp_path, monkeypatch):
+    # LF off => no tagging => the gate fails closed even for a create_new lead.
+    import leadauto.pipeline.stage1_enrich as s1
+    monkeypatch.setattr(s1, "live_scope_reason", lambda r, s: None)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    res, _ = _live_preds(sf, tmp_path, lf=None)
+    assert sf.creates == []
+    assert list((tmp_path / "review").glob("approved_*")) == []
+    assert _summary(tmp_path)["convert_staged"] == 0
+
+
+def test_campaign_gate_absent_key_keeps_the_go_live_behaviour(tmp_path, monkeypatch):
+    # _no_gate_settings has no convert_campaigns: the conversion scope alone stages,
+    # an incomplete write-back included, and the DBID tick still follows the staging.
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    _live_preds(sf, tmp_path, settings=_no_gate_settings())
+    assert sf.updates[0][1][0]["KN_NoOwnDBID__c"] is True
+    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+    assert "convert_staged" not in _summary(tmp_path)

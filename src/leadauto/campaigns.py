@@ -79,6 +79,26 @@ def campaign_bucket(result, payload: dict | None, written: bool,
     return MATCHED_COMPLETE if _filled(employee) and _filled(street) else MATCHED_INCOMPLETE
 
 
+def campaign_buckets(results: Sequence, payloads: Sequence[dict | None],
+                     written_ids: Iterable[str],
+                     task_types: Sequence[str] | None = None,
+                     duplicate_ids: Iterable[str] = ()) -> dict[str, str]:
+    """lead_id -> bucket for every taggable result (first occurrence of a lead wins;
+    untagged leads are absent). `payloads` is index-aligned with `results`."""
+    written = set(written_ids)
+    duplicates = set(duplicate_ids)
+    buckets: dict[str, str] = {}
+    for r, payload in zip(results, payloads):
+        lead_id = r.enriched.extracted.lead_id
+        if lead_id in buckets:
+            continue
+        bucket = campaign_bucket(r, payload, lead_id in written, task_types,
+                                 duplicate=lead_id in duplicates)
+        if bucket:
+            buckets[lead_id] = bucket
+    return buckets
+
+
 def campaign_members(results: Sequence, payloads: Sequence[dict | None],
                      written_ids: Iterable[str], campaigns: dict[str, str],
                      task_types: Sequence[str] | None = None,
@@ -92,19 +112,11 @@ def campaign_members(results: Sequence, payloads: Sequence[dict | None],
     campaign. Status is left to the campaign's default member status.
     Returns (rows, per-bucket counts).
     """
-    written = set(written_ids)
-    duplicates = set(duplicate_ids)
     rows: list[dict] = []
     counts: Counter = Counter()
-    seen: set[str] = set()
-    for r, payload in zip(results, payloads):
-        lead_id = r.enriched.extracted.lead_id
-        if lead_id in seen:
-            continue
-        seen.add(lead_id)
-        bucket = campaign_bucket(r, payload, lead_id in written, task_types,
-                                 duplicate=lead_id in duplicates)
-        campaign_id = campaigns.get(_CAMPAIGN_OF.get(bucket, bucket)) if bucket else None
+    for lead_id, bucket in campaign_buckets(results, payloads, written_ids, task_types,
+                                            duplicate_ids).items():
+        campaign_id = campaigns.get(_CAMPAIGN_OF.get(bucket, bucket))
         if not campaign_id:
             continue
         rows.append({"CampaignId": campaign_id, "LeadId": lead_id})

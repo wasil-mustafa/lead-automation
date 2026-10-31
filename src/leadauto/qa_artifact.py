@@ -20,7 +20,8 @@ from openpyxl.utils import get_column_letter
 from .campaigns import BUCKETS, campaign_bucket
 from .convert.preflight import check_lead
 from .models import CONTACT_SKIP_NOT_NEEDED
-from .live_scope import is_wide_match, live_scope_reason, writeback_reason
+from .live_scope import (campaign_gate_reason, is_wide_match, live_scope_reason,
+                         writeback_reason)
 from .textnorm import country_iso2, normalize_city, normalize_postal
 from .match import RULE_DECISIONS
 from .writeback import lead_field_payload, lf_contact_email
@@ -170,7 +171,6 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     live = live_wb = ""
     if settings is not None:
         yes = "yes_wide_match" if is_wide_match(result) else "yes"
-        live = live_scope_reason(result, settings) or yes
         live_wb = writeback_reason(result, settings) or yes
     # lf_campaign: the LeadFeeder-outcome campaign a live run tags this lead with
     # (campaigns.py), judged as if the write-back succeeded. Blank when the lead is not
@@ -179,6 +179,11 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     if settings is not None and settings.lf_campaigns:
         campaign = campaign_bucket(result, payload, written=live_wb.startswith("yes"),
                                    task_types=settings.lf_campaign_task_types) or ""
+    if settings is not None:
+        # conversion verdict = scope gate, then the campaign gate (2026-10-31) on the
+        # bucket above — `campaign_matched_incomplete` = enriched live, human converts.
+        live = (live_scope_reason(result, settings)
+                or campaign_gate_reason(campaign or None, settings) or yes)
     return {
         "lead_id": e.lead_id, "task_id": e.task_id, "task_type": e.task_type,
         "subject": e.subject,
@@ -320,18 +325,22 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     if settings is not None:
         summary.append(["live_writeback_pass",
                         sum(1 for r in results if writeback_reason(r, settings) is None)])
-        live = [r for r in results if live_scope_reason(r, settings) is None]
+        # live_scope_pass counts the Review verdict, which includes the campaign gate
+        live_ids = {d["lead_id"] for d in review_dicts if d["live_scope"].startswith("yes")}
+        live = [r for r in results if r.enriched.extracted.lead_id in live_ids]
         summary.append(["live_scope_pass", len(live)])
         summary.append(["live_scope_wide_match", sum(1 for r in live if is_wide_match(r))])
         if settings.lf_campaigns:
             summary.extend(["campaign_" + b, sum(1 for d in review_dicts
                                                   if d["lf_campaign"] == b)]
                            for b in BUCKETS)
-            # live runs only: what the CampaignMember insert actually did
+            # live runs only: what the CampaignMember insert actually did, and how many
+            # leads the campaign gate then staged for Stage 2
             summary.extend([k, meta[k]] for k in ("campaign_duplicate_detected",
                                                   "campaign_created",
                                                   "campaign_already_member",
-                                                  "campaign_failed") if k in meta)
+                                                  "campaign_failed",
+                                                  "convert_staged") if k in meta)
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
     add_sheet(wb, "Summary", ["metric", "value"], summary)
 
@@ -340,7 +349,8 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
 
 def write_auto_approved_csv(results: list, review_dir: str | Path, settings,
                             exclude_lead_ids: set | frozenset = frozenset(),
-                            now: datetime | None = None) -> Path | None:
+                            now: datetime | None = None,
+                            only_lead_ids: set | frozenset | None = None) -> Path | None:
     """Auto-approved conversion CSV (`review_gate: false`, Wasil 2026-07-10; narrowed
     to the live scope for the phased go-live, 2026-07-18).
 
@@ -350,12 +360,17 @@ def write_auto_approved_csv(results: list, review_dir: str | Path, settings,
     `targets_from_approved` reads, so Stage 2 (preflight, clustering, pool gate) runs
     unchanged. `review`/`skip` rows never qualify; leads in `exclude_lead_ids`
     (write-back failures — their fields would fail conversion validation anyway) are
-    held back for the next run. Returns None without touching disk when nothing
-    qualifies.
+    held back for the next run. `only_lead_ids` (2026-10-31) = the leads the campaign
+    gate admitted this run (`live_scope.convert_campaigns`); with that axis configured
+    and no set passed, nothing qualifies — the gate fails closed. Returns None without
+    touching disk when nothing qualifies.
     """
+    if settings.live_convert_buckets is not None and only_lead_ids is None:
+        only_lead_ids = frozenset()
     rows = [_review_row(r, settings) for r in results
             if live_scope_reason(r, settings) is None
-            and r.enriched.extracted.lead_id not in exclude_lead_ids]
+            and r.enriched.extracted.lead_id not in exclude_lead_ids
+            and (only_lead_ids is None or r.enriched.extracted.lead_id in only_lead_ids)]
     if not rows:
         return None
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")

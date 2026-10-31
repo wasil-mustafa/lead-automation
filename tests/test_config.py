@@ -55,11 +55,28 @@ def test_scheduled_scope_from_config_yaml():
     assert s.include_enriched_leads is True
     assert s.live_max_kununu_score is None
     assert s.live_allow_wide_match is True
-    # 2026-10-19 (Wasil): enrich-only go-live for claimer — every LF-matched decision is
-    # written back, nothing converts. 2026-10-20 (Wasil): ebp_trial is enriched too.
-    assert s.live_decisions == []
+    # 2026-10-19 (Wasil): every LF-matched decision is written back. 2026-10-20
+    # (Wasil): ebp_trial is enriched too. 2026-10-31 (Wasil): create_new converts
+    # again, but only leads tagged "EnrichLeadfedup" (matched_complete) this run.
+    assert s.live_decisions == ["create_new"]
+    assert s.live_convert_buckets == ["matched_complete"]
     assert s.live_writeback_decisions == ["create_new", "link", "review"]
     assert s.live_task_types == ["claimer", "ebp_trial"]
+
+
+def test_convert_campaigns_absent_means_no_campaign_axis():
+    s = Settings(raw={"pipeline": {"live_scope": {"decisions": ["create_new"]}}},
+                 leadfeeder_api_key=None, sf_auth_url=None)
+    assert s.live_convert_buckets is None
+
+
+def test_convert_campaigns_unknown_bucket_raises():
+    # A typo must not silently stage nothing forever.
+    import pytest
+    s = Settings(raw={"pipeline": {"live_scope": {"convert_campaigns": ["fedup"]}}},
+                 leadfeeder_api_key=None, sf_auth_url=None)
+    with pytest.raises(ValueError, match="fedup"):
+        s.live_convert_buckets
 
 
 def test_live_scope_split_defaults_preserve_go_live_behaviour():
