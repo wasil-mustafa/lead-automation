@@ -10,7 +10,7 @@ Three tiers, because they deserve different answers:
 * ``deny`` (credentials) -- ``.env`` and anything auth-shaped. All local plaintext
   copies were deliberately deleted 2026-07-05; keys live only in GitHub Secrets.
   There is never a good reason to read one into a transcript. For a local run,
-  set the env var ad hoc (see the /stage1-dry-run skill).
+  set the env var ad hoc (see the /pipeline-dry-run skill).
 * ``deny`` (pipeline-owned state, WRITES ONLY) -- ``state/*.json{,l}`` are emitted
   by the pipeline and committed by CI. Hand-editing them is not a fix, it is
   fabricated evidence: ``predictions.jsonl`` and ``shadow_results.jsonl`` ARE the
@@ -106,7 +106,7 @@ def classify(raw_path, tool_name):
                 "{} holds Salesforce/LeadFeeder/kununu credentials. Blocked by the "
                 "project PreToolUse guard (.claude/hooks/guard_sensitive_files.py). "
                 "Secrets live in GitHub Secrets only; for a local run set the env var "
-                "ad hoc (see the /stage1-dry-run skill) instead of reading the "
+                "ad hoc (see the /pipeline-dry-run skill) instead of reading the "
                 "file.".format(path.name),
             )
 

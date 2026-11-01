@@ -1,17 +1,24 @@
 #!/usr/bin/env python
-"""PreToolUse guard on Bash: live writes, wrong org, and API-call cost.
+"""PreToolUse guard on shell commands: live writes, wrong org, and API-call cost.
 
-Wired into .claude/settings.json as a PreToolUse hook on ``Bash``. One script for
-three checks so a command costs one process spawn, not three.
+Wired into .claude/settings.json as a PreToolUse hook on ``Bash`` AND ``PowerShell``
+(the PowerShell matcher since 2026-11-01 -- this repo's skills give PowerShell
+commands, and both tools carry the command line in ``tool_input.command``). One
+script for all checks so a command costs one process spawn, not several. The
+patterns below are shell-agnostic substrings, so they read a PowerShell line
+(``$env:PYTHONPATH = "src"; python -m leadauto run --no-dry-run``) the same way.
 
-Why each check exists -- all three are failures this repo has actually seen or
+Why each check exists -- all of them are failures this repo has actually seen or
 documented, and none of them announce themselves:
 
-1. **Live writes.** A dry run is free; a live run PATCHes production Leads and
-   calls SOAP ``convertLead()``, which cannot be undone. The only brake today is
-   "dispatch deliberately", i.e. human memory. Detection is deliberately
-   *explicit-signal only* (``--no-dry-run``, ``dry_run=false``) plus the
-   config-derived case, so it does not cry wolf on the normal dry command.
+1. **Live writes.** A dry run is free; a live run PATCHes production Leads and --
+   since 2026-11-01, when ``stage1``/``stage2`` were fused into ``leadauto run`` --
+   calls SOAP ``convertLead()`` in the SAME process, which cannot be undone. The
+   only brake today is "dispatch deliberately", i.e. human memory. Detection is
+   deliberately *explicit-signal only* (``--no-dry-run``, ``dry_run=false``) plus
+   the config-derived case, so it does not cry wolf on the normal dry command.
+   ``stage1``/``stage2`` stay in the pattern so old transcripts and muscle memory
+   still classify (the CLI itself no longer has them).
 2. **`--batch-size` > 3.** Measured, not theoretical: batched SOAP
    ``convertLead()`` runs one transaction per call and ~5 conversions' cascaded
    triggers/flows exhaust a per-transaction governor limit. The bulk call then
@@ -25,7 +32,7 @@ documented, and none of them announce themselves:
    session. This keeps a rough running estimate and speaks up once, past a
    threshold. Advisory only: it never blocks.
 
-Fails open on anything unexpected: a crashing hook that blocks every Bash call
+Fails open on anything unexpected: a crashing hook that blocks every shell call
 would be worse than the accident it prevents.
 """
 
@@ -40,11 +47,32 @@ CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 
 MAX_LIVE_BATCH_SIZE = 3
 # Rough per-run cost estimates (see CLAUDE.md "API-call budget"). Advisory only.
-RUN_COST = {"stage1": 12, "stage2": 8, "backtest-skipped": 12, "shadow-compare": 9}
+# stage1/stage2/shadow-compare are the figures in .claude/agents/api-budget-auditor.md
+# ("Stage 1 ~12 calls, Stage 2 ~8, shadow-compare ~7-9"). `run` (2026-11-01) is the
+# fused pipeline, so it is derived rather than measured: old stage1 (12) + old stage2
+# (8) + the convert sweep's 2 extra calls (1 SOQL `campaign_members_unconverted` read,
+# 1 `KN_NoOwnDBID__c` tick PATCH -- CLAUDE.md "ONE RUN" bullet) = 22. That is the
+# live upper bound; a dry run skips the writes and SOAP (~12 + ~2 sweep-preview
+# reads), so this over-counts dry runs -- the safe direction for a budget warning.
+# SOAP convertLead() is one call per batch of 3, so a big sweep costs more; re-measure
+# from a live run before trusting the figure for anything but this advisory.
+RUN_COST = {
+    "run": 22,
+    "stage1": 12,
+    "stage2": 8,
+    "backtest-skipped": 12,
+    "shadow-compare": 9,
+}
 QUERY_COST = 2  # a bulk query job: create + one result page
 ESTIMATE_WARN_AT = 25
 
-LEADAUTO_RE = re.compile(r"leadauto\s+(stage1|stage2|backtest-skipped|shadow-compare)")
+# `(?![\w-])` instead of a bare `\b`: `\b` would let `leadauto run-foo` / `runner`
+# style words through on the `run` alternative (`\b` matches before a hyphen).
+LEADAUTO_RE = re.compile(
+    r"leadauto\s+(run|stage1|stage2|backtest-skipped|shadow-compare)(?![\w-])"
+)
+# Commands whose dry/live mode follows config pipeline.dry_run when no flag is given.
+CONFIG_DRY_RUN_COMMANDS = ("run", "stage1", "stage2")
 BATCH_SIZE_RE = re.compile(r"--batch-size[=\s]+(\d+)")
 LIVE_MARKERS = (
     "--no-dry-run",
@@ -101,7 +129,7 @@ def classify(command):
     batch = BATCH_SIZE_RE.search(command)
     if batch and int(batch.group(1)) > MAX_LIVE_BATCH_SIZE and "--dry-run" not in lowered:
         return deny(
-            "--batch-size {} on a non-dry convert. Measured on this org (backlog "
+            "--batch-size {} on a non-dry run (`leadauto run` converts in-process). Measured on this org (backlog "
             "conversion, 2026-07-17): batched SOAP convertLead() runs ONE transaction "
             "per call, and around 5 conversions' cascaded triggers/flows exhaust a "
             "per-transaction governor limit -- the bulk call fails and the individual "
@@ -112,24 +140,29 @@ def classify(command):
         )
 
     if live_marker and (run_match or "workflow run" in lowered or "gh api" in lowered):
-        stage = run_match.group(1) if run_match else "the dispatched workflow"
+        stage = (
+            "`leadauto {}`".format(run_match.group(1)) if run_match
+            else "the dispatched workflow"
+        )
         return ask(
             "This is a LIVE run ({} found), not a dry run: {} writes to PRODUCTION "
-            "Salesforce org 'headless'. Lead write-back is a real PATCH and Stage 2 "
-            "conversions are IRREVERSIBLE. Confirm this is deliberate, and check "
-            "--batch-size <= {} if it converts.".format(
-                live_marker, stage, MAX_LIVE_BATCH_SIZE
-            )
+            "Salesforce org 'headless'. The fused pipeline does it all in one process: "
+            "Lead write-back (a real PATCH), campaign tagging, the KN_NoOwnDBID__c tick "
+            "on swept leads, and SOAP convertLead() conversions, which are "
+            "IRREVERSIBLE. Prefer dispatching pipeline.yml over a local live run (a "
+            "local run leaves no artifact). Confirm this is deliberate, and keep "
+            "--batch-size <= {}.".format(live_marker, stage, MAX_LIVE_BATCH_SIZE)
         )
 
     if run_match and "--dry-run" not in lowered and not live_marker:
         stage = run_match.group(1)
-        if stage in ("stage1", "stage2") and config_dry_run_default() is False:
+        if stage in CONFIG_DRY_RUN_COMMANDS and config_dry_run_default() is False:
             return ask(
                 "config/config.yaml now has pipeline.dry_run: false, so this bare "
-                "`{}` command is a LIVE run against production org 'headless' even "
-                "without --no-dry-run. Pass --dry-run explicitly, or confirm the live "
-                "run is deliberate.".format(stage)
+                "`leadauto {}` command is a LIVE run against production org 'headless' "
+                "even without --no-dry-run -- write-back AND irreversible SOAP "
+                "conversions, in-process. Pass --dry-run explicitly, or confirm the "
+                "live run is deliberate.".format(stage)
             )
 
     if SF_ORG_TOUCHING_RE.search(lowered) and not SF_TARGET_RE.search(command):
@@ -197,8 +230,10 @@ def main():
         print("guard_bash: unreadable payload: {}".format(exc), file=sys.stderr)
         return 0
 
-    command = (payload.get("tool_input") or {}).get("command") or ""
-    if not command.strip():
+    # Bash and PowerShell both put the command line in tool_input.command.
+    tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
+    command = tool_input.get("command") if isinstance(tool_input, dict) else ""
+    if not isinstance(command, str) or not command.strip():
         return 0
 
     decision, reason = classify(command)
