@@ -289,6 +289,25 @@ class Settings:
         return [str(t) for t in scope["task_types"]]
 
     @property
+    def live_convert_buckets(self) -> list[str] | None:
+        """LF-outcome campaign buckets (campaigns.py BUCKETS) a lead must have been
+        tagged with THIS run before it is staged for conversion (Wasil, 2026-10-31:
+        `matched_complete` = "EnrichLeadfedup" only). None (key absent) = no campaign
+        axis, the 2026-07-18 behaviour. An unknown bucket name raises: a typo here
+        would silently convert nothing."""
+        scope = self.raw["pipeline"].get("live_scope") or {}
+        buckets = scope.get("convert_campaigns")
+        if buckets is None:
+            return None
+        from .campaigns import BUCKETS
+        out = [str(b) for b in buckets]
+        unknown = sorted(set(out) - set(BUCKETS))
+        if unknown:
+            raise ValueError(f"live_scope.convert_campaigns: unknown bucket(s) {unknown}; "
+                             f"valid: {list(BUCKETS)}")
+        return out
+
+    @property
     def repair_national_phone(self) -> bool:
         """True lets the write-back OVERWRITE a Lead.Phone of the shape `+0<digits>` — a
         national number with a '+' glued onto its trunk zero, which the org's validation

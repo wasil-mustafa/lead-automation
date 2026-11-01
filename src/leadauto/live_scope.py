@@ -75,3 +75,16 @@ def live_scope_reason(result, settings) -> str | None:
     if result.decision not in settings.live_decisions:
         return f"decision_{result.decision}"
     return None
+
+
+def campaign_gate_reason(bucket: str | None, settings) -> str | None:
+    """Third conversion axis (Wasil, 2026-10-31): the lead must have been tagged THIS
+    run with a campaign bucket listed in `live_scope.convert_campaigns` (campaigns.py;
+    `matched_complete` = "EnrichLeadfedup" = written back with KN_Employee__c AND
+    Street filled). None => passes; else `campaign_<bucket>` / `campaign_none` (not
+    tagged: no campaign configured, LeadFeeder off, write-back or insert failed).
+    An absent config key disables the axis."""
+    buckets = settings.live_convert_buckets
+    if buckets is None or bucket in buckets:
+        return None
+    return f"campaign_{bucket or 'none'}"

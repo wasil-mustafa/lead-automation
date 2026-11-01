@@ -306,6 +306,38 @@ class TestNoOwnDbidLeftAlone:
         assert "KN_NoOwnDBID__c" not in lead_field_payload(enr)
 
 
+class TestNoOwnDbidForConversion:
+    # Wasil, 2026-10-31: a lead the PIPELINE converts this run gets the tick when it has
+    # neither a DBID nor the tick, so Stage 2 preflight `dbid_xor` passes. Human-converted
+    # leads keep the rule above.
+    def test_ticked_when_lead_dbid_blank(self):
+        enr = EnrichedLead(extracted=_extracted())
+        assert lead_field_payload(enr, for_conversion=True)["KN_NoOwnDBID__c"] is True
+
+    def test_not_ticked_when_lead_has_dbid(self):
+        enr = EnrichedLead(extracted=_extracted(lead_dbid="12345"))
+        assert "KN_NoOwnDBID__c" not in lead_field_payload(enr, for_conversion=True)
+
+    def test_not_rewritten_when_already_ticked(self):
+        enr = EnrichedLead(extracted=_extracted(lead_no_own_dbid=True))
+        assert "KN_NoOwnDBID__c" not in lead_field_payload(enr, for_conversion=True)
+
+    def test_write_back_ticks_only_the_convert_ids(self):
+        class Client:
+            def update_records(self, sobject, records, allow_duplicates=False):
+                self.records = records
+                return {"processed": len(records), "failed": 0, "failures": []}
+
+        client = Client()
+        # region = some enrichment, so neither payload is the Id-only "nothing to write"
+        leads = [EnrichedLead(extracted=_extracted(lead_id="00Q1", region="Germany")),
+                 EnrichedLead(extracted=_extracted(lead_id="00Q2", region="Germany"))]
+        write_back(client, leads, dry_run=False, convert_ids={"00Q2"})
+        by_id = {r["Id"]: r for r in client.records}
+        assert "KN_NoOwnDBID__c" not in by_id["00Q1"]
+        assert by_id["00Q2"]["KN_NoOwnDBID__c"] is True
+
+
 class TestAddressFill:
     def test_address_always_from_lf(self):
         # Tasks carry no address (2026-07-10 spec): parsed lead-side address fields are

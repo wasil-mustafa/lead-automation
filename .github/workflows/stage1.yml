@@ -205,7 +205,8 @@ jobs:
           fi
 
   # Phased go-live (2026-07-18): a live Stage-1 run that staged live-scope rows
-  # (kununu score < 3, create_new — config `pipeline.live_scope`) converts them
+  # (config `pipeline.live_scope`; since 2026-10-31: create_new AND tagged
+  # "EnrichLeadfedup" this run) converts them
   # immediately. The CSV was committed by the step above; stage2.yml checks out the
   # master HEAD, so it sees it. batch_size 3 = the live governor-limit ceiling.
   convert:

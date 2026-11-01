@@ -140,8 +140,14 @@ def dialable_phone(contact: dict, company: dict) -> str | None:
             or None)
 
 
-def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
+def lead_field_payload(enriched: EnrichedLead, settings=None, *,
+                       for_conversion: bool = False) -> dict:
     """Build the Id-keyed write-back dict for one enriched Lead (only populated fields).
+
+    `for_conversion=True` marks a lead the pipeline itself will convert this run: it
+    additionally ticks `KN_NoOwnDBID__c` when the Lead has neither a DBID nor the tick
+    (Wasil, 2026-10-31), so Stage 2 preflight `dbid_xor` passes. Leads left to humans
+    keep the 2026-10-20 rule (never written).
 
     Field spec (Wasil, 2026-07-10): from the Task only the kununu URL, Region and the
     contact email (-> standard Email, overwriting a differing Lead email; with no Task
@@ -201,9 +207,12 @@ def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
     _fill(payload, "Title", e.lead_title, e.position or contact.get("position"))
 
     # conversion requirements (org validation rules; all fill-only-blank)
-    # KN_NoOwnDBID__c is deliberately NOT written (Wasil, 2026-10-20): it used to be ticked
-    # for every DBID-less lead to satisfy KN_DbIdValidation; now it is left alone, so such a
-    # lead fails Stage 2 preflight `dbid_xor` until a human or D&B resolves it.
+    # KN_NoOwnDBID__c is NOT written for a lead a human converts (Wasil, 2026-10-20): it
+    # used to be ticked for every DBID-less lead to satisfy KN_DbIdValidation; left alone,
+    # such a lead fails Stage 2 preflight `dbid_xor` until a human or D&B resolves it.
+    # Only a lead the pipeline converts itself (`for_conversion`, 2026-10-31) gets it.
+    if for_conversion and is_blank(e.lead_dbid) and not e.lead_no_own_dbid:
+        payload["KN_NoOwnDBID__c"] = True
     # address: always LeadFeeder (spec 2026-07-10, pinned by TestAddressFill). The event
     # parser stores the badge address in the parsed fields only; it is deliberately NOT
     # used here — changing that means changing the spec and its test together.
@@ -241,14 +250,17 @@ def lead_field_payload(enriched: EnrichedLead, settings=None) -> dict:
 
 
 def write_back(client, enriched_leads: list[EnrichedLead], dry_run: bool = False, logger=None,
-               settings=None) -> dict:
+               settings=None, convert_ids: frozenset | set = frozenset()) -> dict:
     """Write enrichment back to Leads. Returns {processed, payloads}; no call under dry_run.
 
     Leads whose payload carries only the Id (nothing enriched) are skipped — there is
-    nothing to write and we never want to issue an empty update.
+    nothing to write and we never want to issue an empty update. `convert_ids` = leads
+    the pipeline will convert this run (`lead_field_payload(for_conversion=True)`).
     """
     log = logger or get_logger("writeback")
-    payloads = [lead_field_payload(e, settings) for e in enriched_leads]
+    payloads = [lead_field_payload(e, settings,
+                                   for_conversion=e.extracted.lead_id in convert_ids)
+                for e in enriched_leads]
     writable = [p for p in payloads if len(p) > 1]  # more than just {"Id": ...}
 
     if dry_run:
