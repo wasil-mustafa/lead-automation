@@ -90,7 +90,7 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   contact email/phone can be sparse on this LF tier).
 - **Scheduled:** the run is triggered by an **external cron-job.org job** (id 8029899) hitting the
   `pipeline.yml` `workflow_dispatch` (was `stage1.yml` until 2026-11-01) every 2 h at :48,
-  08:48-16:48 Vienna (5/day). **Scheduled
+  08:48-16:48 Vienna, **Mon-Fri only since 2026-11-01** (`wdays: [1,2,3,4,5]`; 5/day). **Scheduled
   runs are LIVE since 2026-10-19:** the job POSTs `{"ref":"master","inputs":{"dry_run":"false"}}`
   (before that it sent no inputs ⇒ `dry_run` defaulted true ⇒ every scheduled run was dry).
   What "live" does is decided by `pipeline.live_scope` — since 2026-10-31 **enrich every
