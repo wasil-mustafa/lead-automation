@@ -60,7 +60,6 @@ matching:
   lf_name_agree_rescue: 90
   dedupe_name_agree_min: 85
 pipeline:
-  review_gate: false
   dry_run: true
   batch_limit: 0
   task_lookback_days: 14

@@ -224,8 +224,12 @@ class Settings:
 
     # --- Pipeline toggles ---
     @property
-    def review_gate(self) -> bool:
-        return bool(self.raw["pipeline"].get("review_gate", True))
+    def convert_batch_size(self) -> int:
+        """Leads per SOAP `convertLead()` call. Default 3 = the live governor-limit
+        ceiling measured on the 2026-07-17 backlog run (>5 per call exhausted the
+        per-transaction budget: each conversion cascades triggers, flows and rules
+        synchronously in ONE transaction). Raise only with a logged re-measurement."""
+        return int(self.raw["pipeline"].get("convert_batch_size", 3))
 
     @property
     def dry_run(self) -> bool:

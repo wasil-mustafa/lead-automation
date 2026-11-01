@@ -1,16 +1,17 @@
-"""QA artifact + review gate (Stage 1 output).
+"""QA artifact (the pipeline run's workbook).
 
-Builds the Excel workbook a human reviews before conversion. The `Review` sheet carries the
-extracted/enriched signals plus the match decision and an empty `Approve?` column; the
-reviewer sets `Approve?=yes`, commits the approved rows, and Stage 2 converts only those.
-Other sheets surface the LeadFeeder contact split, out-of-scope skips, and a reconciling
-summary. Pure data in, a `Workbook` out (write to disk via `write_workbook`).
+Builds the Excel workbook a human reads after a run. The `Review` sheet carries the
+extracted/enriched signals, the match decision and the live-scope verdicts; `Conversion`
+carries what the run converted (this run's leads + the sweep of earlier runs' campaign
+members) or, on a dry run, would convert. Other sheets surface the write-back payload,
+the LeadFeeder contact split, out-of-scope skips, failures and a reconciling summary.
+The review/approval gate (`Approve?` column, `review/approved_*.csv`) was removed on
+2026-11-01 when conversion was fused into the run. Pure data in, a `Workbook` out
+(write to disk via `write_workbook`).
 """
 from __future__ import annotations
 
-import csv
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -38,7 +39,18 @@ REVIEW_COLUMNS = [
     "account_match_id", "account_reason",
     "contact_match_id", "contact_score", "contact_reason",
     "convert_blockers",
-    "live_writeback", "live_scope", "lf_campaign", "decision", "Approve?",
+    "live_writeback", "live_scope", "lf_campaign", "decision",
+]
+# Conversion (2026-11-01): one row per conversion target — `source` run = a lead this
+# run tagged into an auto-convert campaign bucket, sweep = an unconverted member of
+# that campaign from an earlier run (convert/targets.py; `decision`/`predicted_at`
+# then come from its recorded prediction) — plus one per swept lead left to a human.
+# `outcome`: converted | already_converted | failed | missing | preflight_skipped |
+# left_to_human | dry_run | error | not_attempted; `detail` names the checks, error
+# or reason.
+CONVERSION_COLUMNS = [
+    "lead_id", "company", "source", "decision", "predicted_at",
+    "outcome", "detail", "account_id", "contact_id",
 ]
 # The "Enriching" sheet: Salesforce field API names, in the order a reviewer reads them.
 # One row per Lead the write-back would touch, carrying EXACTLY the values
@@ -212,7 +224,7 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
         "contact_score": con.score if con else None,
         "contact_reason": con.reason if con else None,
         "convert_blockers": _convert_blockers(result, settings, payload),
-        "decision": result.decision, "Approve?": None,
+        "decision": result.decision,
     }
 
 
@@ -231,10 +243,13 @@ def add_sheet(wb: Workbook, title: str, columns: list[str], rows: list[list]) ->
 
 
 def build_workbook(results: list, skipped: list, meta: dict | None = None,
-                   failures: list | None = None, settings=None) -> Workbook:
-    """Assemble the QA workbook from match results + skip records + failures + run metadata."""
+                   failures: list | None = None, settings=None,
+                   conversion: list | None = None) -> Workbook:
+    """Assemble the QA workbook from match results + skip records + failures + the
+    conversion rows (pipeline/run.py `_conversion_rows`) + run metadata."""
     meta = meta or {}
     failures = failures or []
+    conversion = conversion or []
     wb = Workbook()
     wb.remove(wb.active)  # drop the default empty sheet
 
@@ -299,6 +314,10 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
     failure_rows = [[f.get("lead_id"), f.get("stage"), f.get("error")] for f in failures]
     add_sheet(wb, "Failures", FAILURES_COLUMNS, failure_rows)
 
+    # Conversion — what the run converted (or, dry, would convert), run + sweep
+    add_sheet(wb, "Conversion", CONVERSION_COLUMNS,
+              [[row.get(c) for c in CONVERSION_COLUMNS] for row in conversion])
+
     # Summary
     decisions = [r.decision for r in results]
     rules = [r.rule for r in results]
@@ -334,60 +353,33 @@ def build_workbook(results: list, skipped: list, meta: dict | None = None,
             summary.extend(["campaign_" + b, sum(1 for d in review_dicts
                                                   if d["lf_campaign"] == b)]
                            for b in BUCKETS)
-            # live runs only: what the CampaignMember insert actually did, and how many
-            # leads the campaign gate then staged for Stage 2
+            # live runs only: what the CampaignMember insert actually did
             summary.extend([k, meta[k]] for k in ("campaign_duplicate_detected",
                                                   "campaign_created",
                                                   "campaign_already_member",
-                                                  "campaign_failed",
-                                                  "convert_staged") if k in meta)
+                                                  "campaign_failed") if k in meta)
+    # conversion counters, tallied from the FINAL Conversion rows (pipeline/run.py);
+    # absent when the run did not convert (convert=False) and swept nothing
+    summary.extend([k, meta[k]] for k in CONVERSION_SUMMARY_KEYS if k in meta)
     summary.extend(["rule_" + name, rules.count(name)] for name in RULE_DECISIONS)
     add_sheet(wb, "Summary", ["metric", "value"], summary)
 
     return wb
 
 
-def write_auto_approved_csv(results: list, review_dir: str | Path, settings,
-                            exclude_lead_ids: set | frozenset = frozenset(),
-                            now: datetime | None = None,
-                            only_lead_ids: set | frozenset | None = None) -> Path | None:
-    """Auto-approved conversion CSV (`review_gate: false`, Wasil 2026-07-10; narrowed
-    to the live scope for the phased go-live, 2026-07-18).
-
-    Emits `review/approved_<UTCts>_auto.csv` holding exactly the Review rows inside the
-    live scope (config `pipeline.live_scope`: eligible decision AND kununu score under
-    the cap — see live_scope.py), `Approve?` pre-set — the same columns
-    `targets_from_approved` reads, so Stage 2 (preflight, clustering, pool gate) runs
-    unchanged. `review`/`skip` rows never qualify; leads in `exclude_lead_ids`
-    (write-back failures — their fields would fail conversion validation anyway) are
-    held back for the next run. `only_lead_ids` (2026-10-31) = the leads the campaign
-    gate admitted this run (`live_scope.convert_campaigns`); with that axis configured
-    and no set passed, nothing qualifies — the gate fails closed. Returns None without
-    touching disk when nothing qualifies.
-    """
-    if settings.live_convert_buckets is not None and only_lead_ids is None:
-        only_lead_ids = frozenset()
-    rows = [_review_row(r, settings) for r in results
-            if live_scope_reason(r, settings) is None
-            and r.enriched.extracted.lead_id not in exclude_lead_ids
-            and (only_lead_ids is None or r.enriched.extracted.lead_id in only_lead_ids)]
-    if not rows:
-        return None
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
-    path = Path(review_dir) / f"approved_{stamp}_auto.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=REVIEW_COLUMNS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({**row, "Approve?": "yes"})
-    return path
+CONVERSION_SUMMARY_KEYS = (
+    "convert_targets_run", "convert_targets_sweep", "converted",
+    "convert_already_converted", "convert_failed", "convert_missing",
+    "convert_preflight_skipped", "convert_left_to_human", "convert_dry_run",
+    "sweep_dbid_ticked", "convert_error",
+)
 
 
 def write_workbook(results: list, skipped: list, meta: dict | None = None,
                    path: str | Path = "qa_artifact.xlsx", failures: list | None = None,
-                   settings=None) -> Path:
+                   settings=None, conversion: list | None = None) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    build_workbook(results, skipped, meta, failures, settings=settings).save(p)
+    build_workbook(results, skipped, meta, failures, settings=settings,
+                   conversion=conversion).save(p)
     return p

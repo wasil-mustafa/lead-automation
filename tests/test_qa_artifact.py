@@ -1,8 +1,9 @@
-"""QA-artifact tests (the review gate).
+"""QA-artifact tests.
 
 We build the workbook in memory and read cells back with openpyxl, so the test verifies the
-real sheet structure (headers incl. the Approve? gate, per-decision content, the Skipped
-reasons, and the Summary counts) without writing to disk except for the round-trip test.
+real sheet structure (Review headers, per-decision content, the Conversion sheet, the
+Skipped reasons, and the Summary counts) without writing to disk except for the
+round-trip test. The `Approve?` review gate was removed on 2026-11-01.
 """
 from openpyxl import load_workbook
 
@@ -10,8 +11,8 @@ from leadauto.models import ExtractedLead
 from leadauto.extract.reader import Skipped
 from leadauto.models import EnrichedLead
 from leadauto.models import AccountMatch, ContactMatch, MatchResult
-from leadauto.qa_artifact import (ENRICHING_COLUMNS, REVIEW_COLUMNS, build_workbook,
-                                  write_workbook)
+from leadauto.qa_artifact import (CONVERSION_COLUMNS, ENRICHING_COLUMNS, REVIEW_COLUMNS,
+                                  build_workbook, write_workbook)
 from leadauto.writeback import lead_field_payload
 
 
@@ -90,8 +91,9 @@ def test_review_header_includes_match_and_gate_columns():
     headers = _headers(wb["Review"])
     assert headers == REVIEW_COLUMNS
     for col in ("decision", "account_match_id", "account_reason",
-                "contact_match_id", "contact_score", "Approve?"):
+                "contact_match_id", "contact_score"):
         assert col in headers
+    assert "Approve?" not in headers          # the review gate is gone (2026-11-01)
 
 
 def test_review_row_has_predicted_industry_column():
@@ -123,7 +125,6 @@ def test_review_row_maps_match_result():
     assert row[idx["account_match_id"]] == "001A"
     assert row[idx["account_reason"]] == "kununu_profile_uuid"
     assert row[idx["contact_match_id"]] == "003C"
-    assert row[idx["Approve?"]] in (None, "")  # reviewer fills this in
 
 
 def test_review_row_shows_name_agreement_next_to_score():
@@ -395,7 +396,7 @@ def test_summary_omits_live_scope_pass_without_settings():
     assert "live_scope_pass" not in metrics
 
 
-# --- auto-approved CSV (review_gate: false, 2026-07-10; live-scope 2026-07-18) --
+# --- live-scope settings helpers + the campaign gate on the Review sheet ----------
 
 def _settings(**live_scope):
     from leadauto.config import Settings
@@ -418,45 +419,6 @@ def _auto_results():
     for r in results:
         r.enriched.kununu_score = 2.5      # under the live-scope cap
     return results
-
-
-def test_auto_approved_csv_holds_live_scope_rows_only(tmp_path):
-    # Conversion scope = create_new only: the link/review/skip rows stay out even
-    # though their kununu score is under the cap.
-    import csv
-    from leadauto.qa_artifact import write_auto_approved_csv
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review",
-                                   _settings(decisions=["create_new"], max_kununu_score=3.0))
-    assert path is not None and path.name.startswith("approved_") and "auto" in path.name
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        rows = list(csv.DictReader(fh))
-    assert [r["lead_id"] for r in rows] == ["00Q000000000002"]
-    assert all(r["Approve?"] == "yes" for r in rows)
-    assert rows[0]["decision"] == "create_new"
-    assert rows[0]["live_scope"] == "yes"
-
-
-def test_scheduled_config_campaign_gate_fails_closed_without_tagged_ids(tmp_path):
-    # 2026-10-31: `convert_campaigns: [matched_complete]` — the CSV holds only leads the
-    # caller names as tagged this run. No set passed = nobody was tagged = nothing staged,
-    # so stage1.yml never chains Stage 2 on a run where tagging did not happen.
-    from leadauto.qa_artifact import write_auto_approved_csv
-    review_dir = tmp_path / "review"
-    assert write_auto_approved_csv(_auto_results(), review_dir, _settings()) is None
-    assert not review_dir.exists()
-    assert write_auto_approved_csv(_auto_results(), review_dir, _settings(),
-                                   only_lead_ids=set()) is None
-
-
-def test_scheduled_config_stages_the_tagged_create_new_lead(tmp_path):
-    import csv
-    from leadauto.qa_artifact import write_auto_approved_csv
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", _settings(),
-                                   only_lead_ids={"00Q000000000002", "00Q000000000001"})
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        rows = list(csv.DictReader(fh))
-    # the link row is named but outside the conversion scope -> still out
-    assert [r["lead_id"] for r in rows] == ["00Q000000000002"]
 
 
 def test_review_live_scope_names_the_campaign_gate():
@@ -489,55 +451,6 @@ def test_review_sheet_separates_write_back_from_conversion():
     metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
     assert metrics["live_writeback_pass"] == 3
     assert metrics["live_scope_pass"] == 0
-
-
-def test_auto_approved_csv_widened_decisions_include_link(tmp_path):
-    # Widening the rollout is a config change: decisions [create_new, link] pulls the
-    # link row in too (still score-gated).
-    import csv
-    from leadauto.qa_artifact import write_auto_approved_csv
-    settings = _settings(decisions=["create_new", "link"], max_kununu_score=3.0)
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", settings)
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        rows = list(csv.DictReader(fh))
-    assert [r["lead_id"] for r in rows] == ["00Q000000000001", "00Q000000000002"]
-    assert rows[0]["account_match_id"] == "001000000000001"
-
-
-def test_auto_approved_csv_excludes_score_at_or_over_cap_and_missing(tmp_path):
-    from leadauto.qa_artifact import write_auto_approved_csv
-    # config.yaml has no cap since 2026-09-28; the gate still works when one is set.
-    capped = _settings(decisions=["create_new"], max_kununu_score=3.0)
-    results = _auto_results()
-    results[1].enriched.kununu_score = 3.0     # boundary: 3.0 is NOT under the cap
-    assert write_auto_approved_csv(results, tmp_path / "review", capped) is None
-    results[1].enriched.kununu_score = None    # missing score fails closed
-    assert write_auto_approved_csv(results, tmp_path / "review", capped) is None
-
-
-def test_auto_approved_csv_excludes_writeback_failures(tmp_path):
-    from leadauto.qa_artifact import write_auto_approved_csv
-    assert write_auto_approved_csv(_auto_results(), tmp_path / "review", _settings(),
-                                   exclude_lead_ids={"00Q000000000002"}) is None
-
-
-def test_auto_approved_csv_skipped_when_nothing_qualifies(tmp_path):
-    from leadauto.qa_artifact import write_auto_approved_csv
-    only_skips = [_result("00Q000000000004", decision="skip"),
-                  _result("00Q000000000003", decision="review")]
-    assert write_auto_approved_csv(only_skips, tmp_path / "review", _settings()) is None
-    assert not (tmp_path / "review").exists() or not list((tmp_path / "review").iterdir())
-
-
-def test_auto_approved_csv_roundtrips_through_stage2(tmp_path):
-    from leadauto.pipeline.stage2_convert import read_approved, targets_from_approved
-    from leadauto.qa_artifact import write_auto_approved_csv
-    settings = _settings(decisions=["create_new", "link"], max_kununu_score=3.0)
-    path = write_auto_approved_csv(_auto_results(), tmp_path / "review", settings)
-    targets = targets_from_approved(read_approved(path), settings)
-    assert [t.lead_id for t in targets] == ["00Q000000000001", "00Q000000000002"]
-    assert targets[0].account_id == "001000000000001"
-    assert targets[1].account_id is None       # create_new stays create-new
 
 
 def test_nocontact_reason_column_and_skipped_metric():
@@ -681,3 +594,52 @@ def test_nocontact_reason_distinguishes_never_searched_from_not_found():
     # neither of the new reasons is a "lookup saved" by the config gate
     metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
     assert metrics["contact_lookups_skipped"] == 0
+
+
+# --- Conversion sheet + Summary counters (2026-11-01, in-process conversion) ---------
+
+def _conversion_rows():
+    return [
+        {"lead_id": "00Q000000000001", "company": "Acme GmbH", "source": "run",
+         "decision": "create_new", "predicted_at": None, "outcome": "converted",
+         "detail": "", "account_id": "001NEW", "contact_id": "003NEW"},
+        {"lead_id": "00Q000000000101", "company": "Alt GmbH", "source": "sweep",
+         "decision": "create_new", "predicted_at": "2026-10-30T07:53:54Z",
+         "outcome": "preflight_skipped", "detail": "freemail_email",
+         "account_id": None, "contact_id": None},
+        {"lead_id": "00Q000000000102", "company": "Raiffeisen", "source": "sweep",
+         "decision": "review", "predicted_at": "2026-10-30T07:53:54Z",
+         "outcome": "left_to_human", "detail": "sweep_decision_review",
+         "account_id": None, "contact_id": None},
+    ]
+
+
+def test_conversion_sheet_lists_run_and_sweep_outcomes():
+    meta = {"convert_targets_run": 1, "convert_targets_sweep": 1, "converted": 1,
+            "convert_preflight_skipped": 1, "convert_left_to_human": 1,
+            "sweep_dbid_ticked": 1}
+    wb = build_workbook([_result()], [], meta=meta, conversion=_conversion_rows())
+    ws = wb["Conversion"]
+    assert _headers(ws) == CONVERSION_COLUMNS
+    rows = _rows(ws)
+    assert [r[2] for r in rows] == ["run", "sweep", "sweep"]
+    assert [r[5] for r in rows] == ["converted", "preflight_skipped", "left_to_human"]
+    assert rows[0][7] == "001NEW" and rows[2][6] == "sweep_decision_review"
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    for key, value in meta.items():
+        assert metrics[key] == value
+    assert "convert_staged" not in metrics        # the Stage-2 staging counter is gone
+
+
+def test_conversion_sheet_empty_and_no_counters_without_conversion():
+    wb = build_workbook([_result()], [], meta={})
+    assert _rows(wb["Conversion"]) == []
+    metrics = {r[0]: r[1] for r in _rows(wb["Summary"]) if r and r[0]}
+    assert "converted" not in metrics and "convert_targets_run" not in metrics
+
+
+def test_write_workbook_carries_conversion_rows(tmp_path):
+    path = write_workbook([_result()], [], {"converted": 1}, tmp_path / "qa.xlsx",
+                          conversion=_conversion_rows()[:1])
+    ws = load_workbook(path)["Conversion"]
+    assert [r[0] for r in _rows(ws)] == ["00Q000000000001"]

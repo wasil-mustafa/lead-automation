@@ -10,8 +10,10 @@
 #     never converted) are processed too
 #   - record_predictions off: these conversions are made by the pipeline itself, so
 #     shadow-compare must never score them as human decisions
-# Conversion scope (create_new only) is NOT config — it is enforced by approving only
-# decision == create_new rows in the review CSV. review_gate stays true for that reason.
+# Conversion scope: `live_scope.decisions` (create_new only). HISTORICAL NOTE — this
+# config predates the 2026-11-01 fusion: it relied on `review_gate: true` (a human
+# approving only create_new rows in the review CSV). That gate no longer exists: a
+# `--no-dry-run` run with this config converts its live-scope leads in-process.
 #
 # Usage: pass via the workflows' `config` input or locally with
 #   python -m leadauto stage1 --config config/config.backlog.yaml --dry-run
@@ -70,7 +72,6 @@ matching:
   dedupe_name_agree_min: 85
 
 pipeline:
-  review_gate: true          # manual approval — only create_new rows get approved
   dry_run: true              # live only via an explicit --no-dry-run / dispatch input
   batch_limit: 0
   task_lookback_days: 3650   # reach back to the oldest closed tasks

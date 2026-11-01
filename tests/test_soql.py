@@ -212,3 +212,26 @@ def test_leads_by_ids_excludes_campaign_members_only_when_asked():
                           exclude_campaign_ids=["701Mz00001aPCDdIAO", "701Mz00001aKIjZIAW"])
     assert q == plain + (" AND Id NOT IN (SELECT LeadId FROM CampaignMember WHERE "
                          "CampaignId IN ('701Mz00001aPCDdIAO', '701Mz00001aKIjZIAW'))")
+
+
+# --- conversion sweep (2026-11-01) -------------------------------------------------
+
+def test_campaign_members_unconverted_shape():
+    q = soql.campaign_members_unconverted(["701A", "701B"], ["New"])
+    assert q.startswith("SELECT LeadId, Lead.Company, Lead.KN_DBID__c, Lead.KN_NoOwnDBID__c "
+                        "FROM CampaignMember WHERE CampaignId IN ('701A', '701B')")
+    assert "AND LeadId != null" in q
+    assert "AND Lead.IsConverted = false" in q          # the load-bearing filter
+    assert "AND Lead.Owner.Type = 'Queue'" in q
+    assert q.endswith("AND Lead.Status IN ('New')")
+    assert '"' not in q
+
+
+def test_campaign_members_unconverted_no_status_clause_when_empty():
+    q = soql.campaign_members_unconverted(["701A"], [])
+    assert "Lead.Status" not in q
+
+
+def test_campaign_members_unconverted_requires_campaigns():
+    with pytest.raises(ValueError):
+        soql.campaign_members_unconverted([], ["New"])

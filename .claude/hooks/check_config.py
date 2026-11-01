@@ -5,7 +5,7 @@ Wired into .claude/settings.json as a PostToolUse hook on ``Edit|Write``; it exi
 immediately for any other file.
 
 Why: ``config/config.yaml`` is this project's control plane. ``dry_run``,
-``review_gate``, ``live_scope.decisions``, ``live_scope.max_kununu_score``,
+``convert_batch_size``, ``live_scope.decisions``, ``live_scope.max_kununu_score``,
 ``enabled_task_types``, ``owner_id`` and ``converted_status`` decide whether a run
 writes to production, how much it converts, and to whom. A typo'd *key* does not
 error -- ``Settings`` falls back to a default, and for some of these the default is
@@ -53,7 +53,7 @@ def safety_view(cfg):
     sf = cfg.get("salesforce") or {}
     return {
         "dry_run": pipeline.get("dry_run"),
-        "review_gate": pipeline.get("review_gate"),
+        "convert_batch_size": pipeline.get("convert_batch_size"),
         "batch_limit": pipeline.get("batch_limit"),
         "task_lookback_days": pipeline.get("task_lookback_days"),
         "live_scope.decisions": scope.get("decisions"),
@@ -94,12 +94,19 @@ def validate(cfg):
     pipeline = cfg.get("pipeline") or {}
     scope = pipeline.get("live_scope") or {}
 
-    for key in ("dry_run", "review_gate"):
+    for key in ("dry_run",):
         if not isinstance(pipeline.get(key), bool):
             problems.append(
                 "pipeline.{} must be an explicit true/false (got {!r}). A missing key "
                 "falls back to a default instead of erroring.".format(key, pipeline.get(key))
             )
+    batch = pipeline.get("convert_batch_size")
+    if not isinstance(batch, int) or isinstance(batch, bool) or not 1 <= batch <= 5:
+        problems.append(
+            "pipeline.convert_batch_size must be an integer 1..5 (got {!r}): >5 SOAP "
+            "conversions per call exhausted the per-transaction governor limit on the "
+            "2026-07-17 backlog run; 3 is the measured ceiling.".format(batch)
+        )
 
     # Conversion scope. `[]` is legal = enrich only (2026-10-19); an ABSENT key is not,
     # because Settings.live_decisions then falls back to ['create_new'] and converts.

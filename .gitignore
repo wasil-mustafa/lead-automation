@@ -38,9 +38,7 @@ dist/
 out/
 artifacts/
 
-# Exceptions: review-approval files and state ARE tracked
-!review/
-!review/*.csv
+# Exceptions: pipeline state IS tracked
 !state/
 !state/*.json
 !state/*.jsonl
