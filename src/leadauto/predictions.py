@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .state import REPO_ROOT
@@ -82,3 +83,53 @@ def record_predictions(results: list, payloads: list[dict], predicted_at: str,
         )
     save_predictions(keep + list(pending.values()), path)
     return len(pending)
+
+
+def _when(value: str) -> datetime:
+    """`predicted_at` as an aware UTC datetime; unparseable => the minimum, so a garbage
+    stamp can never win "newest". String comparison would misorder a `Z` suffix
+    against `+00:00` on the same second."""
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def latest_by_lead(preds: list[Prediction]) -> dict[str, Prediction]:
+    """The newest Prediction per lead (any status, by `predicted_at`) — the conversion
+    sweep's decision source for leads tagged in an earlier run (convert/targets.py).
+    Keyed by the stored lead id; callers compare on the 15-char prefix."""
+    latest: dict[str, Prediction] = {}
+    for pr in preds:
+        cur = latest.get(pr.lead_id)
+        if cur is None or _when(pr.predicted_at) > _when(cur.predicted_at):
+            latest[pr.lead_id] = pr
+    return latest
+
+
+def exclude_predictions(lead_ids, reason: str, path: str | Path | None = None,
+                        resolved_at: str | None = None) -> int:
+    """Mark the PENDING prediction of each lead `excluded` with `outcome.reason`.
+
+    The pipeline converted those leads itself; shadow-compare scores only pending rows,
+    and must never read our own conversion as a human decision. Non-pending rows and
+    leads without a pending row are untouched. Ids are compared on the 15-char prefix
+    (the file holds 18-char ids, conversion results may carry either). Returns the
+    number of rows changed."""
+    ids = {str(i)[:15] for i in lead_ids if i}
+    if not ids:
+        return 0
+    preds = load_predictions(path)
+    changed = 0
+    for pr in preds:
+        if pr.status == "pending" and pr.lead_id[:15] in ids:
+            pr.status = "excluded"
+            pr.resolved_at = resolved_at
+            pr.outcome = {"reason": reason}
+            changed += 1
+    if changed:
+        save_predictions(preds, path)
+    return changed

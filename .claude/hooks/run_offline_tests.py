@@ -17,10 +17,10 @@ The whole suite runs rather than a per-module subset: at 4 s, routing by import
 graph would save nothing and would itself be a thing that rots. Non-Python edits
 and edits outside the repo (scratchpad, another project) run nothing.
 
-One failure mode this specifically catches: a ``dry_run=False`` ``run_stage1``
-test written without ``review_dir=tmp_path``. With ``review_gate: false`` in
-config it writes a fake auto-approved CSV into the repo's real ``review/`` dir,
-which Stage 1's detect-step glob can then hand to Stage 2 for real conversion.
+One failure mode this specifically catches: a ``dry_run=False`` ``run_pipeline``
+test written without ``state_path=tmp_path/...`` or ``predictions_path=tmp_path/...``
+— it would write a fake watermark or prediction into the repo's real ``state/``
+dir, which CI commits and the conversion sweep reads as a decision.
 
 Written in Python, not a shell pipeline, because there is no ``jq`` on PATH here.
 """

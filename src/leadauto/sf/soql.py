@@ -84,6 +84,31 @@ def leads_by_ids(ids: Sequence[str], exclude_campaign_ids: Sequence[str] = ()) -
     return soql
 
 
+def campaign_members_unconverted(campaign_ids: Sequence[str],
+                                 statuses: Sequence[str] = ()) -> str:
+    """Unconverted, queue-owned Leads that are members of any of the given Campaigns
+    (the conversion sweep, convert/targets.py): leads an earlier run tagged into an
+    auto-convert bucket but never converted.
+
+    `Lead.IsConverted = false` is the load-bearing filter: on conversion Salesforce
+    keeps the member's LeadId and adds the ContactId, so `LeadId != null` alone would
+    keep returning converted leads. `Lead.Status IN` mirrors `pipeline.lead_statuses`
+    (empty = no filter, like the reader). The two DBID fields ride along so the sweep
+    can tick `KN_NoOwnDBID__c` without a second read; REST returns them NESTED under
+    `Lead`, Bulk flat as `Lead.KN_...` — see `targets._rel`.
+    """
+    if not campaign_ids:
+        raise ValueError("campaign_members_unconverted requires at least one CampaignId")
+    soql = (
+        "SELECT LeadId, Lead.Company, Lead.KN_DBID__c, Lead.KN_NoOwnDBID__c "
+        f"FROM CampaignMember WHERE CampaignId IN ({in_list(campaign_ids)}) "
+        "AND LeadId != null AND Lead.IsConverted = false AND Lead.Owner.Type = 'Queue'"
+    )
+    if statuses:
+        soql += f" AND Lead.Status IN ({in_list(statuses)})"
+    return soql
+
+
 def leads_preflight(ids: Sequence[str]) -> str:
     """Current conversion-relevant state of the given Leads (Stage-2 preflight).
 

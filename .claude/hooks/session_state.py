@@ -57,9 +57,9 @@ def config_lines():
     scope = pipeline.get("live_scope") or {}
     sf = cfg.get("salesforce") or {}
     return [
-        "  dry_run={!r}  review_gate={!r}  task_lookback_days={!r}  batch_limit={!r}".format(
+        "  dry_run={!r}  convert_batch_size={!r}  task_lookback_days={!r}  batch_limit={!r}".format(
             pipeline.get("dry_run"),
-            pipeline.get("review_gate"),
+            pipeline.get("convert_batch_size"),
             pipeline.get("task_lookback_days"),
             pipeline.get("batch_limit"),
         ),
@@ -110,8 +110,7 @@ def shadow_lines():
 def main():
     branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
     head = git("log", "-1", "--format=%h %s")
-    dirty = git("status", "--short", "--", "state", "review", "config")
-    approved = sorted((REPO_ROOT / "review").glob("approved_*.csv"))
+    dirty = git("status", "--short", "--", "state", "config")
 
     context = "\n".join(
         [
@@ -125,11 +124,7 @@ def main():
             *watermark_lines(),
             "shadow backtest:",
             *shadow_lines(),
-            "review/: {} approved file(s){}".format(
-                len(approved),
-                "  newest=" + approved[-1].name if approved else "",
-            ),
-            "uncommitted changes under state/ review/ config/:",
+            "uncommitted changes under state/ config/:",
             *(("  " + line for line in dirty.splitlines()) if dirty else ["  (none)"]),
             "",
             "Not knowable from disk: whether the cron-job.org job (id 8029899) still posts "

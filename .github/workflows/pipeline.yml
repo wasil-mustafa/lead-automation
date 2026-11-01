@@ -1,15 +1,18 @@
-name: Lead Automation — Stage 1 (enrich + stage)
+name: Lead Automation — pipeline
 
-# Extract new Leads -> enrich (LeadFeeder) -> match vs existing Accounts/Contacts ->
-# write enrichment back to KN_* fields -> upload the QA artifact for human review.
-# No conversion happens here (that is Stage 2, gated). The watermark is advanced and
-# committed back to the repo so the next run resumes where this one stopped.
+# One run: extract new Leads -> enrich (LeadFeeder) -> match vs existing
+# Accounts/Contacts -> write enrichment back to KN_* fields -> tag the LF-outcome
+# campaign -> CONVERT every lead in an auto-convert campaign bucket ("EnrichLeadfedup":
+# this run's leads plus the sweep of earlier runs' unconverted members) -> upload the QA
+# artifact. The watermark is advanced and committed back to the repo so the next run
+# resumes where this one stopped. Since 2026-11-01 (Wasil) there is no separate Stage 2
+# and no review/approved CSV: conversion happens in this process (see pipeline/run.py).
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (no Salesforce writes)"
+        description: "Dry run (no Salesforce writes, no conversions)"
         type: boolean
         default: true
       limit:
@@ -24,25 +27,26 @@ on:
         description: "Alternate config.yaml path (blank = config/config.yaml)"
         type: string
         default: ""
-  # Scheduling is EXTERNAL: cron-job.org hits this workflow's workflow_dispatch
-  # (GitHub's own cron delivered these runs hours late and dropped most firings).
-  # The external job POSTs {"ref":"master"} with no inputs, so runs stay dry.
+  # Scheduling is EXTERNAL: cron-job.org job 8029899 hits this workflow's
+  # workflow_dispatch every 2 h at :48, 08:48-16:48 Vienna, Mon-Fri (GitHub's own cron
+  # delivered these runs hours late and dropped most firings). Since 2026-10-19 that job
+  # POSTs {"ref":"master","inputs":{"dry_run":"false"}}, so scheduled runs are LIVE.
 
-# Never let two enrich runs overlap (they share the watermark file).
+# Never let two runs overlap (they share the watermark file and the conversion sweep).
 concurrency:
-  group: lead-automation-stage1
+  group: lead-automation-pipeline
   cancel-in-progress: false
 
 permissions:
-  contents: write   # commit the advanced watermark
+  contents: write   # commit the advanced watermark + shadow state
 
 jobs:
   gate:
     # Decides the effective dry-run mode. Runs are triggered by workflow_dispatch
     # (external cron-job.org schedule or a manual run), so the flag comes from
-    # `inputs.dry_run`, which defaults to true. The external scheduler omits
-    # inputs, so its runs stay DRY; go live by dispatching with dry_run unchecked.
-    # The `if schedule` branch below is a harmless guard if a cron is ever re-added.
+    # `inputs.dry_run`, which defaults to true for a MANUAL dispatch. The scheduler
+    # sends dry_run=false explicitly. The `if schedule` branch below is a harmless
+    # guard if a GitHub cron is ever re-added.
     runs-on: ubuntu-latest
     outputs:
       dry_run: ${{ steps.decide.outputs.dry_run }}
@@ -51,19 +55,15 @@ jobs:
         id: decide
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            DRY="true"   # scheduled runs stay dry until go-live
+            DRY="true"   # a GitHub cron, if ever re-added, stays dry
           else
             DRY="${{ inputs.dry_run }}"
           fi
           echo "dry_run=$DRY" >> "$GITHUB_OUTPUT"
 
-  enrich:
+  run:
     needs: gate
     runs-on: ubuntu-latest
-    outputs:
-      # Path of the auto-approved CSV this run produced ('' when none) — the chained
-      # convert job below only fires when a live run staged live-scope rows.
-      auto_csv: ${{ steps.autocsv.outputs.path }}
     env:
       # Quiet the sf CLI's background async work — a source of intermittent
       # "unsettled top-level await" / Node exit-13 hangs on CI runners.
@@ -125,7 +125,7 @@ jobs:
           exit 1
 
       - name: Shadow compare (score past dry-run predictions)
-        continue-on-error: true   # a compare hiccup must not block enrichment
+        continue-on-error: true   # a compare hiccup must not block the run
         env:
           PYTHONPATH: src
         # Self-gating to ~once a day (state/shadow_state.json, committed below): a compare
@@ -144,7 +144,8 @@ jobs:
           path: shadow_comparison.xlsx
           if-no-files-found: ignore
 
-      - name: Run Stage 1
+      - name: Run the pipeline
+        id: pipeline
         env:
           PYTHONPATH: src
           LEADFEEDER_API_KEY: ${{ secrets.LEADFEEDER_API_KEY }}
@@ -165,8 +166,8 @@ jobs:
           LIMIT="${{ inputs.limit }}"
           if [ -n "$LIMIT" ] && [ "$LIMIT" -gt 0 ] 2>/dev/null; then FLAGS="$FLAGS --limit $LIMIT"; fi
           if [ -n "${{ inputs.config }}" ]; then FLAGS="$FLAGS --config ${{ inputs.config }}"; fi
-          echo "Running: python -m leadauto stage1 $FLAGS"
-          python -m leadauto stage1 $FLAGS --qa-path qa_artifact.xlsx
+          echo "Running: python -m leadauto run $FLAGS"
+          python -m leadauto run $FLAGS --qa-path qa_artifact.xlsx
 
       - name: Upload QA artifact
         if: always()
@@ -176,16 +177,11 @@ jobs:
           path: qa_artifact.xlsx
           if-no-files-found: warn
 
-      - name: Detect auto-approved CSV from this run
-        id: autocsv
-        # A fresh auto CSV is the only untracked review/*_auto.csv (previous ones are
-        # committed). Its path feeds the chained Stage-2 convert job.
-        run: |
-          NEW=$(git ls-files --others --exclude-standard -- 'review/approved_*_auto.csv' | head -1 || true)
-          echo "path=$NEW" >> "$GITHUB_OUTPUT"
-          echo "Auto-approved CSV this run: '${NEW:-none}'"
-
       - name: Commit state (shadow files always; watermark only on live runs)
+        # always(): the run step exits non-zero on a failed conversion AFTER it wrote the
+        # watermark and predictions to disk — skipping this step would drop them, and
+        # the next run would re-read the same tasks and re-spend LeadFeeder credits.
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -194,8 +190,6 @@ jobs:
           done
           if [ "${{ needs.gate.outputs.dry_run }}" != "true" ]; then
             git add state/watermark.json
-            # auto-approved conversion CSVs (review_gate: false) feed the Stage 2 dispatch
-            { ls review/approved_*_auto.csv >/dev/null 2>&1 && git add review/approved_*_auto.csv; } || true
           fi
           if git diff --cached --quiet; then
             echo "No state changes to commit."
@@ -203,24 +197,3 @@ jobs:
             git commit -m "chore: update lead-automation state [skip ci]"
             git push
           fi
-
-  # Phased go-live (2026-07-18): a live Stage-1 run that staged live-scope rows
-  # (config `pipeline.live_scope`; since 2026-10-31: create_new AND tagged
-  # "EnrichLeadfedup" this run) converts them
-  # immediately. The CSV was committed by the step above; stage2.yml checks out the
-  # master HEAD, so it sees it. batch_size 3 = the live governor-limit ceiling.
-  convert:
-    needs: [gate, enrich]
-    if: needs.gate.outputs.dry_run != 'true' && needs.enrich.outputs.auto_csv != ''
-    concurrency:
-      group: lead-automation-stage2   # same brake as a manual Stage-2 dispatch
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    uses: ./.github/workflows/stage2.yml
-    with:
-      dry_run: false
-      batch_size: 3
-      approved: ${{ needs.enrich.outputs.auto_csv }}
-      config: ${{ inputs.config }}
-    secrets: inherit

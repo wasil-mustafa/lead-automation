@@ -108,3 +108,19 @@ def test_lf_campaign_task_types_from_config_and_absent_means_all():
     assert Settings.load().lf_campaign_task_types == ["claimer", "ebp_trial"]
     assert Settings(raw={"pipeline": {}}, leadfeeder_api_key=None,
                     sf_auth_url=None).lf_campaign_task_types is None
+
+
+def test_convert_batch_size_from_config_and_default():
+    s = Settings.load()
+    assert s.convert_batch_size == 3          # the measured governor-limit ceiling
+    s.raw["pipeline"] = {k: v for k, v in s.raw["pipeline"].items()
+                         if k != "convert_batch_size"}
+    assert s.convert_batch_size == 3          # absent key keeps the ceiling
+    s.raw["pipeline"]["convert_batch_size"] = 1
+    assert s.convert_batch_size == 1
+
+
+def test_review_gate_is_gone():
+    # 2026-11-01: the approved-CSV gate was removed with the Stage 1/2 fusion.
+    assert not hasattr(Settings.load(), "review_gate")
+    assert "review_gate" not in Settings.load().raw["pipeline"]

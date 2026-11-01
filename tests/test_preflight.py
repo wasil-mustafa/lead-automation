@@ -98,10 +98,8 @@ def test_failure_carries_value_and_detail():
     assert isinstance(f, Failure) and f.value == "HRB 1" and "digits" in f.detail
 
 
-from pathlib import Path
-
 from leadauto.convert import ConversionTarget
-from leadauto.convert.preflight import run_preflight, write_failures_csv
+from leadauto.convert.preflight import run_preflight
 
 
 class FakeClient:
@@ -142,10 +140,18 @@ def test_run_preflight_empty_targets_no_query():
     assert client.queries == []
 
 
-def test_write_failures_csv(tmp_path):
-    path = write_failures_csv(
-        [{"lead_id": "00Q1", "check": "language", "value": "", "detail": "d"}],
-        tmp_path / "preflight_failures.csv")
-    text = Path(path).read_text(encoding="utf-8")
-    assert text.splitlines()[0] == "lead_id,check,value,detail"
-    assert "00Q1,language" in text
+def test_run_preflight_overlay_previews_a_pending_write():
+    # Dry-run preview of the sweep's KN_NoOwnDBID__c tick: the org row has neither
+    # DBID field, the overlay says the tick would be there, so dbid_xor passes.
+    rows = [dict(GOOD, Id="00Q000000000001AAA", KN_NoOwnDBID__c="false")]
+    targets = [ConversionTarget("00Q000000000001")]
+    assert run_preflight(FakeClient(rows), targets)[1][0]["check"] == "dbid_xor"
+    ok, failures = run_preflight(FakeClient(rows), targets,
+                                 overlay={"00Q000000000001": {"KN_NoOwnDBID__c": True}})
+    assert ok and not failures
+
+
+def test_run_preflight_matches_15_and_18_char_ids():
+    rows = [dict(GOOD, Id="00Q000000000001AAA")]
+    ok, failures = run_preflight(FakeClient(rows), [ConversionTarget("00Q000000000001")])
+    assert [t.lead_id for t in ok] == ["00Q000000000001"] and not failures

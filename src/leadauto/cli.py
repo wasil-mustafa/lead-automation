@@ -1,9 +1,10 @@
-"""Command-line entry point (`python -m leadauto stage1|stage2`).
+"""Command-line entry point (`python -m leadauto run`).
 
 Thin glue: resolve config + secrets, authenticate the org, build the LeadFeeder client (or
-skip it), and call the stage orchestrators. Flags override config where given:
-  stage1  --dry-run/--no-dry-run  --limit N  --leadfeeder/--no-leadfeeder  --qa-path P
-  stage2  --approved P (default: newest review/approved_*.csv)  --dry-run  --batch-size N
+skip it), and call the pipeline. Flags override config where given:
+  run  --dry-run/--no-dry-run  --limit N  --leadfeeder/--no-leadfeeder  --qa-path P
+       --batch-size N (SOAP conversions per call; config pipeline.convert_batch_size)
+The former `stage1`/`stage2` commands were fused into `run` on 2026-11-01.
 """
 from __future__ import annotations
 
@@ -15,8 +16,7 @@ import typer
 from .config import Settings
 from .leadfeeder.client import MATCH_RESULTS_WIDE, LeadfeederClient
 from .logging import get_logger
-from .pipeline.stage1_enrich import run_stage1
-from .pipeline.stage2_convert import run_stage2
+from .pipeline.run import run_pipeline
 from .shadow_compare import (DEFAULT_MIN_INTERVAL_HOURS, compare_is_due,
                              last_compare_at, record_compare_run, run_shadow_compare,
                              write_skipped_report)
@@ -26,14 +26,7 @@ from .state import DEFAULT_STATE_PATH, REPO_ROOT
 
 app = typer.Typer(add_completion=False, help="Lead Automation pipeline.")
 
-REVIEW_DIR = REPO_ROOT / "review"
 DEFAULT_QA_PATH = REPO_ROOT / "qa_artifact.xlsx"
-
-
-def find_latest_approved(review_dir: str | Path) -> Optional[Path]:
-    """Newest `approved_*.csv` in the review dir (names sort chronologically). None if absent."""
-    files = sorted(Path(review_dir).glob("approved_*.csv"))
-    return files[-1] if files else None
 
 
 def _build_sf_client(settings: Settings, logger) -> SfClient:
@@ -57,7 +50,7 @@ def _build_lf_client(settings: Settings, logger) -> LeadfeederClient:
 
 
 @app.command()
-def stage1(
+def run(
     dry_run: Optional[bool] = typer.Option(None, "--dry-run/--no-dry-run",
                                            help="Override config dry_run."),
     limit: int = typer.Option(0, "--limit", help="LIMIT-scope the task scan (0 = config)."),
@@ -66,10 +59,15 @@ def stage1(
     kununu_feed: bool = typer.Option(True, "--kununu-feed/--no-kununu-feed",
                                      help="Disable the kununu profile feed (assigned-company alt names)."),
     qa_path: Path = typer.Option(DEFAULT_QA_PATH, "--qa-path", help="QA artifact output path."),
+    batch_size: Optional[int] = typer.Option(
+        None, "--batch-size",
+        help="Leads per SOAP convertLead() call (default: config pipeline.convert_batch_size, "
+             "3 — the live governor-limit ceiling; each conversion cascades triggers, flows "
+             "and rules in one transaction)."),
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
 ) -> None:
-    """Extract -> enrich -> match -> write back -> QA artifact (no conversion)."""
-    log = get_logger("cli.stage1")
+    """Extract -> enrich -> match -> write back -> campaign tag -> convert -> QA artifact."""
+    log = get_logger("cli.run")
     settings = Settings.load(config)
     sf = _build_sf_client(settings, log)
     lf = None
@@ -78,61 +76,32 @@ def stage1(
     elif leadfeeder:
         log.warning("LEADFEEDER_API_KEY not set; running without enrichment")
 
-    res = run_stage1(sf, lf, settings, limit=limit, dry_run=dry_run,
-                     qa_path=qa_path, state_path=DEFAULT_STATE_PATH, kununu_feed=kununu_feed,
-                     logger=log)
+    res = run_pipeline(sf, lf, settings, limit=limit, dry_run=dry_run,
+                       qa_path=qa_path, state_path=DEFAULT_STATE_PATH,
+                       kununu_feed=kununu_feed, batch_size=batch_size, logger=log)
     decisions = [r.decision for r in res.results]
+    conv = res.conversion.get("result") or {}
+    failed = conv.get("failed", 0)
+    missing = conv.get("missing", 0)
+    error = res.conversion.get("error")
     typer.echo(
-        f"Stage 1 {'(dry-run) ' if res.dry_run else ''}done: "
+        f"Pipeline {'(dry-run) ' if res.dry_run else ''}done: "
         f"{len(res.results)} lead(s) | link={decisions.count('link')} "
         f"review={decisions.count('review')} create_new={decisions.count('create_new')} | "
         f"skipped={len(res.skipped)} | wrote_back={res.writeback.get('processed', 0)} | "
-        f"QA={res.qa_path}"
+        f"targets={len(res.targets)} (run={res.conversion.get('targets_run', 0)} "
+        f"sweep={res.conversion.get('targets_sweep', 0)}) "
+        f"converted={conv.get('converted', 0)} already={conv.get('already_converted', 0)} "
+        f"failed={failed} missing={missing} "
+        f"preflight_skipped={len({f['lead_id'] for f in res.conversion.get('preflight_failures', [])})} "
+        f"left_to_human={len(res.sweep.left)} | QA={res.qa_path}"
     )
-
-
-@app.command()
-def stage2(
-    approved: Optional[Path] = typer.Option(None, "--approved",
-                                            help="Approved CSV (default: newest review/approved_*.csv)."),
-    dry_run: Optional[bool] = typer.Option(None, "--dry-run/--no-dry-run",
-                                           help="Override config dry_run."),
-    batch_size: int = typer.Option(10, "--batch-size",
-                                   help="Leads converted per Apex run (kept small: each "
-                                        "conversion cascades Account/Contact triggers, flows "
-                                        "and validation/duplicate rules in one transaction)."),
-    preflight: bool = typer.Option(True, "--preflight/--no-preflight",
-                                   help="Check conversion requirements and skip failing leads."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
-) -> None:
-    """Convert the Leads approved in the QA artifact (review/approved_*.csv)."""
-    log = get_logger("cli.stage2")
-    settings = Settings.load(config)
-    if approved is None:
-        approved = find_latest_approved(REVIEW_DIR)
-        if approved is None:
-            typer.secho(f"No approved_*.csv found in {REVIEW_DIR}", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
-        log.info("Using approved file %s", approved)
-    sf = _build_sf_client(settings, log)
-    try:
-        res = run_stage2(sf, settings, approved, dry_run=dry_run, batch_size=batch_size,
-                         preflight=preflight, logger=log)
-    except ValueError as exc:  # malformed approved CSV (bad Ids) — fail readably
-        typer.secho(str(exc), fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    skipped_leads = len({f["lead_id"] for f in res.preflight_failures})
-    already = res.result.get("already_converted", 0)
-    failed = res.result.get("failed", 0)
-    missing = res.result.get("missing", 0)
-    typer.echo(
-        f"Stage 2 {'(dry-run) ' if res.dry_run else ''}done: "
-        f"{len(res.targets)} target(s) | converted={res.result.get('converted', 0)} "
-        f"already={already} failed={failed} missing={missing} | preflight_skipped={skipped_leads}"
-    )
-    if failed or missing:
-        # Failed or unaccounted-for conversions must fail the job, not just log. Leads that
-        # were already converted (idempotent re-run) are a no-op and do NOT fail the job.
+    if error:
+        typer.secho(f"Conversion phase aborted: {error}", fg=typer.colors.RED)
+    if failed or missing or error:
+        # Failed, unaccounted-for or aborted conversions must fail the job, not just log —
+        # AFTER the workbook and state were written (run_pipeline never skips those).
+        # Already-converted leads (idempotent re-run) are a no-op and do NOT fail the job.
         raise typer.Exit(code=1)
 
 

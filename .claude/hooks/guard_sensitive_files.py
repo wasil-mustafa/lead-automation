@@ -11,14 +11,13 @@ Three tiers, because they deserve different answers:
   copies were deliberately deleted 2026-07-05; keys live only in GitHub Secrets.
   There is never a good reason to read one into a transcript. For a local run,
   set the env var ad hoc (see the /stage1-dry-run skill).
-* ``deny`` (pipeline-owned state, WRITES ONLY) -- ``state/*.json{,l}`` and
-  ``review/approved_*.csv`` are emitted by the pipeline and committed by CI.
-  Hand-editing them is not a fix, it is fabricated evidence: ``predictions.jsonl``
-  and ``shadow_results.jsonl`` ARE the shadow backtest that gates widening the
-  live scope, ``watermark.json`` decides which Tasks get re-processed or skipped
-  for good, and a stray file in ``review/`` can be picked up by Stage 1's
-  detect-step glob and handed to Stage 2 for real conversion. Reading them is
-  fine (subject to the ``ask`` tier below).
+* ``deny`` (pipeline-owned state, WRITES ONLY) -- ``state/*.json{,l}`` are emitted
+  by the pipeline and committed by CI. Hand-editing them is not a fix, it is
+  fabricated evidence: ``predictions.jsonl`` and ``shadow_results.jsonl`` ARE the
+  shadow backtest that gates widening the live scope (and, since 2026-11-01, the
+  conversion sweep's decision source), ``watermark.json`` decides which Tasks get
+  re-processed or skipped for good. Reading them is fine (subject to the ``ask``
+  tier below). (The ``review/approved_*.csv`` rule went with the review gate.)
 * ``ask`` (bulk data / run output) -- ``*.csv``, ``*.xlsx``, ``*.jsonl``, ``out/``.
   Legitimately useful sometimes, so this is a speed bump, not a wall. It also
   stops a stray read of ``kununu_profiles*.jsonl`` (~551 MB) from swallowing the
@@ -58,7 +57,6 @@ STATE_WRITE_GLOBS = (
     "shadow_results.jsonl",
     "shadow_state.json",
 )
-REVIEW_WRITE_GLOB = "approved_*.csv"
 
 # Bulk data / run output -- prompt instead of blocking outright.
 DATA_GLOBS = (
@@ -118,15 +116,6 @@ def classify(raw_path, tool_name):
         for pattern in STATE_WRITE_GLOBS:
             if fnmatch(name, pattern):
                 return "deny", STATE_REASON.format(path.name, STATE_WHY.get(pattern, ""))
-        if "review" in parts_lower and fnmatch(name, REVIEW_WRITE_GLOB):
-            return (
-                "deny",
-                "{} is a conversion-approval file. Stage 1's detect step globs "
-                "review/approved_*_auto.csv and hands the first match to Stage 2, which "
-                "converts Leads for real -- writing one by hand can convert leads nobody "
-                "approved. Blocked by "
-                ".claude/hooks/guard_sensitive_files.py.".format(path.name),
-            )
 
     # scripts/ == the legacy Scripts/ on case-insensitive Windows: it holds a live API key.
     if "scripts" in parts_lower and name not in (

@@ -1,22 +1,18 @@
-"""Pipeline orchestration tests (Stage 1 enrich+stage, Stage 2 gated convert).
+"""Pipeline orchestration tests (one fused run: extract -> enrich -> match -> write back
+-> campaign tag -> convert, incl. the sweep of earlier runs' campaign members).
 
-Both stages are driven through fakes at the org boundary (a routing SfClient and an Apex
-client), with LeadFeeder disabled (lf_client=None) so no credits are spent. The tests assert
-the dry-run rails (no writes / no conversions), the watermark advance, and the QA artifact.
+The run is driven through a fake at the org boundary (a routing SfClient whose
+convert_lead echoes success), with LeadFeeder disabled (lf_client=None) or faked so no
+credits are spent. The tests assert the dry-run rails (no writes / no conversions), the
+watermark advance, the conversion gate, the sweep and the QA artifact.
 """
-import csv
+import json
 
 import pytest
 from openpyxl import load_workbook
 
 from leadauto.config import Settings
-from leadauto.convert import ConversionTarget
-from leadauto.pipeline.stage1_enrich import run_stage1
-from leadauto.pipeline.stage2_convert import (
-    read_approved,
-    run_stage2,
-    targets_from_approved,
-)
+from leadauto.pipeline.run import run_pipeline
 from leadauto.state import State, load_state
 
 SETTINGS = Settings.load()
@@ -38,17 +34,28 @@ CLAIMER_DESC = (
 
 
 class FakeSfClient:
-    def __init__(self, tasks=None, leads=None, accounts=None, contacts=None):
+    """Routing fake. `members` = CampaignMember rows the conversion sweep reads (REST
+    shape: the Lead fields nested under "Lead"). Lead updates are APPLIED to the fake's
+    leads, so the conversion preflight re-read sees the write-back (and the sweep's
+    KN_NoOwnDBID__c tick) exactly as the org would."""
+
+    def __init__(self, tasks=None, leads=None, accounts=None, contacts=None, members=None):
         self._tasks = tasks or []
         self._leads = leads or []
         self._accounts = accounts or []
         self._contacts = contacts or []
+        self._members = members or []
         self.updates: list[tuple] = []
         self.creates: list[tuple] = []
+        self.convert_calls: list[list] = []
+        self.queries: list[str] = []
 
     def query(self, soql, bulk=False):
+        self.queries.append(soql)
         if "FROM Task" in soql:
             return [dict(t) for t in self._tasks]
+        if soql.lstrip().startswith("SELECT LeadId,"):   # the sweep read, not the
+            return [dict(m) for m in self._members]    # reader anti-join
         if "FROM Lead" in soql:
             return [dict(l) for l in self._leads]
         if "FROM Account" in soql:
@@ -63,12 +70,25 @@ class FakeSfClient:
     def update_records(self, sobject, records, allow_duplicates=False):
         self.updates.append((sobject, records))
         self.allow_duplicates = allow_duplicates
-        return {"processed": len(records)}
+        if sobject == "Lead":
+            by_id = {l["Id"][:15]: l for l in self._leads}
+            for rec in records:
+                lead = by_id.get(rec["Id"][:15])
+                if lead is not None:
+                    lead.update({k: v for k, v in rec.items() if k != "Id"})
+        return {"processed": len(records), "failed": 0, "failures": []}
 
     def create_records(self, sobject, records):
         self.creates.append((sobject, records))
         return {"processed": len(records), "created": len(records), "duplicates": 0,
                 "failed": 0, "failures": []}
+
+    def convert_lead(self, conversions, *, converted_status, owner_id):
+        self.convert_calls.append(conversions)
+        return [{"leadId": c["lead_id"], "success": True,
+                 "accountId": "001NEW" + c["lead_id"][-3:],
+                 "contactId": "003NEW" + c["lead_id"][-3:]}
+                for c in conversions]
 
 
 def _task(tid="T1", who="00Q1", created="2026-06-19T10:00:00.000+0000"):
@@ -77,11 +97,34 @@ def _task(tid="T1", who="00Q1", created="2026-06-19T10:00:00.000+0000"):
 
 
 def _lead(lid="00Q1"):
+    # KN_Language__c is org-auto-populated (convert/CLAUDE.md); the preflight needs it.
     return {"Id": lid, "FirstName": "Ramona", "LastName": "Panknin",
             "Company": "Hufeland Klinikum GmbH", "Email": "r@hufeland.de", "Website": None,
             "Status": "New", "IsConverted": False, "LeadSource": "kununu",
+            "KN_Language__c": "German",
             "KN_KununuProfileName__c": None, "KN_KununuUserUUID__c": None,
             "KN_KununuLinkProfile__c": None}
+
+
+def _member(lid, company="Alt GmbH", dbid=None, no_own=False,
+            campaign="701Mz00001aPCDdIAO"):
+    """A CampaignMember row as REST returns it (relationship fields nested)."""
+    return {"CampaignId": campaign, "LeadId": lid,
+            "Lead": {"attributes": {"type": "Lead"}, "Company": company,
+                     "KN_DBID__c": dbid, "KN_NoOwnDBID__c": no_own}}
+
+
+def _write_prediction(path, lid, decision="create_new", predicted_at="2026-10-30T07:53:54Z",
+                      status="pending", lf_company_id=None):
+    row = {"lead_id": lid, "task_id": "T_" + lid, "predicted_at": predicted_at,
+           "rule": "no_match" if decision == "create_new" else "name_only",
+           "decision": decision, "account_id": None, "contact_id": None, "evidence": [],
+           "payload": {"KN_KununuLinkProfile__c": "https://www.kununu.com/de/alt"},
+           "lf_company_id": lf_company_id, "lf_company_name": "Alt GmbH",
+           "lf_website": None, "lf_match_pass": "primary", "written_back": True,
+           "status": status, "resolved_at": None, "outcome": None}
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
 
 
 def _account(aid="001A"):
@@ -102,7 +145,7 @@ def test_stage1_chunks_the_match_phase(monkeypatch):
     # Backlog-sized runs (500+ leads) must not load candidates in one query — the
     # signals SOQL breaches the 100k-char limit. Expect one load per 40-lead chunk.
     from leadauto.match import ExistingRecords
-    from leadauto.pipeline import stage1_enrich as s1
+    from leadauto.pipeline import run as s1
 
     tasks = [_task(tid=f"T{i}", who=f"00Q{i:04d}") for i in range(90)]
     leads = [dict(_lead(lid=f"00Q{i:04d}"), Email=f"r{i}@hufeland.de") for i in range(90)]
@@ -110,7 +153,7 @@ def test_stage1_chunks_the_match_phase(monkeypatch):
     calls = []
     monkeypatch.setattr(s1, "load_existing_records",
                         lambda _sf, batch, *a, **k: calls.append(len(batch)) or ExistingRecords())
-    res = s1.run_stage1(sf, None, SETTINGS, state=State(None, []),
+    res = s1.run_pipeline(sf, None, SETTINGS, state=State(None, []),
                         since="2026-05-01T00:00:00Z", dry_run=True,
                         qa_path=None, state_path=None, predictions_path=None)
     assert calls == [40, 40, 10]
@@ -122,7 +165,7 @@ def test_stage1_matches_links_and_advances_watermark(tmp_path):
                       accounts=[_account()], contacts=[_contact()])
     qa = tmp_path / "qa.xlsx"
     state_path = tmp_path / "watermark.json"
-    res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+    res = run_pipeline(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                      dry_run=True, qa_path=qa, state_path=state_path, predictions_path=None)
     assert len(res.results) == 1
     r = res.results[0]
@@ -147,7 +190,7 @@ def test_stage1_dry_run_writes_nothing_and_does_not_persist_state(tmp_path):
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
                       accounts=[_account()], contacts=[_contact()])
     state_path = tmp_path / "watermark.json"
-    res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+    res = run_pipeline(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                      dry_run=True, qa_path=tmp_path / "qa.xlsx", state_path=state_path,
                      predictions_path=None)
     assert sf.updates == []                 # no write-back
@@ -160,9 +203,9 @@ def test_stage1_live_writes_back_and_persists_state(tmp_path, monkeypatch):
     _matched_enrich(monkeypatch)
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
     state_path = tmp_path / "watermark.json"
-    res = run_stage1(sf, object(), SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+    res = run_pipeline(sf, object(), SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                      dry_run=False, qa_path=tmp_path / "qa.xlsx", state_path=state_path,
-                     review_dir=tmp_path / "review", predictions_path=None)
+                     predictions_path=None)
     assert res.results[0].decision == "create_new"
     assert len(sf.updates) == 1
     sobject, records = sf.updates[0]
@@ -181,9 +224,9 @@ def test_stage1_live_leaves_out_of_scope_leads_untouched(tmp_path):
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
                       accounts=[_account()], contacts=[_contact()])
     state_path = tmp_path / "watermark.json"
-    res = run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+    res = run_pipeline(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                      dry_run=False, qa_path=None, state_path=state_path,
-                     review_dir=tmp_path / "review", predictions_path=None)
+                     predictions_path=None)
     assert res.results[0].decision == "skip"
     assert sf.updates == []                  # untouched in Salesforce
     assert state_path.exists()               # but the task is consumed
@@ -196,9 +239,9 @@ def test_stage1_live_records_shadow_predictions_for_out_of_scope(tmp_path):
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()],
                       accounts=[_account()], contacts=[_contact()])
     p = tmp_path / "predictions.jsonl"
-    run_stage1(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
+    run_pipeline(sf, None, SETTINGS, state=State(None, []), since="2026-05-01T00:00:00Z",
                dry_run=False, qa_path=None, state_path=tmp_path / "wm.json",
-               review_dir=tmp_path / "review", predictions_path=p)
+                     predictions_path=p)
     preds = load_predictions(p)
     assert [q.lead_id for q in preds] == ["00Q1"]
     assert preds[0].decision == "skip"
@@ -211,364 +254,28 @@ def test_stage1_live_never_records_predictions_for_live_scope_rows(tmp_path, mon
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
                       leads=[_lead("00Q000000000001")])
     p = tmp_path / "predictions.jsonl"
-    run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
+    run_pipeline(sf, object(), _no_gate_settings(), state=State(None, []),
                since="2026-05-01T00:00:00Z", dry_run=False,
                qa_path=None, state_path=tmp_path / "wm.json",
-               review_dir=tmp_path / "review", predictions_path=p)
+                     predictions_path=p)
     assert not p.exists()
 
 
-# --- Stage 2: approved -> targets --------------------------------------------
-# targets_from_approved enforces the 15/18-char alphanumeric Salesforce Id shape (the
-# approved CSV is hand-edited and its Ids are embedded in conversion Apex), so test rows
-# must use realistic Ids rather than the "00Q1" shorthand used for pure Apex-string asserts.
-LEAD1 = "00Q000000000001"
-LEAD2 = "00Q000000000002"
-LEAD3 = "00Q000000000003"
-ACCT1 = "001000000000001"
-ACCT2 = "001000000000002"
-CONT1 = "003000000000001"
-CONT2 = "003000000000002"
-
-
-def test_contact_linked_only_on_identifier_reasons():
-    rows = [
-        {"Approve?": "yes", "lead_id": LEAD1, "account_match_id": ACCT1,
-         "contact_match_id": CONT1, "contact_reason": "kununu_user_uuid"},
-        {"Approve?": "yes", "lead_id": LEAD2, "account_match_id": ACCT1,
-         "contact_match_id": CONT2, "contact_reason": "contact_email_global"},
-    ]
-    targets = targets_from_approved(rows, SETTINGS)
-    assert targets[0].contact_id == CONT1
-    assert targets[1].contact_id is None  # weak reason -> create fresh contact
-
-
-def test_targets_from_approved_skips_unapproved():
-    rows = [
-        {"Approve?": "", "lead_id": LEAD1, "account_match_id": ACCT1},
-        {"Approve?": "no", "lead_id": LEAD2, "account_match_id": ACCT2},
-        {"Approve?": "yes", "lead_id": LEAD3, "account_match_id": "", "contact_match_id": "",
-         "decision": "create_new"},
-    ]
-    targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget(LEAD3, account_id=None, contact_id=None)]
-
-
-def test_targets_from_approved_drops_approved_skip_rows():
-    # A terminal skip (no LF match) never converts, even if a reviewer ticked Approve?.
-    rows = [
-        {"Approve?": "yes", "lead_id": LEAD1, "account_match_id": "", "contact_match_id": "",
-         "decision": "skip"},
-        {"Approve?": "yes", "lead_id": LEAD2, "account_match_id": "", "contact_match_id": "",
-         "decision": "create_new"},
-    ]
-    targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget(LEAD2, account_id=None, contact_id=None)]
-
-
-def test_targets_from_approved_rejects_malformed_id():
-    # A malformed Id would be embedded in conversion Apex; fail the whole run loudly instead.
-    rows = [{"Approve?": "yes", "lead_id": "00Q1", "account_match_id": ""}]
-    with pytest.raises(ValueError, match="Malformed Salesforce Id"):
-        targets_from_approved(rows, SETTINGS)
-
-
-def test_contact_link_dropped_without_account_link():
-    # setContactId requires setAccountId; a contact link with no account link would always
-    # fail at convert time, so it is dropped and the lead converts create-new.
-    rows = [{"Approve?": "yes", "lead_id": LEAD1, "account_match_id": "",
-             "contact_match_id": CONT1, "contact_reason": "kununu_user_uuid"}]
-    targets = targets_from_approved(rows, SETTINGS)
-    assert targets == [ConversionTarget(LEAD1, account_id=None, contact_id=None)]
-
-
-def test_targets_from_approved_carries_pool_and_cluster_keys():
-    rows = [{"Approve?": "yes", "lead_id": LEAD1, "account_match_id": ACCT1,
-             "contact_reason": "kununu_user_uuid", "contact_match_id": "",
-             "lf_company_id": "LF-1", "kununu_profile_uuid": "puid-1",
-             "kununu_url": "https://www.kununu.com/de/acme",
-             "lf_contact_email": "lf.contact@acme.de"}]
-    t = targets_from_approved(rows, SETTINGS)[0]
-    assert t.lf_company_id == "LF-1"
-    assert t.kununu_profile_uuid == "puid-1"
-    assert t.kununu_url == "https://www.kununu.com/de/acme"
-    assert t.lf_contact_email == "lf.contact@acme.de"
-
-
-# --- Stage 2 orchestration ---------------------------------------------------
-
-class FakeConvertClient:
-    """Fake SOAP-converting client: query() answers the LeadStatus / already-converted
-    SOQL (plus the pool queries, empty here so resolve_pool_links passes through);
-    convert_lead() echoes success per conversion."""
-
-    def __init__(self):
-        self.convert_calls = []
-
-    def query(self, soql, bulk=False):
-        if "FROM LeadStatus" in soql:
-            return [{"MasterLabel": "Qualified"}]
-        return []
-
-    def query_many(self, queries):
-        return {label: self.query(soql) for label, soql in queries.items()}
-
-    def convert_lead(self, conversions, *, converted_status, owner_id):
-        self.convert_calls.append(conversions)
-        return [{"leadId": c["lead_id"], "success": True, "accountId": "001X"}
-                for c in conversions]
-
-
-def _write_approved(path, rows):
-    cols = ["lead_id", "account_match_id", "contact_match_id", "contact_score",
-            "decision", "lf_contact_email", "Approve?"]
-    with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols)
-        w.writeheader()
-        for r in rows:
-            w.writerow({c: r.get(c, "") for c in cols})
-
-
-def test_read_approved_reads_rows(tmp_path):
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": "00Q1", "Approve?": "yes"}])
-    rows = read_approved(p)
-    assert rows[0]["lead_id"] == "00Q1" and rows[0]["Approve?"] == "yes"
-
-
-def test_run_stage2_dry_run_makes_no_conversions(tmp_path):
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
-                         "contact_score": "1.0", "Approve?": "yes"}])
-    client = FakeConvertClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
-    assert client.convert_calls == []
-    assert res.result["converted"] == 0
-    assert res.result["planned"] == 1
-
-
-def test_run_stage2_live_converts_approved(tmp_path):
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [
-        {"lead_id": LEAD1, "account_match_id": ACCT1, "contact_score": "1.0", "Approve?": "yes"},
-        {"lead_id": LEAD2, "Approve?": "no"},
-    ])
-    client = FakeConvertClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
-    assert len(client.convert_calls) == 1
-    assert [c["lead_id"] for c in client.convert_calls[0]] == [LEAD1]
-    assert res.result["converted"] == 1   # only the approved lead
-    assert res.result["missing"] == 0     # the converted lead was reconciled in the results
-
-
-def test_run_stage2_preflight_preverifies_no_per_batch_isconverted_query(tmp_path):
-    # With preflight on, its Lead query already proves IsConverted=false for every
-    # surviving target — convert_leads must not re-query IsConverted per batch.
-    class _PreflightClient(FakeConvertClient):
-        def __init__(self):
-            super().__init__()
-            self.queries = []
-
-        def query(self, soql, bulk=False):
-            self.queries.append(soql)
-            if "FROM LeadStatus" in soql:
-                return [{"MasterLabel": "Qualified"}]
-            if "FROM Lead" in soql and "IsConverted," in soql:  # preflight field list
-                return [{"Id": LEAD1, "IsConverted": "false",
-                         "KN_Employee__c": "11-50", "KN_DBID__c": "",
-                         "KN_NoOwnDBID__c": "true", "KN_Language__c": "German",
-                         "Email": "jane@acme.de", "Phone": "", "Street": "Foo 1",
-                         "Country": "Germany", "PostalCode": "12345"}]
-            return []
-
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
-                         "contact_score": "1.0", "Approve?": "yes"}])
-    client = _PreflightClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=True)
-    assert res.result["converted"] == 1
-    assert res.preflight_failures == []
-    assert not any("FROM Lead " in q and "IsConverted = true" in q
-                   for q in client.queries)
-
-
-def test_run_stage2_enriches_email2_on_new_contact(tmp_path):
-    """Create-new conversion + LF contact email differing from the task email ->
-    one Contact update setting KN_Email2__c."""
-    class _Email2ConvertClient(FakeConvertClient):
-        def __init__(self):
-            super().__init__()
-            self.updates = []
-
-        def query(self, soql, bulk=False):
-            if "FROM Contact" in soql:
-                return [{"Id": "003NEW", "Email": "task@acme.de", "KN_Email2__c": ""}]
-            return super().query(soql, bulk=bulk)
-
-        def convert_lead(self, conversions, *, converted_status, owner_id):
-            self.convert_calls.append(conversions)
-            return [{"leadId": c["lead_id"], "success": True,
-                     "accountId": "001NEW", "contactId": "003NEW"}
-                    for c in conversions]
-
-        def update_records(self, sobject, records, allow_duplicates=False):
-            self.updates.append((sobject, records))
-            return {"processed": len(records), "failed": 0}
-
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": LEAD1, "decision": "create_new",
-                         "lf_contact_email": "lf.contact@acme.de", "Approve?": "yes"}])
-    client = _Email2ConvertClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False)
-    assert res.result["converted"] == 1
-    assert res.result["email2"] == {"processed": 1, "failed": 0}
-    assert client.updates == [("Contact", [{"Id": "003NEW",
-                                            "KN_Email2__c": "lf.contact@acme.de"}])]
-
-
-def test_run_stage2_dry_run_email2_is_noop(tmp_path):
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": LEAD1, "decision": "create_new",
-                         "lf_contact_email": "lf@acme.de", "Approve?": "yes"}])
-    client = FakeConvertClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=True, preflight=False)
-    assert res.result["email2"] == {"processed": 0, "failed": 0}
-
-
-# --- Stage 2: preflight gate --------------------------------------------------
-
-import csv as _csv
-
-_GOOD_ROW = {
-    "IsConverted": False, "KN_Employee__c": "11-50", "KN_DBID__c": "",
-    "KN_NoOwnDBID__c": "true", "KN_Language__c": "German", "Street": "Weg 1",
-    "Country": "Germany", "CountryCode": "DE", "PostalCode": "20095",
-    "Phone": "", "Email": "info@acme.de", "HasOptedOutOfEmail": False, "LeadSource": "Web",
-}
-
-
-class _PreflightSfFake:
-    """query() answers the preflight (and conversion-support) SOQL; convert_lead
-    echoes success for every lead it sees."""
-    def __init__(self, rows):
-        self.rows = rows
-        self.convert_calls = []
-
-    def query(self, soql, bulk=False):
-        if "FROM LeadStatus" in soql:
-            return [{"MasterLabel": "Qualified"}]
-        if "IsConverted = true" in soql:
-            return []
-        return self.rows
-
-    def query_many(self, queries):
-        return {label: self.query(soql) for label, soql in queries.items()}
-
-    def convert_lead(self, conversions, *, converted_status, owner_id):
-        self.convert_calls.append(conversions)
-        return [{"leadId": c["lead_id"], "success": True} for c in conversions]
-
-
-class _PreflightSettings:
-    dry_run = False
-    owner_id = "005X"
-    converted_status = "Qualified"
-    rohdaten_pool_owner_id = None  # no pool owner configured -> resolve_pool_links passes through
-
-
-def _approved_csv(tmp_path, rows, name="approved_x.csv"):
-    p = tmp_path / name
-    cols = ["lead_id", "account_match_id", "contact_match_id", "contact_reason", "Approve?"]
-    with p.open("w", newline="", encoding="utf-8") as fh:
-        w = _csv.DictWriter(fh, fieldnames=cols)
-        w.writeheader()
-        w.writerows(rows)
-    return p
-
-
-def test_stage2_preflight_excludes_failing_leads(tmp_path):
-    approved = _approved_csv(tmp_path, [
-        {"lead_id": LEAD1, "Approve?": "yes"},
-        {"lead_id": LEAD2, "Approve?": "yes"},
-    ])
-    client = _PreflightSfFake([dict(_GOOD_ROW, Id=LEAD1),
-                               dict(_GOOD_ROW, Id=LEAD2, KN_Language__c="")])
-    res = run_stage2(client, _PreflightSettings(), approved,
-                     failures_csv=tmp_path / "preflight_failures.csv")
-    assert [t.lead_id for t in res.targets] == [LEAD1]
-    assert res.preflight_failures[0]["lead_id"] == LEAD2
-    assert LEAD2 not in [c["lead_id"] for call in client.convert_calls for c in call]
-    assert (tmp_path / "preflight_failures.csv").exists()
-
-
-def test_stage2_no_preflight_bypasses(tmp_path):
-    approved = _approved_csv(tmp_path, [{"lead_id": LEAD2, "Approve?": "yes"}], "approved_y.csv")
-    client = _PreflightSfFake([])
-    res = run_stage2(client, _PreflightSettings(), approved, preflight=False,
-                     failures_csv=tmp_path / "pf.csv")
-    assert [t.lead_id for t in res.targets] == [LEAD2]
-    assert res.preflight_failures == []
-    assert not (tmp_path / "pf.csv").exists()
-
-
-def test_stage2_dry_run_still_preflights(tmp_path):
-    approved = _approved_csv(tmp_path, [{"lead_id": LEAD2, "Approve?": "yes"}], "approved_z.csv")
-    client = _PreflightSfFake([dict(_GOOD_ROW, Id=LEAD2, KN_Employee__c="")])
-    res = run_stage2(client, _PreflightSettings(), approved, dry_run=True,
-                     failures_csv=tmp_path / "pf.csv")
-    assert res.preflight_failures and not client.convert_calls
-
-
-def test_stage2_preflight_writes_csv_even_with_zero_targets(tmp_path):
-    # All rows unapproved -> zero targets; preflight (default on) must still write the
-    # header-only CSV so the CI artifact always shows preflight ran.
-    approved = _approved_csv(tmp_path, [{"lead_id": "00Q_NO", "Approve?": "no"}], "approved_w.csv")
-    client = _PreflightSfFake([])
-    res = run_stage2(client, _PreflightSettings(), approved,
-                     failures_csv=tmp_path / "pf.csv")
-    assert res.targets == []
-    assert res.preflight_failures == []
-    assert not client.convert_calls
-    assert (tmp_path / "pf.csv").exists()
-    assert (tmp_path / "pf.csv").read_text(encoding="utf-8").strip() == "lead_id,check,value,detail"
-
-
-# --- Stage 2: pool-account enrichment + conflict gate ------------------------
-
-def test_run_stage2_routes_kununu_conflict_to_failures(tmp_path, monkeypatch):
-    from leadauto.pipeline import stage2_convert
-
-    def fake_resolve(client, link_targets, settings, *, dry_run=False, logger=None):
-        # simulate: the single link is a kununu conflict -> dropped + reported
-        return [], [{"lead_id": LEAD1, "check": "kununu_uuid_conflict",
-                     "value": ACCT1, "detail": "conflict"}]
-
-    monkeypatch.setattr(stage2_convert, "resolve_pool_links", fake_resolve)
-    p = tmp_path / "approved.csv"
-    _write_approved(p, [{"lead_id": LEAD1, "account_match_id": ACCT1,
-                         "contact_score": "1.0", "Approve?": "yes"}])
-    client = FakeConvertClient()
-    res = run_stage2(client, SETTINGS, p, dry_run=False, preflight=False,
-                     failures_csv=tmp_path / "preflight_failures.csv")
-    assert client.convert_calls == []              # conflicted lead never converted
-    assert any(f["check"] == "kununu_uuid_conflict" for f in res.preflight_failures)
-
-
-# --- Stage 1: auto-approved CSV (review_gate: false, 2026-07-10) ---------------
-
-def _gate_settings(review_gate: bool):
-    """Settings with review_gate AND the conversion scope pinned — never depend on the
-    config.yaml values (review_gate flipped to false at go-live 2026-07-18; the
-    scheduled config has converted nothing since 2026-10-19)."""
+# --- Live run without the campaign axis (the 2026-07-18 go-live behaviour) --------
+
+def _scope_settings(**scope):
+    """Settings with the conversion scope pinned — never depend on the config.yaml
+    values. No `convert_campaigns` key = no campaign axis: the conversion scope alone
+    decides what converts (the go-live behaviour, still used by one-off configs)."""
     s = Settings.load()
-    s.raw["pipeline"] = dict(s.raw["pipeline"], review_gate=review_gate,
+    s.raw["pipeline"] = dict(s.raw["pipeline"],
                              live_scope={"decisions": ["create_new"],
-                                         "max_kununu_score": 3.0})
+                                         "max_kununu_score": 3.0, **scope})
     return s
 
 
 def _no_gate_settings():
-    return _gate_settings(review_gate=False)
+    return _scope_settings()
 
 
 def _matched_enrich(monkeypatch):
@@ -578,53 +285,50 @@ def _matched_enrich(monkeypatch):
 
     def fake_enrich(lf, extracteds, settings, logger=None, **kw):
         return [EnrichedLead(extracted=e, matched=True, lf_company_id="123",
-                             matched_name=e.best_company, company={}, kununu_score=2.5)
+                             matched_name=e.best_company,
+                             company={"Street": "Hauptstr. 1", "Employee_Count": 120},
+                             kununu_score=2.5)
                 for e in extracteds]
 
-    monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)
+    monkeypatch.setattr("leadauto.pipeline.run.enrich_leads", fake_enrich)
 
 
-def test_stage1_live_no_gate_emits_auto_approved_csv(tmp_path, monkeypatch):
+def test_live_no_campaign_axis_converts_the_create_new_lead_in_process(tmp_path, monkeypatch):
     _matched_enrich(monkeypatch)
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
                       leads=[_lead("00Q000000000001")])
-    review_dir = tmp_path / "review"
-    res = run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
-                     since="2026-05-01T00:00:00Z", dry_run=False,
-                     qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-                     review_dir=review_dir, predictions_path=None)
+    res = run_pipeline(sf, object(), _no_gate_settings(), state=State(None, []),
+                       since="2026-05-01T00:00:00Z", dry_run=False,
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=None)
     assert res.results[0].decision == "create_new"
-    files = list(review_dir.glob("approved_*auto*.csv"))
-    assert len(files) == 1
-    rows = read_approved(files[0])
-    assert rows[0]["lead_id"] == "00Q000000000001" and rows[0]["Approve?"] == "yes"
+    assert sf.updates[0][1][0]["KN_NoOwnDBID__c"] is True      # ticked for conversion
+    assert [c["lead_id"] for call in sf.convert_calls for c in call] == ["00Q000000000001"]
+    assert res.conversion["result"]["converted"] == 1
+    assert res.converted_ids == {"00Q000000000001"}
+    rows = {r[0].value: r for r in load_workbook(tmp_path / "qa.xlsx")["Conversion"].iter_rows(min_row=2)}
+    assert rows["00Q000000000001"][2].value == "run"
+    assert rows["00Q000000000001"][5].value == "converted"
+    assert rows["00Q000000000001"][7].value == "001NEW001"
+    assert _summary(tmp_path)["converted"] == 1
+    assert _summary(tmp_path)["convert_targets_run"] == 1
 
 
-def test_stage1_dry_run_never_emits_auto_csv(tmp_path, monkeypatch):
+def test_dry_run_never_converts(tmp_path, monkeypatch):
     _matched_enrich(monkeypatch)
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
                       leads=[_lead("00Q000000000001")])
-    review_dir = tmp_path / "review"
-    run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
-               since="2026-05-01T00:00:00Z", dry_run=True,
-               qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-               review_dir=review_dir, predictions_path=None)
-    assert not review_dir.exists() or not list(review_dir.iterdir())
+    res = run_pipeline(sf, object(), _no_gate_settings(), state=State(None, []),
+                       since="2026-05-01T00:00:00Z", dry_run=True,
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=None)
+    assert sf.updates == [] and sf.convert_calls == []
+    assert res.targets == []
+    # a sweep still previews (read-only), but with no campaign axis there is none
+    assert not any(q.lstrip().startswith("SELECT LeadId,") for q in sf.queries)
 
 
-def test_stage1_review_gate_on_never_emits_auto_csv(tmp_path, monkeypatch):
-    _matched_enrich(monkeypatch)
-    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
-                      leads=[_lead("00Q000000000001")])
-    review_dir = tmp_path / "review"
-    run_stage1(sf, object(), _gate_settings(review_gate=True), state=State(None, []),
-               since="2026-05-01T00:00:00Z", dry_run=False,
-               qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-               review_dir=review_dir, predictions_path=None)
-    assert not review_dir.exists() or not list(review_dir.iterdir())
-
-
-def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
+def test_live_excludes_writeback_failures_from_conversion(tmp_path, monkeypatch):
     _matched_enrich(monkeypatch)
 
     class FailingSf(FakeSfClient):
@@ -635,15 +339,28 @@ def test_stage1_auto_csv_excludes_writeback_failures(tmp_path, monkeypatch):
 
     sf = FailingSf(tasks=[_task(who="00Q000000000001")],
                    leads=[_lead("00Q000000000001")])
-    review_dir = tmp_path / "review"
-    run_stage1(sf, object(), _no_gate_settings(), state=State(None, []),
-               since="2026-05-01T00:00:00Z", dry_run=False,
-               qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-               review_dir=review_dir, predictions_path=None)
-    assert not review_dir.exists() or not list(review_dir.iterdir())
+    res = run_pipeline(sf, object(), _no_gate_settings(), state=State(None, []),
+                       since="2026-05-01T00:00:00Z", dry_run=False,
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=None)
+    assert res.targets == [] and sf.convert_calls == []
 
 
-# --- Stage 1: scheduled config, claimer + ebp_trial (2026-10-19 / -20 / -31) -------
+def test_convert_false_stops_after_tagging(tmp_path, monkeypatch):
+    # scripts/event_run.py: enrichment only, conversion stays a deliberate step
+    _matched_enrich(monkeypatch)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")])
+    res = run_pipeline(sf, object(), _no_gate_settings(), state=State(None, []),
+                       since="2026-05-01T00:00:00Z", dry_run=False, convert=False,
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=None)
+    assert sf.updates and sf.convert_calls == []
+    assert res.conversion == {} and res.conversion_rows == []
+    assert "converted" not in _summary(tmp_path)
+
+
+# --- Live run, scheduled config, claimer + ebp_trial (2026-10-19 / -20 / -31) ------
 # The scheduled config writes back every LF-matched claimer/ebp_trial lead. Since
 # 2026-10-31 a create_new lead converts only when this run tagged it matched_complete
 # ("EnrichLeadfedup"); these two runs use company={} -> matched_incomplete -> human.
@@ -659,25 +376,25 @@ def _live_run(tmp_path, monkeypatch, task_type="claimer"):
                              matched_name=e.best_company, company={}, kununu_score=4.5)
                 for e in extracteds]
 
-    monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)
+    monkeypatch.setattr("leadauto.pipeline.run.enrich_leads", fake_enrich)
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
                       leads=[_lead("00Q000000000001")])
-    review_dir, preds = tmp_path / "review", tmp_path / "predictions.jsonl"
-    res = run_stage1(sf, object(), Settings.load(), state=State(None, []),
+    preds = tmp_path / "predictions.jsonl"
+    res = run_pipeline(sf, object(), Settings.load(), state=State(None, []),
                      since="2026-05-01T00:00:00Z", dry_run=False,
                      qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-                     review_dir=review_dir, predictions_path=preds)
-    return sf, res, review_dir, preds
+                     predictions_path=preds)
+    return sf, res, preds
 
 
 def test_enrich_only_claimer_is_written_back_but_not_staged(tmp_path, monkeypatch):
-    sf, res, review_dir, preds = _live_run(tmp_path, monkeypatch)
+    sf, res, preds = _live_run(tmp_path, monkeypatch)
     assert res.results[0].decision == "create_new"
     # score 4.5: no score axis any more, so a high-score claimer is enriched too
     assert [r["Id"] for _, recs in sf.updates for r in recs] == ["00Q000000000001"]
     # matched_incomplete (no LF street/headcount): no DBID tick, not staged
     assert "KN_NoOwnDBID__c" not in sf.updates[0][1][0]
-    assert not review_dir.exists() or not list(review_dir.glob("approved_*"))
+    assert res.targets == [] and sf.convert_calls == []
     # A human converts it, so it stays shadow evidence: decision only, no field checks.
     pred = load_predictions(preds)
     assert [q.lead_id for q in pred] == ["00Q000000000001"]
@@ -687,9 +404,9 @@ def test_enrich_only_claimer_is_written_back_but_not_staged(tmp_path, monkeypatc
 def test_enrich_only_writes_back_ebp_trial_too(tmp_path, monkeypatch):
     # 2026-10-20 (Wasil): ebp_trial joined the live write-back scope. An unlisted type
     # staying dry is pinned in test_live_scope.test_unlisted_task_type_stays_dry.
-    sf, res, review_dir, preds = _live_run(tmp_path, monkeypatch, task_type="ebp_trial")
+    sf, res, preds = _live_run(tmp_path, monkeypatch, task_type="ebp_trial")
     assert [r["Id"] for _, recs in sf.updates for r in recs] == ["00Q000000000001"]
-    assert not review_dir.exists() or not list(review_dir.glob("approved_*"))
+    assert res.targets == [] and sf.convert_calls == []
     pred = load_predictions(preds)
     assert [q.lead_id for q in pred] == ["00Q000000000001"]
     assert pred[0].written_back is True
@@ -715,14 +432,14 @@ def _enrich_with(monkeypatch, *, matched=True, company=None, task_type=None):
                              kununu_score=2.5)
                 for e in extracteds]
 
-    monkeypatch.setattr("leadauto.pipeline.stage1_enrich.enrich_leads", fake_enrich)
+    monkeypatch.setattr("leadauto.pipeline.run.enrich_leads", fake_enrich)
 
 
 def _live(sf, tmp_path, lf=object(), settings=None, dry_run=False):
-    return run_stage1(sf, lf, settings or SETTINGS, state=State(None, []),
+    return run_pipeline(sf, lf, settings or SETTINGS, state=State(None, []),
                       since="2026-05-01T00:00:00Z", dry_run=dry_run,
                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-                      review_dir=tmp_path / "review", predictions_path=None)
+                     predictions_path=None)
 
 
 def test_config_carries_the_three_lf_campaigns():
@@ -783,7 +500,9 @@ def test_stage1_campaign_failure_is_reported_but_does_not_block_conversion(tmp_p
     assert res.failures == [{"lead_id": "00Q000000000001", "stage": "campaign",
                              "error": "INSUFFICIENT_ACCESS: no"}]
     assert res.campaigns["campaign_failed"] == 1
-    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+    assert [t.lead_id for t in res.targets] == ["00Q000000000001"]
+    # a target, but LF gave no street/headcount: the in-process preflight holds it
+    assert {f["check"] for f in res.conversion["preflight_failures"]} >= {"employee_category"}
 
 
 def test_stage1_live_writeback_failure_is_left_untagged(tmp_path, monkeypatch):
@@ -824,14 +543,14 @@ def test_stage1_duplicate_detected_writeback_failure_goes_to_unmatched_campaign(
     summary = {r[0].value: r[1].value
                for r in load_workbook(tmp_path / "qa.xlsx")["Summary"].iter_rows(min_row=2)}
     assert summary["campaign_duplicate_detected"] == 1
-    assert list((tmp_path / "review").glob("approved_*auto*.csv")) == []
+    assert res.targets == [] and sf.convert_calls == []
 
 
 def test_stage1_matched_lead_outside_writeback_scope_is_not_tagged(tmp_path, monkeypatch):
     # Matched but not written back: no campaign, so a later, wider scope can still
     # write it (tagging is a permanent exclusion).
     _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1", "Employee_Count": 120})
-    import leadauto.pipeline.stage1_enrich as s1
+    import leadauto.pipeline.run as s1
     monkeypatch.setattr(s1, "writeback_reason", lambda r, s: "decision_review")
     sf = FakeSfClient(tasks=[_task()], leads=[_lead()])
     res = _live(sf, tmp_path)
@@ -879,22 +598,27 @@ def test_stage1_campaign_request_error_never_aborts_the_run(tmp_path, monkeypatc
     assert res.campaigns["campaign_failed"] == 1
     assert [f["stage"] for f in res.failures] == ["campaign"]
     assert (tmp_path / "qa.xlsx").exists()                         # QA still written
-    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+    assert [t.lead_id for t in res.targets] == ["00Q000000000001"]
+    # a target, but LF gave no street/headcount: the in-process preflight holds it
+    assert {f["check"] for f in res.conversion["preflight_failures"]} >= {"employee_category"}
 
 
-# --- Campaign conversion gate (Wasil, 2026-10-31) ----------------------------------
-# Stage 1 -> write-back -> campaign -> convert ONLY the leads tagged matched_complete
-# ("EnrichLeadfedup") this run. Scheduled config (SETTINGS) throughout.
+
+
+# --- Campaign conversion gate (Wasil, 2026-10-31) + in-process conversion (2026-11-01)
+# write-back -> campaign -> convert ONLY the leads tagged matched_complete
+# ("EnrichLeadfedup") this run, in the same process. Scheduled config (SETTINGS).
 
 COMPLETE = {"Street": "Hauptstr. 1", "Employee_Count": 120}
 
 
 def _live_preds(sf, tmp_path, **kw):
     preds = tmp_path / "predictions.jsonl"
-    res = run_stage1(sf, kw.pop("lf", object()), kw.pop("settings", SETTINGS),
-                     state=State(None, []), since="2026-05-01T00:00:00Z", dry_run=False,
-                     qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
-                     review_dir=tmp_path / "review", predictions_path=preds)
+    res = run_pipeline(sf, kw.pop("lf", object()), kw.pop("settings", SETTINGS),
+                       state=State(None, []), since="2026-05-01T00:00:00Z",
+                       dry_run=kw.pop("dry_run", False),
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=preds, **kw)
     return res, preds
 
 
@@ -903,18 +627,30 @@ def _summary(tmp_path):
             for r in load_workbook(tmp_path / "qa.xlsx")["Summary"].iter_rows(min_row=2)}
 
 
-def test_campaign_gate_stages_the_fedup_lead_with_dbid_tick(tmp_path, monkeypatch):
+def _conversion_rows(tmp_path):
+    ws = load_workbook(tmp_path / "qa.xlsx")["Conversion"]
+    header = [c.value for c in ws[1]]
+    return [dict(zip(header, (c.value for c in row))) for row in ws.iter_rows(min_row=2)]
+
+
+def test_campaign_gate_converts_the_fedup_lead_with_dbid_tick(tmp_path, monkeypatch):
     _enrich_with(monkeypatch, company=COMPLETE)
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
     res, preds = _live_preds(sf, tmp_path)
     assert res.results[0].decision == "create_new"
     written = sf.updates[0][1][0]
-    assert written["KN_NoOwnDBID__c"] is True            # dbid_xor passes in Stage 2
+    assert written["KN_NoOwnDBID__c"] is True            # dbid_xor passes in the preflight
     assert sf.creates == [("CampaignMember", [{"CampaignId": CAMPAIGNS["matched_complete"],
                                                "LeadId": "00Q000000000001"}])]
-    files = list((tmp_path / "review").glob("approved_*auto*.csv"))
-    assert [r["lead_id"] for r in read_approved(files[0])] == ["00Q000000000001"]
-    assert _summary(tmp_path)["convert_staged"] == 1
+    # converted in the same run, create-new (no account/contact link)
+    assert sf.convert_calls == [[{"lead_id": "00Q000000000001", "account_id": None,
+                                  "contact_id": None}]]
+    assert res.conversion["result"]["converted"] == 1
+    rows = _conversion_rows(tmp_path)
+    assert [(r["source"], r["outcome"], r["account_id"]) for r in rows] == [
+        ("run", "converted", "001NEW001")]
+    summary = _summary(tmp_path)
+    assert summary["convert_targets_run"] == 1 and summary["converted"] == 1
     # converted by us -> never shadow evidence
     assert not preds.exists() or load_predictions(preds) == []
 
@@ -926,8 +662,8 @@ def test_campaign_gate_leaves_the_shortage_lead_to_a_human(tmp_path, monkeypatch
     written = sf.updates[0][1][0]
     assert "KN_NoOwnDBID__c" not in written                # human-converted rule holds
     assert sf.creates[0][1][0]["CampaignId"] == CAMPAIGNS["matched_incomplete"]
-    assert list((tmp_path / "review").glob("approved_*")) == []
-    assert _summary(tmp_path)["convert_staged"] == 0
+    assert res.targets == [] and sf.convert_calls == []
+    assert _summary(tmp_path)["convert_targets_run"] == 0
     review = load_workbook(tmp_path / "qa.xlsx")["Review"]
     header = [c.value for c in review[1]]
     assert review[2][header.index("live_scope")].value == "campaign_matched_incomplete"
@@ -952,7 +688,7 @@ def test_campaign_gate_holds_back_a_lead_whose_campaign_insert_failed(tmp_path, 
                            leads=[_lead("00Q000000000001")])
     res, preds = _live_preds(sf, tmp_path)
     assert res.campaigns["campaign_failed"] == 1
-    assert list((tmp_path / "review").glob("approved_*")) == []
+    assert res.targets == [] and sf.convert_calls == []
     assert [q.lead_id for q in load_predictions(preds)] == ["00Q000000000001"]
 
 
@@ -966,27 +702,226 @@ def test_campaign_gate_treats_already_member_as_tagged(tmp_path, monkeypatch):
                     "failed": 0, "failures": []}
 
     sf = DupSf(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
-    _live_preds(sf, tmp_path)
-    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
+    res, _ = _live_preds(sf, tmp_path)
+    assert [t.lead_id for t in res.targets] == ["00Q000000000001"]
+    assert res.conversion["result"]["converted"] == 1
 
 
-def test_campaign_gate_stages_nothing_without_leadfeeder(tmp_path, monkeypatch):
+def test_campaign_gate_converts_nothing_of_its_own_without_leadfeeder(tmp_path, monkeypatch):
     # LF off => no tagging => the gate fails closed even for a create_new lead.
-    import leadauto.pipeline.stage1_enrich as s1
+    import leadauto.pipeline.run as s1
     monkeypatch.setattr(s1, "live_scope_reason", lambda r, s: None)
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
     res, _ = _live_preds(sf, tmp_path, lf=None)
-    assert sf.creates == []
-    assert list((tmp_path / "review").glob("approved_*")) == []
-    assert _summary(tmp_path)["convert_staged"] == 0
+    assert sf.creates == [] and sf.convert_calls == []
+    assert _summary(tmp_path)["convert_targets_run"] == 0
 
 
 def test_campaign_gate_absent_key_keeps_the_go_live_behaviour(tmp_path, monkeypatch):
-    # _no_gate_settings has no convert_campaigns: the conversion scope alone stages,
-    # an incomplete write-back included, and the DBID tick still follows the staging.
+    # _no_gate_settings has no convert_campaigns: the conversion scope alone converts,
+    # an incomplete write-back included, and the DBID tick still follows.
     _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})
     sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
-    _live_preds(sf, tmp_path, settings=_no_gate_settings())
+    res, _ = _live_preds(sf, tmp_path, settings=_no_gate_settings())
     assert sf.updates[0][1][0]["KN_NoOwnDBID__c"] is True
-    assert len(list((tmp_path / "review").glob("approved_*auto*.csv"))) == 1
-    assert "convert_staged" not in _summary(tmp_path)
+    assert [t.lead_id for t in res.targets] == ["00Q000000000001"]
+    # no campaign axis => no sweep read either
+    assert not any(q.lstrip().startswith("SELECT LeadId,") for q in sf.queries)
+
+
+def test_preflight_skipped_lead_stays_shadow_evidence_and_is_reported(tmp_path, monkeypatch):
+    # A lead the gate admits but the preflight rejects is left to a human: recorded as
+    # a prediction (the next sweep finds its decision there) and shown on the sheet.
+    _enrich_with(monkeypatch, company=COMPLETE)
+    lead = dict(_lead("00Q000000000001"), KN_Language__c=None)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")], leads=[lead])
+    res, preds = _live_preds(sf, tmp_path)
+    assert sf.convert_calls == []
+    assert res.conversion["preflight_failures"][0]["check"] == "language"
+    rows = _conversion_rows(tmp_path)
+    assert [(r["outcome"], r["detail"]) for r in rows] == [("preflight_skipped", "language")]
+    assert _summary(tmp_path)["convert_preflight_skipped"] == 1
+    assert [q.lead_id for q in load_predictions(preds)] == ["00Q000000000001"]
+
+
+def test_conversion_failure_never_blocks_watermark_or_workbook(tmp_path, monkeypatch):
+    _enrich_with(monkeypatch, company=COMPLETE)
+
+    class ExplodingSf(FakeSfClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            raise ConnectionError("socket dropped mid-SOAP")
+
+    sf = ExplodingSf(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    res, preds = _live_preds(sf, tmp_path)
+    assert "ConnectionError" in res.conversion["error"]
+    assert (tmp_path / "wm.json").exists() and (tmp_path / "qa.xlsx").exists()
+    assert _conversion_rows(tmp_path)[0]["outcome"] == "error"
+    assert _summary(tmp_path)["convert_error"].startswith("ConnectionError")
+    # not converted by us => stays shadow evidence, and the next sweep can retry it
+    assert [q.lead_id for q in load_predictions(preds)] == ["00Q000000000001"]
+
+
+def test_failed_soap_row_is_recorded_and_left_to_shadow(tmp_path, monkeypatch):
+    _enrich_with(monkeypatch, company=COMPLETE)
+
+    class RejectingSf(FakeSfClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            return [{"leadId": c["lead_id"], "success": False,
+                     "errors": ["FIELD_CUSTOM_VALIDATION_EXCEPTION: nope"]}
+                    for c in conversions]
+
+    sf = RejectingSf(tasks=[_task(who="00Q000000000001")], leads=[_lead("00Q000000000001")])
+    res, preds = _live_preds(sf, tmp_path)
+    assert res.conversion["result"]["failed"] == 1
+    row = _conversion_rows(tmp_path)[0]
+    assert row["outcome"] == "failed" and "nope" in row["detail"]
+    assert [q.lead_id for q in load_predictions(preds)] == ["00Q000000000001"]
+
+
+# --- The sweep: unconverted campaign members from earlier runs (2026-11-01) --------
+# Decision source = the lead's newest recorded prediction; create_new only; the
+# KN_NoOwnDBID__c tick is written first (live) or previewed (dry).
+
+OLD1, OLD2, OLD3 = "00Q000000000101", "00Q000000000102", "00Q000000000103"
+
+
+def _sweep_fixture(tmp_path, monkeypatch, *, members, preds_rows, dry_run=False,
+                   leads=None, settings=None):
+    """This run has one shortage (human) lead; the org holds `members` from earlier."""
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})
+    preds = tmp_path / "predictions.jsonl"
+    for lid, over in preds_rows:
+        _write_prediction(preds, lid, **over)
+    sf = FakeSfClient(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001")] + list(leads or []),
+                      members=members)
+    res = run_pipeline(sf, object(), settings or SETTINGS, state=State(None, []),
+                       since="2026-05-01T00:00:00Z", dry_run=dry_run,
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=preds)
+    return sf, res, preds
+
+
+def _old_lead(lid, **over):
+    base = dict(_lead(lid), Company="Alt GmbH", Street="Altweg 1", CountryCode="DE",
+                KN_Employee__c="11-50", KN_DBID__c=None, KN_NoOwnDBID__c=False)
+    base.update(over)
+    return base
+
+
+def test_sweep_converts_old_create_new_member_after_ticking_dbid(tmp_path, monkeypatch):
+    sf, res, preds = _sweep_fixture(
+        tmp_path, monkeypatch,
+        members=[_member(OLD1)], leads=[_old_lead(OLD1)],
+        preds_rows=[(OLD1, {"decision": "create_new"})])
+    # one PATCH ticking the DBID flag, with the duplicate-rule header like the write-back
+    tick = [recs for sobj, recs in sf.updates if recs and "KN_NoOwnDBID__c" in recs[0]
+            and recs[0]["Id"] == OLD1]
+    assert tick == [[{"Id": OLD1, "KN_NoOwnDBID__c": True}]]
+    assert [c["lead_id"] for call in sf.convert_calls for c in call] == [OLD1]
+    assert res.sweep.ticked == 1
+    rows = {r["lead_id"]: r for r in _conversion_rows(tmp_path)}
+    assert rows[OLD1]["source"] == "sweep" and rows[OLD1]["outcome"] == "converted"
+    assert rows[OLD1]["decision"] == "create_new"
+    assert rows[OLD1]["predicted_at"] == "2026-10-30T07:53:54Z"
+    summary = _summary(tmp_path)
+    assert summary["convert_targets_sweep"] == 1 and summary["sweep_dbid_ticked"] == 1
+    # its pending prediction is excluded: shadow-compare must not score our conversion
+    old = [q for q in load_predictions(preds) if q.lead_id == OLD1]
+    assert [q.status for q in old] == ["excluded"]
+    assert old[0].outcome == {"reason": "pipeline_converted"}
+    # this run's own (shortage) lead is still recorded for humans
+    assert [q.lead_id for q in load_predictions(preds) if q.status == "pending"] == [
+        "00Q000000000001"]
+
+
+def test_sweep_leaves_review_and_undecided_members_to_humans(tmp_path, monkeypatch):
+    sf, res, preds = _sweep_fixture(
+        tmp_path, monkeypatch,
+        members=[_member(OLD1, company="Raiffeisen"), _member(OLD2, company="Nobody")],
+        preds_rows=[(OLD1, {"decision": "review"})])     # OLD2: no prediction at all
+    assert sf.convert_calls == []
+    assert not any("KN_NoOwnDBID__c" in recs[0] and recs[0]["Id"] in (OLD1, OLD2)
+                   for _, recs in sf.updates if recs)      # never ticked (2026-10-20 rule)
+    rows = {r["lead_id"]: r for r in _conversion_rows(tmp_path)}
+    assert rows[OLD1]["outcome"] == "left_to_human"
+    assert rows[OLD1]["detail"] == "sweep_decision_review"
+    assert rows[OLD2]["detail"] == "sweep_no_recorded_decision"
+    assert _summary(tmp_path)["convert_left_to_human"] == 2
+    assert [q.status for q in load_predictions(preds) if q.lead_id == OLD1] == ["pending"]
+
+
+def test_sweep_skips_this_runs_own_leads_and_dedupes_members(tmp_path, monkeypatch):
+    # This run's shortage lead is already a member when the sweep reads; a stale
+    # create_new prediction for it must not convert it. A lead in two campaigns is one target.
+    sf, res, preds = _sweep_fixture(
+        tmp_path, monkeypatch,
+        members=[_member("00Q000000000001"), _member(OLD1), _member(OLD1, campaign="701X")],
+        leads=[_old_lead(OLD1)],
+        preds_rows=[("00Q000000000001", {"decision": "create_new"}),
+                    (OLD1, {"decision": "create_new"})])
+    assert [c["lead_id"] for call in sf.convert_calls for c in call] == [OLD1]
+    assert len(res.sweep.targets) == 1
+
+
+def test_sweep_dry_run_previews_without_writing(tmp_path, monkeypatch):
+    sf, res, preds = _sweep_fixture(
+        tmp_path, monkeypatch, dry_run=True,
+        members=[_member(OLD1)], leads=[_old_lead(OLD1)],
+        preds_rows=[(OLD1, {"decision": "create_new"})])
+    assert sf.updates == [] and sf.convert_calls == [] and sf.creates == []
+    assert any(q.lstrip().startswith("SELECT LeadId,") for q in sf.queries)   # the read-only preview
+    rows = {r["lead_id"]: r for r in _conversion_rows(tmp_path)}
+    # the overlay previews the tick, so the preflight passes and the row is "dry_run"
+    assert rows[OLD1]["outcome"] == "dry_run" and rows[OLD1]["detail"] == "dbid_tick_pending"
+    assert _summary(tmp_path)["convert_dry_run"] == 1
+    assert _summary(tmp_path)["sweep_dbid_ticked"] == 1
+    # dry run: predictions recorded for everything, nothing excluded
+    assert [q.status for q in load_predictions(preds) if q.lead_id == OLD1] == ["pending"]
+
+
+def test_sweep_tick_failure_leaves_the_lead_to_a_human(tmp_path, monkeypatch):
+    class TickRejectingSf(FakeSfClient):
+        def update_records(self, sobject, records, allow_duplicates=False):
+            if records and records[0].get("Id") == OLD1:
+                self.updates.append((sobject, records))
+                return {"processed": 1, "failed": 1,
+                        "failures": [{"id": OLD1, "error": "FIELD_CUSTOM_VALIDATION: phone"}]}
+            return super().update_records(sobject, records, allow_duplicates)
+
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})
+    preds = tmp_path / "predictions.jsonl"
+    _write_prediction(preds, OLD1)
+    sf = TickRejectingSf(tasks=[_task(who="00Q000000000001")],
+                         leads=[_lead("00Q000000000001"), _old_lead(OLD1)],
+                         members=[_member(OLD1)])
+    run_pipeline(sf, object(), SETTINGS, state=State(None, []),
+                 since="2026-05-01T00:00:00Z", dry_run=False,
+                 qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                 predictions_path=preds)
+    assert sf.convert_calls == []
+    row = {r["lead_id"]: r for r in _conversion_rows(tmp_path)}[OLD1]
+    assert row["outcome"] == "left_to_human"
+    assert row["detail"].startswith("sweep_dbid_tick_failed: FIELD_CUSTOM_VALIDATION")
+
+
+def test_sweep_member_already_ticked_or_with_dbid_is_not_patched(tmp_path, monkeypatch):
+    sf, res, preds = _sweep_fixture(
+        tmp_path, monkeypatch,
+        members=[_member(OLD1, no_own=True), _member(OLD2, dbid="123456")],
+        leads=[_old_lead(OLD1, KN_NoOwnDBID__c=True), _old_lead(OLD2, KN_DBID__c="123456")],
+        preds_rows=[(OLD1, {}), (OLD2, {})])
+    assert not any(recs[0].get("Id") in (OLD1, OLD2) for _, recs in sf.updates if recs)
+    assert sorted(c["lead_id"] for call in sf.convert_calls for c in call) == [OLD1, OLD2]
+    assert res.sweep.ticked == 0
+
+
+def test_sweep_uses_the_newest_prediction_per_lead(tmp_path, monkeypatch):
+    sf, res, preds = _sweep_fixture(
+        tmp_path, monkeypatch,
+        members=[_member(OLD1)], leads=[_old_lead(OLD1)],
+        preds_rows=[(OLD1, {"decision": "create_new", "predicted_at": "2026-09-01T00:00:00Z",
+                            "status": "expired"}),
+                    (OLD1, {"decision": "review", "predicted_at": "2026-10-30T00:00:00Z"})])
+    assert sf.convert_calls == []
+    assert _conversion_rows(tmp_path)[0]["detail"] == "sweep_decision_review"

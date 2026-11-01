@@ -1,23 +1,24 @@
-"""One-off Stage 1 runner for event (badge-scan) leads — first used for ZPE 2026, 2026-09-18.
+"""One-off enrichment runner for event (badge-scan) leads — first used for ZPE 2026, 2026-09-18.
 
-Why not `python -m leadauto stage1 --config …`? Three things the CLI cannot do and this
+Why not `python -m leadauto run --config …`? Three things the CLI cannot do and this
 population needs:
 
   * `since` is fixed to the event window instead of being derived from the shared
     watermark (which sits at 2026-07-18 and would drag every claimer/ebp task since
     July into the scan);
-  * the run gets its OWN watermark file and review dir under --out, so a live run never
-    advances `state/watermark.json` (that would hide the Jul–Sep claimer backlog from
-    the next real live run) and never drops an approved CSV where the CI detect-step
-    glob (`review/approved_*_auto.csv`) could feed it to Stage 2 unasked;
-  * no shadow predictions (the config also says so): the pipeline converts these itself.
+  * the run gets its OWN watermark file under --out, so a live run never advances
+    `state/watermark.json` (that would hide the Jul–Sep claimer backlog from the next
+    real live run);
+  * no shadow predictions (the config also says so) and NO CONVERSION
+    (`run_pipeline(convert=False)`): since the 2026-11-01 fusion a plain `run` converts
+    in-process, but this population's config lists `link` in its conversion scope and
+    the link path (+ pool-Account enrichment writes) has never run live — conversion
+    for event leads stays a separate, deliberate, human-reviewed step.
 
-Usage (dry by default; Stage 2 is a separate, deliberate call):
+Usage (dry by default):
     $env:PYTHONPATH = "src"
     python scripts/event_run.py --config config/config.zpe-2026-09.yaml --out <dir>
     python scripts/event_run.py --config config/config.zpe-2026-09.yaml --out <dir> --live
-    python -m leadauto stage2 --config config/config.zpe-2026-09.yaml \
-        --approved <dir>/review/approved_<ts>_auto.csv --no-dry-run --batch-size 3
 """
 from __future__ import annotations
 
@@ -31,16 +32,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from leadauto.cli import _build_lf_client, _build_sf_client  # noqa: E402
 from leadauto.config import Settings  # noqa: E402
 from leadauto.logging import get_logger  # noqa: E402
-from leadauto.pipeline.stage1_enrich import run_stage1  # noqa: E402
+from leadauto.pipeline.run import run_pipeline  # noqa: E402
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--config", required=True, help="one-off config, e.g. config/config.zpe-2026-09.yaml")
-    ap.add_argument("--out", required=True, help="output dir: QA workbook, own watermark, review/ CSV")
+    ap.add_argument("--out", required=True, help="output dir: QA workbook, own watermark")
     ap.add_argument("--since", default="2026-09-13T22:00:00Z",
                     help="SOQL datetime literal; Tasks created at/after it are scanned")
-    ap.add_argument("--live", action="store_true", help="write back + stage for conversion (default: dry)")
+    ap.add_argument("--live", action="store_true", help="write back (default: dry); never converts")
     ap.add_argument("--no-leadfeeder", action="store_true", help="skip LeadFeeder (0 credits, no firmographics)")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
@@ -63,7 +64,7 @@ def main() -> int:
             return 2
         lf = _build_lf_client(settings, log)
 
-    res = run_stage1(
+    res = run_pipeline(
         sf, lf, settings,
         since=args.since,
         limit=args.limit,
@@ -71,7 +72,7 @@ def main() -> int:
         qa_path=qa_path,
         state_path=out / "watermark.json",
         predictions_path=None,
-        review_dir=out / "review",
+        convert=False,
         logger=log,
     )
     decisions = [r.decision for r in res.results]
@@ -87,9 +88,6 @@ def main() -> int:
     )
     if lf is not None:
         print(f"LeadFeeder credits charged this run: {getattr(lf, 'credits_charged', 'n/a')}")
-    approved = sorted((out / "review").glob("approved_*_auto.csv")) if args.live else []
-    if approved:
-        print(f"Auto-approved CSV for Stage 2: {approved[-1]}")
     return 0
 
 

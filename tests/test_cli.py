@@ -1,41 +1,33 @@
 """CLI tests.
 
-The command bodies are thin glue over the already-tested stage functions and construct live
-clients, so we don't invoke them here. We test the pure helper (`find_latest_approved`) and
-that the Typer app exposes the stage1/stage2 commands (via --help, which never touches an org).
+The command bodies are thin glue over the already-tested pipeline functions and construct
+live clients, so we don't invoke them against anything real. We test that the Typer app
+exposes the `run` command (via --help, which never touches an org), the exit-code rule of
+`run` with a faked pipeline, and the shadow-compare gate.
 """
 import pytest
 from typer.testing import CliRunner
 
-from leadauto.cli import app, find_latest_approved
+from leadauto.cli import app
+from leadauto.convert import ConversionTarget
+from leadauto.pipeline.run import PipelineResult
 
 runner = CliRunner()
 
 
-def test_find_latest_approved_picks_newest(tmp_path):
-    (tmp_path / "approved_2026-06-01.csv").write_text("x", encoding="utf-8")
-    (tmp_path / "approved_2026-06-20.csv").write_text("x", encoding="utf-8")
-    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
-    latest = find_latest_approved(tmp_path)
-    assert latest.name == "approved_2026-06-20.csv"
-
-
-def test_find_latest_approved_none_when_empty(tmp_path):
-    assert find_latest_approved(tmp_path) is None
-
-
-def test_app_exposes_stage1_and_stage2():
+def test_app_exposes_run_and_no_stage_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "stage1" in result.stdout
-    assert "stage2" in result.stdout
+    assert "run" in result.stdout
+    assert "stage1" not in result.stdout and "stage2" not in result.stdout
 
 
-def test_stage1_help_lists_flags():
-    result = runner.invoke(app, ["stage1", "--help"])
+def test_run_help_lists_flags():
+    result = runner.invoke(app, ["run", "--help"])
     assert result.exit_code == 0
     assert "--dry-run" in result.stdout
     assert "--limit" in result.stdout
+    assert "--batch-size" in result.stdout
 
 
 def _stub_shadow_compare(monkeypatch, cli):
@@ -64,7 +56,7 @@ def test_shadow_compare_command(monkeypatch):
 
 
 def test_shadow_compare_skips_when_not_due(monkeypatch):
-    # Stage 1 is dispatched 4x/day and a compare costs ~7-9 Salesforce requests, so a
+    # The pipeline is dispatched 5x/day and a compare costs ~7-9 Salesforce requests, so a
     # too-recent compare must skip WITHOUT touching the org (and still exit green).
     import leadauto.cli as cli
     from datetime import datetime, timezone
@@ -83,95 +75,69 @@ def test_shadow_compare_skips_when_not_due(monkeypatch):
     assert "xlsx=shadow_comparison.xlsx" in result.output
 
 
-def test_stage2_cli_reports_preflight_skips(monkeypatch, tmp_path):
-    from leadauto import cli
-    from leadauto.pipeline.stage2_convert import Stage2Result
+# --- `run` exit codes: fail the job on failed/missing/aborted conversions ------------
 
+def _fake_run(monkeypatch, conversion, targets=()):
+    from leadauto import cli
     captured = {}
 
-    def fake_run_stage2(sf, settings, approved, *, dry_run=None, batch_size=50,
-                        preflight=True, failures_csv="preflight_failures.csv", logger=None):
-        captured["preflight"] = preflight
-        return Stage2Result(targets=[], result={"converted": 0, "failed": 0},
-                            dry_run=True,
-                            preflight_failures=[{"lead_id": "00Q1", "check": "language",
-                                                 "value": "", "detail": "d"}])
+    def fake_run_pipeline(sf, lf, settings, **kwargs):
+        captured.update(kwargs)
+        return PipelineResult(results=[], skipped=[], writeback={"processed": 0},
+                              dry_run=bool(kwargs.get("dry_run")),
+                              targets=list(targets), conversion=conversion)
 
-    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
+    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
-    approved = tmp_path / "approved_1.csv"
-    approved.write_text("lead_id,Approve?\n00Q1,yes\n", encoding="utf-8")
-
-    from typer.testing import CliRunner
-    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved),
-                                          "--no-preflight"])
-    assert result.exit_code == 0
-    assert captured["preflight"] is False
-    assert "preflight_skipped=1" in result.output
+    return captured
 
 
-def test_stage2_cli_exits_nonzero_on_failed_or_missing(monkeypatch, tmp_path):
+def _conversion(**result):
+    base = {"converted": 0, "already_converted": 0, "failed": 0, "missing": 0,
+            "missing_ids": [], "results": []}
+    return {"targets": 1, "preflight_failures": [], "result": {**base, **result},
+            "error": None, "targets_run": 1, "targets_sweep": 0}
+
+
+def test_run_cli_passes_batch_size_and_reports_counts(monkeypatch):
+    captured = _fake_run(monkeypatch, _conversion(converted=2),
+                         targets=[ConversionTarget("00Q000000000001"),
+                                  ConversionTarget("00Q000000000002")])
+    result = runner.invoke(app, ["run", "--dry-run", "--batch-size", "1"])
+    assert result.exit_code == 0, result.output
+    assert captured["batch_size"] == 1 and captured["dry_run"] is True
+    assert "targets=2" in result.output and "converted=2" in result.output
+
+
+def test_run_cli_exits_nonzero_on_failed_or_missing(monkeypatch):
     # A failed or unaccounted-for conversion must fail the job, not just log a count.
-    from leadauto import cli
-    from leadauto.pipeline.stage2_convert import Stage2Result
-
-    def fake_run_stage2(sf, settings, approved, **kwargs):
-        return Stage2Result(
-            targets=[object()],
-            result={"converted": 0, "failed": 1, "missing": 1, "missing_ids": ["00Q000000000009"]},
-            dry_run=False, preflight_failures=[])
-
-    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
-    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
-    approved = tmp_path / "approved_2.csv"
-    approved.write_text("lead_id,Approve?\n00Q000000000009,yes\n", encoding="utf-8")
-
-    from typer.testing import CliRunner
-    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved),
-                                          "--no-preflight", "--no-dry-run"])
+    _fake_run(monkeypatch, _conversion(failed=1, missing=1, missing_ids=["00Q000000000009"]))
+    result = runner.invoke(app, ["run", "--no-dry-run"])
     assert result.exit_code == 1
     assert "failed=1 missing=1" in result.output
 
 
-def test_stage2_cli_zero_exit_on_already_converted_only(monkeypatch, tmp_path):
+def test_run_cli_exits_nonzero_when_conversion_phase_aborted(monkeypatch):
+    conv = _conversion()
+    conv["error"] = "ConnectionError: socket dropped"
+    _fake_run(monkeypatch, conv)
+    result = runner.invoke(app, ["run", "--no-dry-run"])
+    assert result.exit_code == 1
+    assert "Conversion phase aborted" in result.output
+
+
+def test_run_cli_zero_exit_on_already_converted_only(monkeypatch):
     # A re-run where every lead was already converted is an idempotent no-op: it must exit
     # 0 (green), not fail the job the way `failed`/`missing` do.
-    from leadauto import cli
-    from leadauto.pipeline.stage2_convert import Stage2Result
-
-    def fake_run_stage2(sf, settings, approved, **kwargs):
-        return Stage2Result(
-            targets=[object(), object()],
-            result={"converted": 0, "already_converted": 2, "failed": 0, "missing": 0,
-                    "missing_ids": []},
-            dry_run=False, preflight_failures=[])
-
-    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
-    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
-    approved = tmp_path / "approved_4.csv"
-    approved.write_text("lead_id,Approve?\n00Q000000000009,yes\n", encoding="utf-8")
-
-    from typer.testing import CliRunner
-    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved),
-                                          "--no-preflight", "--no-dry-run"])
+    _fake_run(monkeypatch, _conversion(already_converted=2))
+    result = runner.invoke(app, ["run", "--no-dry-run"])
     assert result.exit_code == 0
     assert "already=2" in result.output
 
 
-def test_stage2_cli_exits_nonzero_on_malformed_csv(monkeypatch, tmp_path):
-    # A bad Id in the approved CSV raises ValueError inside run_stage2; the CLI turns it
-    # into a readable non-zero exit rather than a traceback.
-    from leadauto import cli
-
-    def fake_run_stage2(sf, settings, approved, **kwargs):
-        raise ValueError("Malformed Salesforce Id(s) in the approved CSV — fix the file")
-
-    monkeypatch.setattr(cli, "run_stage2", fake_run_stage2)
-    monkeypatch.setattr(cli, "_build_sf_client", lambda s, l: object())
-    approved = tmp_path / "approved_3.csv"
-    approved.write_text("lead_id,Approve?\nbad,yes\n", encoding="utf-8")
-
-    from typer.testing import CliRunner
-    result = CliRunner().invoke(cli.app, ["stage2", "--approved", str(approved)])
-    assert result.exit_code == 1
-    assert "Malformed Salesforce Id" in result.output
+def test_run_cli_zero_exit_without_conversion(monkeypatch):
+    # convert=False style result (no conversion dict at all) is still green
+    _fake_run(monkeypatch, {})
+    result = runner.invoke(app, ["run", "--dry-run"])
+    assert result.exit_code == 0
+    assert "converted=0" in result.output
