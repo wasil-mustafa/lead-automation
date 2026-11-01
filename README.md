@@ -10,19 +10,20 @@ Someone then has to figure out: *Who is this company? Do we already know them?
 Which of our existing accounts do they belong to — or are they brand new?* Then they enrich the lead with
 company data, fill in the required fields, and convert it into an account and contact.
 
-This project does all of that automatically, on a schedule, with a human review step before
-anything is actually changed in Salesforce. [LeadFeeder](https://www.leadfeeder.com/) acts as the
+This project does all of that automatically, on a schedule, converting only the leads whose
+enrichment came back complete and leaving every doubtful one to a human.
+[LeadFeeder](https://www.leadfeeder.com/) acts as the
 external data source: given a company name or email domain, it identifies the actual company and
 provides the firmographic data (industry, size, revenue, address) needed to enrich the lead and
 recognize duplicates.
 
 ## How it works
 
-The pipeline runs in two stages:
+One scheduled run, five times a day, does everything:
 
-### Stage 1 — Find, enrich, and match
+### Find, enrich, and match
 
-Runs four times a day. It:
+It:
 
 1. **Picks up new leads** that have an open task and are in a leadpool queue
    (currently: profile claims and EBP trials).
@@ -46,39 +47,43 @@ Runs four times a day. It:
    create a new one, or flag it for a human to decide. (The matching contact is found the same
    way, via email or kununu user ID.)
 5. **Fills in the lead** with the enriched data and everything Salesforce requires for conversion.
-6. **Produces a review sheet** (an Excel file) listing every lead, what the pipeline found, what it
-   decided, and why — with an **Approve?** column.
+6. **Tags the lead with a campaign** that says how the enrichment went: complete, incomplete,
+   or no company found. Sales uses those campaigns to pick up what the automation left.
 
-### Stage 2 — Convert
+### Convert
 
-Triggered manually, once the review sheet has been checked. It:
+In the same run, right after the tagging:
 
-1. **Reads the approved rows** from the review sheet — only leads a human has signed off on
-   are touched.
-2. **Runs a final safety check** on each lead (are all required fields really filled? does the
-   decision still make sense?) and skips anything that fails, with a report of why.
-3. **Converts each lead** into either a new account and contact, or a contact on the existing
-   account the matching found. Leads from the same company become one account with multiple
-   contacts, not duplicates.
+1. **Picks the leads to convert**: those tagged *complete* whose matching said "this company is
+   new" — this run's, plus any from earlier runs that are still unconverted (so a lead never
+   gets stuck). Leads that match an existing account, or that could not be decided, stay with
+   a human.
+2. **Runs a final safety check** on each lead against Salesforce's own conversion rules and
+   skips anything that fails, with a report of why.
+3. **Converts each lead** into a new account and contact. Leads from the same company become
+   one account with multiple contacts, not duplicates.
+4. **Produces a workbook** (Excel) listing every lead, what the pipeline found, what it decided,
+   why, and what it converted.
 
 ## Safety first
 
 The pipeline is deliberately cautious:
 
-- **Dry-run by default** — scheduled runs analyze and report, but don't write anything.
-- **Human review gate** — no lead is converted without explicit approval in the review sheet.
-- **Shadow comparison** — while in dry-run, the pipeline's decisions are recorded and compared
-  against what humans actually did with the same leads. That accuracy report is the evidence for
-  going live. (A backtest on 283 historical cases showed the matching picks the right account
-  87% of the time, with most of the rest correctly flagged for review.)
+- **Dry-run by default** — a manual run analyzes and reports, but doesn't write anything; only
+  the scheduler runs live.
+- **Narrow conversion scope** — only fully enriched leads whose company is new are converted;
+  everything that matches an existing account or is unclear stays with a human.
+- **Shadow comparison** — the pipeline's decisions on the leads it leaves to humans are
+  recorded and compared against what those humans actually did. That accuracy report was the
+  evidence for going live. (A backtest on 283 historical cases showed the matching picks the
+  right account 87% of the time; on the "new company" decision it agreed with humans 300 of
+  304 times.)
 - **Skip rather than guess** — if the company can't be confidently identified, the lead is left
   alone for a human instead of being converted on shaky data.
 
 ## Status
 
-Everything is built and tested. Stage 1 runs on a schedule in dry-run mode; live writes to
-Salesforce haven't been switched on yet — that happens after the shadow-comparison results are
-reviewed.
+Live since 2026-10-19 (enrichment) and 2026-10-31 (conversion); one fused run since 2026-11-01.
 
 ## For developers
 

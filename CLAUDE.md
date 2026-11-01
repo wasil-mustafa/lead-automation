@@ -11,9 +11,9 @@ into a scheduled GitHub Actions job:
 **Pointers:** approved plan `C:\Users\wasil\.claude\plans\witty-watching-shannon.md` · design/specs
 `docs/superpowers/{specs,plans}/` · session memories
 `~/.claude/projects/C--Users-wasil-OneDrive---kununu-Lead-Automation/memory/` (+ older org facts under
-the `...-Scripts` project path) · **Stage 2 (conversion) has its own guide:
-`src/leadauto/convert/CLAUDE.md`** — read it for anything touching conversion, the review gate,
-or `stage2.yml` · legacy manual-conversion lessons `docs/legacy/convert-leads/` ·
+the `...-Scripts` project path) · **conversion has its own guide:
+`src/leadauto/convert/CLAUDE.md`** — read it for anything touching the converter, the preflight,
+the sweep or the SOAP path · legacy manual-conversion lessons `docs/legacy/convert-leads/` ·
 **task auto-close (standalone, read-only, propose-only): `autoclose/CLAUDE.md`**.
 
 ## Architecture — three object-centric modules
@@ -33,12 +33,14 @@ Code lives under `src/leadauto/`. Each module is independently runnable.
 ## Commands
 
 ```powershell
-# Tests (pytest is configured with pythonpath=src via pyproject.toml) — ~625 tests
+# Tests (pytest is configured with pythonpath=src via pyproject.toml) — ~700 tests
 python -m pytest -q
 
-# Run a stage locally (set LEADFEEDER_API_KEY / KUNUNU_API_TOKEN as ad-hoc env vars if needed)
-$env:PYTHONPATH = "src"; python -m leadauto stage1 --dry-run --no-leadfeeder
-$env:PYTHONPATH = "src"; python -m leadauto stage2 --dry-run
+# Run the pipeline locally (set LEADFEEDER_API_KEY / KUNUNU_API_PASSWORD ad hoc if needed).
+# ONE command since 2026-11-01: enrich -> campaign tag -> convert, incl. the sweep. A dry run
+# writes nothing but still previews the sweep (2 read calls); --batch-size overrides
+# pipeline.convert_batch_size (3).
+$env:PYTHONPATH = "src"; python -m leadauto run --dry-run --no-leadfeeder
 $env:PYTHONPATH = "src"; python -m leadauto shadow-compare
 # Backtest skipped (contact-reparented) tasks; LF needs Actions (key only in GH Secrets):
 #   gh workflow run backtest-skipped.yml   — locally only the no-credit plumbing check works:
@@ -53,13 +55,42 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
 
 ## Status
 
-- **Built & unit-tested:** all three modules + cross-cutting; ~625 tests (6 fail locally on
-  environment — caplog, MPA snapshot, feed cache — on a clean master too).
+- **ONE RUN since 2026-11-01 (PR #35, Wasil: "discard stage 2 fully"):** `python -m leadauto
+  run` / `.github/workflows/pipeline.yml` = extract → LF enrich → match → write-back →
+  LF-outcome campaign tag → **convert, in-process**, every lead in a
+  `live_scope.convert_campaigns` bucket ("EnrichLeadfedup") with a `create_new` decision.
+  Two target sources (`convert/targets.py`): this run's tagged leads (`targets_from_results`,
+  in memory — the old link rules kept) and the **SWEEP** (`sweep_targets`): every run also
+  reads the unconverted, queue-owned, `Status = New` members of those campaigns from EARLIER
+  runs (1 SOQL, `soql.campaign_members_unconverted`), so a lead tagged but not converted —
+  the reader anti-joins campaign members out of every later read — is never stranded.
+  A swept lead's decision = its NEWEST row in `state/predictions.jsonl`
+  (`predictions.latest_by_lead`, 15-char id compare); no row, or a decision outside
+  `live_scope.decisions` ⇒ `left_to_human` on the QA `Conversion` sheet, every run
+  (fail closed; 42 members written back 2026-10-20/21 have no row — Wasil, 2026-11-01:
+  leave them). Swept leads get `KN_NoOwnDBID__c` ticked FIRST (one PATCH, duplicate-rule
+  header like the write-back; a rejected row ⇒ `sweep_dbid_tick_failed`, left to a human).
+  Then preflight → pool-link gate → SOAP (`pipeline.convert_batch_size: 3`) → `KN_Email2__c`,
+  fenced: ANY exception is recorded (`conversion.error`, Summary `convert_error`), the
+  workbook and watermark are still written, and the CLI exits 1 afterwards — `pipeline.yml`
+  commits state with `if: always()` for that reason. Predictions: recorded for every live
+  lead NOT converted (failed / preflight-skipped included, so the next sweep retries them);
+  every pipeline-converted lead's pending row is `excluded`
+  (`predictions.exclude_predictions`, reason `pipeline_converted`) so shadow-compare never
+  scores our own conversion as a human hit. **Gone:** `review/`, `approved_*.csv`, the
+  `Approve?` column, `review_gate`, `stage2.yml`, `cli stage2`, `preflight_failures.csv`
+  (failures are Conversion-sheet rows). `scripts/event_run.py` passes `convert=False`
+  (its config lists `link`; that path never ran live). cron-job.org job 8029899 was
+  re-pointed to `pipeline.yml` the same day. First live run 2026-11-01 (see Status GO-LIVE).
+- **Built & unit-tested:** all three modules + cross-cutting; ~700 tests (the MPA drift test
+  skips when the sibling checkout is not beside the repo; caplog / feed-cache failures on
+  some laptops are environment).
 - **Live-validated (read-only):** CI Salesforce auth, Stage 1 extract→QA path, LeadFeeder
   match/contact cascade (org `headless`, LF account kununu Austria GmbH/276820; note: direct
   contact email/phone can be sparse on this LF tier).
-- **Scheduled:** Stage 1 is triggered by an **external cron-job.org job** (id 8029899) hitting the
-  `stage1.yml` `workflow_dispatch` every 2 h at :48, 08:48-16:48 Vienna (5/day). **Scheduled
+- **Scheduled:** the run is triggered by an **external cron-job.org job** (id 8029899) hitting the
+  `pipeline.yml` `workflow_dispatch` (was `stage1.yml` until 2026-11-01) every 2 h at :48,
+  08:48-16:48 Vienna (5/day). **Scheduled
   runs are LIVE since 2026-10-19:** the job POSTs `{"ref":"master","inputs":{"dry_run":"false"}}`
   (before that it sent no inputs ⇒ `dry_run` defaulted true ⇒ every scheduled run was dry).
   What "live" does is decided by `pipeline.live_scope` — since 2026-10-31 **enrich every
@@ -68,11 +99,10 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   schedule/payload in *that job* (cron-job.org API `PATCH /jobs/8029899` — carry the existing
   `extendedData.headers` over, they hold the GitHub token), not the workflow. GitHub's own
   `schedule:` cron was removed. Shadow files committed every run; watermark only on non-dry.
-  Stage 2 runs on manual dispatch OR chained from a live Stage-1 run that staged an
-  auto-approved CSV (`workflow_call`, see the go-live bullet) — the chain fires only on a
-  run that tagged at least one create_new lead `matched_complete`.
+  (Until 2026-11-01 conversion was a chained Stage 2 fed by a committed auto-approved CSV;
+  the "chained Stage 2" wording in the dated bullets below is history.)
 - **Scope:** `enabled_task_types` = `claimer`, `ebp_trial`; config `pipeline.dry_run: true`
-  (local-run default; CI takes the dispatch input), `review_gate: false` (since go-live),
+  (local-run default; CI takes the dispatch input), `convert_batch_size: 3`,
   `task_lookback_days: 14` (was 90 for the initial backlog sweep, which is done; the window is a
   BACKWARD overlap off the watermark, so shrinking it can't miss new tasks), and the
   **live-scope gate** `pipeline.live_scope` — see next bullet.
@@ -365,11 +395,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   WORKFLOW, which GitHub reports as a 0-second `startup_failure` with no job, no log and no API
   annotation. Cost on 2026-08-19: every push created three red runs and `stage1.yml` was dead for
   ~20 minutes across two scheduled dispatches before it was reverted. Env that needs `runner` or
-  `secrets` goes on the STEP, where both are available. There are only three workflows
-  (`stage1.yml`, `stage2.yml`, `backtest-skipped.yml`) — a fourth was added that day for the
-  Enriching sheet and reverted the same day: it was a dry Stage 1 with a different artifact name,
-  i.e. Stage 1 with extra steps. **The sheet is a Stage 1 feature, not a workflow** (Wasil,
-  2026-08-19).
+  `secrets` goes on the STEP, where both are available. There are only two workflows
+  (`pipeline.yml`, `backtest-skipped.yml`; `stage1.yml` + `stage2.yml` until 2026-11-01) — a
+  third was added on 2026-08-19 for the Enriching sheet and reverted the same day: it was a
+  dry run with a different artifact name, i.e. the pipeline with extra steps. **The sheet is a
+  pipeline feature, not a workflow** (Wasil, 2026-08-19).
 
 ### LeadFeeder & kununu feed
 
@@ -591,12 +621,14 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    enrich-only (see the Split bullet): claimer — and since 2026-10-20 ebp_trial — leads
    are written back. **Auto-conversion resumed 2026-10-31** for create_new leads
    tagged "EnrichLeadfedup" (Campaign-gate bullet; 95.7 % shadow agreement was the
-   evidence). Watch the first live runs: Summary `convert_staged`, the chained Stage 2
-   run's `preflight_failures.csv` (expect `dbid_xor` to be gone) and duplicates among
-   the new Accounts. The first live run also converts the backlog of pending create_new
-   leads still in `Status = New` within the 14-day window. Widening further
-   (`matched_incomplete`, `link`) is a config commit. A required-reviewers Environment
-   is NOT possible (needs a paid plan on private repos, verified 2026-07-10).
+   evidence). **Fused into one run 2026-11-01 (PR #35, Status "ONE RUN" bullet); first
+   live run the same day (scheduled run 41294697597) swept and converted the 16
+   backlog leads tagged 2026-10-30 — org-verified: 16 Qualified, owner Rohdaten Pool,
+   no Opportunity, 17 tasks re-parented, no duplicate Account names.** Watch: Summary
+   `converted` / `convert_failed` / `convert_left_to_human` and the `Conversion` sheet.
+   Widening further (`matched_incomplete`, `link`) is a config commit. A
+   required-reviewers Environment is NOT possible (needs a paid plan on private repos,
+   verified 2026-07-10).
 2. **Port `lf_name_dropped` from `Contact Presence Check`** — the highest-value LF-matching
    work here, and the 2026-08-25 backtest is why. `lf_name_agreement = 100` does NOT mean
    the right company: the gate scores a TRUNCATED name as perfect agreement, so
@@ -637,16 +669,19 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    Live-proven small-scale 2026-07-18 (go-live run: 3 leads written, 0 failures). Still open
    from the old item: watermark exclusion for failed rows vs. Failures sheet + overlap-window
    retry.
-7. **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path; `stage2_convert`
-   re-derives the auto-link predicate; `stage1.yml` push lacks rebase/retry (mitigated by the
-   concurrency group); add `caplog` assertions to the LF chunk-failure tests;
+7. **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path; `pipeline.yml`
+   push lacks rebase/retry (mitigated by the concurrency group); add `caplog` assertions
+   to the LF chunk-failure tests; a swept lead that fails preflight or SOAP is re-read and
+   retried on every run (5/day) — remember failed ids in `state/` if that ever costs
+   real calls;
    `qa_artifact._convert_blockers` false-positives `postal_length` when the payload changes the
    country (it merges payload `CountryCode` over the lead's stale `Country` name — leads default
    to Germany; the real preflight reads post-write-back state and passes, proven on the go-live
-   run). **Test gotcha (fixed 8ee8eb8, keep honoring it):** any `dry_run=False` `run_stage1`
-   test MUST pass `review_dir=tmp_path` — with `review_gate: false` in config it otherwise
-   writes a fake auto-approved CSV into the repo's real `review/` dir, which Stage 1's
-   detect-step glob (`review/approved_*_auto.csv`, first untracked match) could feed to Stage 2.
+   run). **Test gotcha (keep honoring it):** any `dry_run=False` `run_pipeline` test MUST
+   pass `state_path=` and `predictions_path=` under `tmp_path` (or `None`) — otherwise it
+   writes a fake watermark/prediction into the repo's real `state/`, which CI commits and
+   the conversion sweep reads as a decision. A `run_pipeline` test with `sf_client=None`
+   must also pass `convert=False` (the sweep queries the client, dry runs included).
 
 ## Git
 

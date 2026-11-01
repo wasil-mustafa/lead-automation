@@ -1,28 +1,39 @@
-# Stage 2 — Gated Lead Conversion
+# Lead Conversion (in-process since 2026-11-01)
 
-Scope: the conversion path — this package (`convert/converter.py`), `pipeline/stage2_convert.py`,
-`cli.py stage2`, `.github/workflows/stage2.yml`, and `review/approved_*.csv`. Stage 2 runs on
-**manual dispatch** OR **chained from a live Stage-1 run** (`workflow_call` from `stage1.yml`'s
-`convert` job, since go-live 2026-07-18); no cron, no watermark. LIVE-PROVEN: 3-lead test
-2026-07-10 (run 29126789599), 230-lead backlog 2026-07-17, first chained auto-run 2026-07-18
-(run 29653343786, 3/3). The chained call checks out `ref: master` (NOT the triggering SHA) so it
-sees the auto CSV committed mid-run, and reuses the `lead-automation-stage2` concurrency group
-at the caller's job level (a called workflow's top-level `concurrency` is ignored).
+Scope: the conversion path — this package (`convert/converter.py`, `preflight.py`,
+`pool_enrich.py`, **`targets.py`**) and the conversion phase of `pipeline/run.py`
+(`_convert`). Since 2026-11-01 (PR #35, Wasil: "discard stage 2 fully") conversion happens
+**inside the pipeline run**, right after the LF-outcome campaign tagging — there is no
+Stage 2, no `stage2.yml`, no `review/approved_*.csv`, no `Approve?` column. Targets come
+from two in-memory sources (`targets.py`): this run's leads tagged into a
+`live_scope.convert_campaigns` bucket, and the **sweep** of earlier runs' unconverted
+members of those campaigns. LIVE-PROVEN: 3-lead test 2026-07-10 (run 29126789599), 230-lead
+backlog 2026-07-17, first chained auto-run 2026-07-18 (run 29653343786, 3/3), first fused
+run 2026-11-01 (run 41294697597: 16 swept backlog leads converted, 0 failed). The dated
+"Stage 2" / "approved CSV" wording further down is history and kept for the gotchas.
 
 ## Flow
 
-1. Reviewer fills `Approve?` in the QA artifact's Review sheet and commits the rows as
-   `review/approved_<date>.csv`. `stage2` picks the newest by filename (`--approved` overrides).
-   **Auto-approve mode (Wasil 2026-07-10; ACTIVE + narrowed to the live scope since go-live
-   2026-07-18):** with config `pipeline.review_gate: false`, live Stage-1 runs emit + commit
-   `review/approved_<UTCts>_auto.csv` themselves (`qa_artifact.write_auto_approved_csv`):
-   exactly the rows passing the live-scope gate (`live_scope.py`: decision ∈
-   `pipeline.live_scope.decisions` — currently `create_new` — AND kununu score <
-   `max_kununu_score` 3.0; missing score fails closed) pre-approved, `skip`/`review` never
-   included, write-back failures held back. Stage 2 is unchanged — preflight/pool-gate/
-   clustering still run (see Safety model for the brakes).
-2. `targets_from_approved` builds one `ConversionTarget(lead_id, account_id?, contact_id?)`
-   per approved row (`Approve?` ∈ yes/y/true/x/1):
+1. **Targets (since 2026-11-01, `targets.py`).** `targets_from_results(results, run_ids)` —
+   this run's leads that passed the live-scope gate (`live_scope.py`: decision ∈
+   `pipeline.live_scope.decisions`, currently `create_new`), were written back AND were
+   tagged into a `live_scope.convert_campaigns` bucket by the CampaignMember insert that
+   just ran (`run.py`: `run_ids`; without the campaign axis the scope alone decides).
+   `sweep_targets(sf, settings, exclude_ids=<every lead this run extracted>)` — one SOQL
+   (`soql.campaign_members_unconverted`: members of those campaigns, `LeadId != null`,
+   `Lead.IsConverted = false`, `Lead.Owner.Type = 'Queue'`, `Lead.Status IN
+   pipeline.lead_statuses`), deduped on the 15-char LeadId; each member's decision is its
+   newest `state/predictions.jsonl` row (`predictions.latest_by_lead`); only
+   `decisions`-listed ones become targets (a `link` prediction links its `account_id`),
+   the rest are `left` rows (`sweep_no_recorded_decision` / `sweep_decision_<d>` /
+   `sweep_dbid_fields_missing`). Targets whose row shows neither `KN_DBID__c` nor the
+   `KN_NoOwnDBID__c` tick get ONE `update_records("Lead", …, allow_duplicates=
+   pipeline.writeback_allow_duplicates)` ticking the flag (live only; dry runs preview it
+   through the preflight `overlay`); a rejected row ⇒ `sweep_dbid_tick_failed`, left.
+   Sweep targets carry `lf_company_id` + kununu URL from the prediction but no
+   `lf_contact_email` (no `KN_Email2__c` for them).
+2. The link rules, applied to both sources (`targets_from_results`; the sweep never links a
+   Contact):
    - Rows with `decision == "skip"` (no LeadFeeder match) are dropped even if approved — a
      terminal skip never converts (Stage 1 excludes them from account/contact matching).
    - Account links whenever `account_match_id` is non-blank (reviewer validated it).
@@ -94,21 +105,31 @@ at the caller's job level (a called workflow's top-level `concurrency` is ignore
 ## Commands
 
 ```powershell
-python -m pytest -q                                            # full suite covers stage 2
-$env:PYTHONPATH = "src"; python -m leadauto stage2 --dry-run   # newest review/approved_*.csv
-python -m leadauto stage2 --approved review/approved_X.csv --batch-size 1 --no-dry-run
+python -m pytest -q                                    # tests/test_targets.py, test_convert.py, test_preflight.py, test_pipeline.py
+$env:PYTHONPATH = "src"; python -m leadauto run --dry-run      # previews the sweep (read-only) on the QA Conversion sheet
+$env:PYTHONPATH = "src"; python -m leadauto run --no-dry-run --batch-size 1   # live; batch default = config convert_batch_size (3)
 ```
 
 ## Safety model
 
 - `dry_run` short-circuits in `convert_leads` before ANY org call; config has `dry_run: true`
-  and the workflow input defaults to true.
-- IDs from the approved CSV are validated to the 15/18-char alphanumeric shape in
-  `targets_from_approved` (raises `ValueError` → CLI exits non-zero) and re-guarded to
+  and the workflow input defaults to true. A dry run still READS: the sweep query and the
+  preflight (with an overlay that previews the sweep's `KN_NoOwnDBID__c` tick), so the QA
+  `Conversion` sheet shows what a live run would do.
+- Ids come straight from org query rows (never a hand-edited file) and are re-guarded to
   alphanumeric-only before embedding in SOQL or the SOAP envelope (one shared guard,
-  `sf.client.guard_sf_id`), so a malformed or malicious cell can neither inject nor crash a batch.
-- A contact link without an account link is dropped in `targets_from_approved` (LeadConvert
-  requires `setAccountId` alongside `setContactId`; the lead converts create-new instead).
+  `sf.client.guard_sf_id`).
+- A contact link without an account link is dropped in `targets_from_results` (LeadConvert
+  requires `setAccountId` alongside `setContactId`; the lead converts create-new instead);
+  a `skip` decision reaching it RAISES (the gate must have excluded it) and is deliberately
+  not fenced.
+- **The sweep fails closed**: a campaign member with no recorded prediction, or one whose
+  newest prediction is outside `live_scope.decisions`, is `left_to_human` (reported every
+  run, never ticked). The whole conversion phase is fenced (`run._convert`): any exception
+  is recorded, the workbook + watermark are still written, the CLI exits 1 afterwards.
+- Every pipeline-converted lead's pending prediction is `excluded`
+  (`predictions.exclude_predictions`, 15-char id compare — an exact compare matched nothing
+  and was caught in review before merge) so shadow-compare never scores our own conversion.
 - Idempotent: already-converted leads become explicit `alreadyConverted` rows instead of
   failures, so re-running a batch (or an approved CSV where some rows already converted) is a
   no-op that exits **green** — counted `already_converted`, not `missing`/`failed`. With
