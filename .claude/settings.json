@@ -38,6 +38,18 @@
             "statusMessage": "Checking command for live writes / wrong org / API cost"
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard_bash.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking command for live writes / wrong org / API cost"
+          }
+        ]
       }
     ],
     "PostToolUse": [
