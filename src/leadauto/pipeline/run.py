@@ -165,8 +165,8 @@ def run_pipeline(
         wide = sum(1 for r, reason in zip(results, wb_reasons)
                    if reason is None and is_wide_match(r))
         if wide:
-            log.warning("Live scope: %d of those rest on a second-chance (wide) LF match",
-                        wide)
+            log.warning("Live scope: %d of those rest on a non-primary (wide / domain "
+                        "rescue) LF match", wide)
         wb = write_back(sf_client, live_enriched, dry_run=False, logger=log,
                         settings=settings, convert_ids=candidates)
         failed = {f.get("lead_id") for f in wb.get("failures", [])}

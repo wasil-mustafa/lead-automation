@@ -24,8 +24,16 @@ from __future__ import annotations
 
 
 def is_wide_match(result) -> bool:
-    """True when the accepted LF match came from the second-chance ("wide") pass."""
+    """True when the accepted LF match came from a pass other than the primary one:
+    the second-chance ("wide") pass, or the domain rescue ("domain", 2026-11-05). Both
+    are admitted to live scope by the one `allow_wide_match` switch and flagged with
+    their pass name (`yes_<pass>_match` / `match_pass_<pass>`)."""
     return (result.enriched.match_pass or "primary") != "primary"
+
+
+def match_pass_flag(result, prefix: str) -> str:
+    """`<prefix>_<pass>_match` for a non-primary match, e.g. `yes_wide_match`."""
+    return f"{prefix}_{result.enriched.match_pass}_match"
 
 
 def writeback_reason(result, settings) -> str | None:
@@ -40,7 +48,7 @@ def writeback_reason(result, settings) -> str | None:
     # do not convert until that accuracy is measured HERE. Flip with
     # `pipeline.live_scope.allow_wide_match: true`.
     if not settings.live_allow_wide_match and is_wide_match(result):
-        return "match_pass_wide"
+        return f"match_pass_{result.enriched.match_pass}"
     # None = no task-type axis (the key is absent): every enabled type may go live.
     # A type that is enabled but not listed is still extracted, matched and
     # shadow-predicted — it just stays dry while the others go live.

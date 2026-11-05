@@ -98,6 +98,10 @@ class EnrichedLead:
     extracted: ExtractedLead
     matched: bool = False
     lf_rejected: str | None = None  # post-retrieve sanity gate's rejection reason, or None
+    # What the domain-rescue pass (enrich.py, 2026-11-05) did for a country_conflict
+    # rejection: recovered | no_match | url_mismatch:<host> | foreign:<cc>!=<cc> |
+    # no_corporate_domain | rejected_again:<reason>; None when the pass did not run.
+    lf_rescue: str | None = None
     lf_company_id: str | None = None
     matched_name: str | None = None
     match_score: float | None = None

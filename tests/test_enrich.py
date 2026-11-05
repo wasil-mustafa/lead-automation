@@ -20,6 +20,9 @@ class FakeClient:
         # Only visible at max_results > MATCH_RESULTS_PRIMARY: the candidates LF ranks
         # 4th-20th, which the second-chance pass is the only caller that ever sees.
         self.wide_match_by_name: dict = {}
+        # Answers for the domain-rescue pass, keyed by the `url` it sends (the lead's
+        # email domain). A rescue payload never falls through to the name tables.
+        self.rescue_by_url: dict = {}
         self.match_widths: list = []      # max_results of every match_companies call
         self.company_attrs: dict = {}     # lf_company_id -> raw attrs
         self.contact_by_name: dict = {}   # name -> {contact_id, full_name} | None
@@ -42,7 +45,8 @@ class FakeClient:
         self.match_widths.append(max_results)
         table = (self.match_by_name if max_results <= 3
                  else {**self.match_by_name, **self.wide_match_by_name})
-        return [table.get(p["company_name"]) for p in payloads]
+        return [self.rescue_by_url.get(p["url"]) if p.get("url")
+                else table.get(p["company_name"]) for p in payloads]
 
     def add_company_to_list(self, company_id, list_id):
         self.calls.append(("add_company", company_id, list_id))
@@ -802,3 +806,192 @@ def test_gate_off_keeps_looking_up_fully_enriched_leads():
     assert r.contact_found is True
     assert r.contact_skipped is None
     assert ("find_contact_data", ("k1",)) in fc.calls
+
+
+# --- domain rescue (2026-11-05) ------------------------------------------------------
+# Lead 00QMz00000rhynBMAQ "Baustein GmbH" (kundenservice@baustein.com, kununu /de/):
+# name+email returned ONLY LF's Austrian "Baustein GmbH", which the sanity gate rightly
+# rejected, while LF also held the German company whose website IS baustein.com.
+# What these pin: the pass runs ONLY for country_conflict rejections, sends the email
+# domain as `url` and never `country_code`, accepts only when LF's website is that
+# domain, and a rescued company still faces the retrieve + sanity gate.
+
+from leadauto.leadfeeder.enrich import (MATCH_PASS_DOMAIN, build_rescue_payload,
+                                        rescue_accepts)
+
+
+def _rescue_settings(on: bool):
+    import copy
+    raw = copy.deepcopy(SETTINGS.raw)
+    raw["leadfeeder"]["match_domain_rescue"] = on
+    return Settings(raw=raw, leadfeeder_api_key=None, sf_auth_url=None)
+
+
+def _baustein(email="kundenservice@baustein.com"):
+    return _extracted(company="Baustein GmbH", contact_name=None, contact_email=email,
+                      region="Germany", cc="DE")
+
+
+def _conflict_client():
+    """Primary match = the Austrian namesake (rejected AT != DE); rescue table empty."""
+    fc = FakeClient()
+    fc.match_by_name = {"Baustein GmbH": {"company_id": "at1", "match_score": 0.89,
+                                          "matched_name": "Baustein GmbH",
+                                          "matched_url": "https://www.baustein-gmbh.at/"}}
+    fc.company_attrs = {"at1": {"url": "https://www.baustein-gmbh.at/",
+                                "address": {"country": "Austria"}}}
+    return fc
+
+
+def test_rescue_payload_is_name_plus_email_domain_and_nothing_else():
+    e = _baustein()
+    rp = build_rescue_payload(e, {"company_name": "Baustein GmbH",
+                                  "email": "kundenservice@baustein.com",
+                                  "alt_names": ["Baustein"]})
+    assert rp == {"company_name": "Baustein GmbH", "url": "baustein.com",
+                  "alt_names": ["Baustein"]}
+    assert "email" not in rp and "country_code" not in rp and "country" not in rp
+
+
+def test_rescue_payload_refuses_freemail_and_no_payload():
+    assert build_rescue_payload(_baustein("someone@gmail.com"),
+                                {"company_name": "Baustein GmbH"}) is None
+    assert build_rescue_payload(_baustein(), None) is None
+    assert build_rescue_payload(_extracted(contact_email=None, lead_email=None,
+                                           contact_name=None),
+                                {"company_name": "Acme GmbH"}) is None
+
+
+def test_rescue_accepts_only_when_lf_website_is_the_lead_domain():
+    assert rescue_accepts({"company_id": "de1", "matched_url": "https://www.baustein.com"},
+                          "baustein.com") is True
+    assert rescue_accepts({"company_id": "de1", "matched_url": "https://shop.baustein.com/x"},
+                          "baustein.com") is True       # subdomain-tolerant
+    assert rescue_accepts({"company_id": "x", "matched_url": "https://baustein-gmbh.de/"},
+                          "baustein.com") is False
+    assert rescue_accepts({"company_id": "x"}, "baustein.com") is False   # no website: closed
+    assert rescue_accepts(None, "baustein.com") is False
+
+
+def test_domain_rescue_recovers_the_right_namesake():
+    fc = _conflict_client()
+    fc.rescue_by_url = {"baustein.com": {"company_id": "de1", "match_score": 0.88,
+                                         "matched_name": "Baustein GmbH",
+                                         "name_agreement": 100,
+                                         "agreed_via": "company_name",
+                                         "matched_url": "https://www.baustein.com"}}
+    fc.company_attrs["de1"] = {"url": "https://www.baustein.com",
+                               "address": {"country": "Germany", "city": "Berlin"}}
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(True))
+    assert r.matched is True
+    assert r.lf_company_id == "de1"
+    assert r.match_pass == MATCH_PASS_DOMAIN
+    assert r.lf_rejected is None
+    assert r.lf_rescue == "recovered"
+    assert r.company["City"] == "Berlin"
+    # the rescue asked ONCE, at the primary width, with url and WITHOUT country_code
+    rescue_calls = [c for c in fc.calls if c[0] == "match_companies"]
+    assert len(rescue_calls) == 2 and fc.match_widths == [3, 3]
+    assert rescue_calls[1] == ("match_companies", (("Baustein GmbH", None, None, None),))
+    # two retrieves: the rejected primary company, then the rescued one
+    assert [c for c in fc.calls if c[0] == "retrieve"] == [("retrieve", ("at1",)),
+                                                             ("retrieve", ("de1",))]
+
+
+def test_domain_rescue_refuses_a_candidate_whose_website_is_not_the_domain():
+    fc = _conflict_client()
+    fc.rescue_by_url = {"baustein.com": {"company_id": "de2", "match_score": 0.9,
+                                         "matched_name": "BauStein GmbH",
+                                         "matched_url": "https://baustein-gmbh.de/"}}
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rejected == "country_conflict:AT!=DE"      # the original reason stands
+    assert r.lf_rescue == "url_mismatch:baustein-gmbh.de"
+    assert r.match_pass == "primary"
+    assert ("retrieve", ("de2",)) not in fc.calls          # no credit on a refused one
+
+
+def test_domain_rescue_no_match_keeps_the_rejection():
+    fc = _conflict_client()
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rejected == "country_conflict:AT!=DE"
+    assert r.lf_rescue == "no_match"
+
+
+def test_domain_rescue_skips_freemail_leads_without_asking():
+    fc = _conflict_client()
+    [r] = enrich_leads(fc, [_baustein("nancy@gmx.de")], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rescue == "no_corporate_domain"
+    assert fc.match_widths == [3]                           # no second match call
+
+
+def test_domain_rescue_never_touches_an_acronym_rejection():
+    fc = FakeClient()
+    fc.match_by_name = {"SNG": {"company_id": "c1", "match_score": 0.9, "matched_name": "Sng"}}
+    fc.company_attrs = {"c1": {"url": "https://elsewhere.ch", "address": {"country": "CH"}}}
+    fc.rescue_by_url = {"sng.ch": {"company_id": "c2", "matched_name": "SNG AG",
+                                   "matched_url": "https://sng.ch"}}
+    [r] = enrich_leads(fc, [_sng()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rejected == "acronym_uncorroborated"
+    assert r.lf_rescue is None
+    assert fc.match_widths == [3]
+
+
+def test_a_rescued_company_still_faces_the_sanity_gate():
+    # A .com domain registered abroad: the website agrees, the retrieved country does
+    # not — rejected again, never trusted on the domain alone.
+    fc = _conflict_client()
+    fc.rescue_by_url = {"baustein.com": {"company_id": "ch1", "match_score": 0.88,
+                                         "matched_name": "Baustein GmbH",
+                                         "matched_url": "https://www.baustein.com"}}
+    fc.company_attrs["ch1"] = {"url": "https://www.baustein.com",
+                               "address": {"country": "Switzerland"}}
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.company == {}
+    assert r.lf_rejected == "country_conflict:CH!=DE"
+    assert r.lf_rescue == "rejected_again:country_conflict:CH!=DE"
+    assert r.match_pass == MATCH_PASS_DOMAIN           # evidence of which pass proposed it
+    assert not any(c[0] == "search" for c in fc.calls)  # no contact credit
+
+
+def test_domain_rescue_disabled_by_config():
+    fc = _conflict_client()
+    fc.rescue_by_url = {"baustein.com": {"company_id": "de1", "matched_name": "Baustein GmbH",
+                                         "matched_url": "https://www.baustein.com"}}
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(False))
+    assert r.matched is False
+    assert r.lf_rescue is None
+    assert fc.match_widths == [3]
+
+
+def test_domain_rescue_is_on_in_the_shipped_config():
+    assert SETTINGS.lf_match_domain_rescue is True
+
+
+def test_domain_rescue_is_off_when_the_key_is_absent():
+    import copy
+    raw = copy.deepcopy(SETTINGS.raw)
+    raw["leadfeeder"].pop("match_domain_rescue", None)
+    assert Settings(raw=raw, leadfeeder_api_key=None,
+                    sf_auth_url=None).lf_match_domain_rescue is False
+
+
+def test_domain_rescue_refuses_a_foreign_hit_before_paying_for_it():
+    # Backtest 2026-11-05: 7 of 22 domain hits sat in another country per the match
+    # summary (a .com registered abroad, a subsidiary on the group domain). The sanity
+    # gate would reject them after the retrieve, so they are refused BEFORE it.
+    fc = _conflict_client()
+    fc.rescue_by_url = {"baustein.com": {"company_id": "ch1", "match_score": 0.88,
+                                         "matched_name": "Baustein GmbH",
+                                         "matched_url": "https://www.baustein.com",
+                                         "matched_country_code": "CH"}}
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rejected == "country_conflict:AT!=DE"
+    assert r.lf_rescue == "foreign:CH!=DE"
+    assert r.match_pass == "primary"
+    assert ("retrieve", ("ch1",)) not in fc.calls          # no credit spent

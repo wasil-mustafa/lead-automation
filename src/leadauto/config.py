@@ -104,6 +104,13 @@ class Settings:
         return int(self.raw["leadfeeder"].get("match_wide_results", 0))
 
     @property
+    def lf_match_domain_rescue(self) -> bool:
+        """Re-ask LF with the lead's corporate email domain as `url` for a primary match
+        the sanity gate rejected as `country_conflict` (leadfeeder/enrich.py,
+        `build_rescue_payload`). An ABSENT key means off, like every other opt-in pass."""
+        return bool(self.raw["leadfeeder"].get("match_domain_rescue", False))
+
+    @property
     def live_allow_wide_match(self) -> bool:
         """False (default) keeps second-chance matches OUT of the live scope: they are
         predicted, written to the QA artifact and shadow-scored, but never written back

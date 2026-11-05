@@ -401,6 +401,17 @@ class LeadfeederClient:
                 best = {"company_id": m["id"], "match_score": score,
                         "matched_name": summary.get("name", ""), "name_agreement": agree,
                         "agreed_via": via}
+                # The summary carries the company's website and address since at least
+                # 2026-11-05 (it did not when the sanity gate was written, 2026-07-09).
+                # Carried ONLY when present so a summary without them is unchanged:
+                # the domain-rescue pass in `enrich` corroborates on `matched_url`
+                # BEFORE spending the retrieve credit.
+                url = summary.get("url")
+                if url:
+                    best["matched_url"] = url
+                cc = (summary.get("address") or {}).get("country_code")
+                if cc:
+                    best["matched_country_code"] = cc
         return best
 
     def match_companies(self, payloads: list[dict],
