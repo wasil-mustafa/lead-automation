@@ -158,6 +158,36 @@ def wide_match_backtest(
                f"| credits={res['credits']} | xlsx={res.get('xlsx')}")
 
 
+@app.command("domain-rescue-backtest")
+def domain_rescue_backtest(
+    kununu_feed: bool = typer.Option(True, "--kununu-feed/--no-kununu-feed",
+                                     help="Disable the feed: payloads then carry NO alt_names "
+                                          "and no feed country, so the result is not "
+                                          "comparable to production."),
+    xlsx: Path = typer.Option(REPO_ROOT / "domain_rescue_backtest.xlsx", "--xlsx",
+                              help="Report output path."),
+    predictions: Optional[Path] = typer.Option(
+        None, "--predictions",
+        help="predictions.jsonl to replay (default: the committed state/ file). Useful "
+             "when the local checkout lags origin."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),
+) -> None:
+    """Replay the sanity-gate-rejected leads through the domain rescue. Read-only, 0 credits."""
+    from .domain_rescue_backtest import run_backtest as run_rescue_backtest
+
+    log = get_logger("cli.domain_rescue_backtest")
+    settings = Settings.load(config)
+    if not settings.leadfeeder_api_key:
+        log.error("LEADFEEDER_API_KEY is required for this backtest.")
+        raise typer.Exit(code=2)
+    sf = _build_sf_client(settings, log)
+    lf = _build_lf_client(settings, log)
+    res = run_rescue_backtest(sf, lf, settings, xlsx_path=xlsx, predictions_path=predictions,
+                              use_kununu_feed=kununu_feed, logger=log)
+    typer.echo(f"Domain-rescue backtest done: counts={res['counts']} tally={res['tally']} "
+               f"| credits={res['credits']} | xlsx={res.get('xlsx')}")
+
+
 @app.command("shadow-compare")
 def shadow_compare(
     config: Optional[Path] = typer.Option(None, "--config", help="Alternate config.yaml."),

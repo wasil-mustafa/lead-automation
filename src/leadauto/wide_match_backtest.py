@@ -71,6 +71,11 @@ class WideCase:
     predicted_at: str
     rule: str
     payload: dict = field(default_factory=dict)
+    # The ExtractedLead behind the payload and the feed's country for it: the
+    # domain-rescue backtest (2026-11-05) judges the country conflict exactly as the
+    # sanity gate does (`enrich.lead_country`), so it needs both.
+    extracted: object = None
+    feed_country_code: str | None = None
 
 
 def select_cases(predictions, rules=REPLAYABLE_RULES) -> list:
@@ -150,13 +155,15 @@ def build_cases(sf_client, settings, predictions, *, profiles=None,
 
     cases: list[WideCase] = []
     for pr in pending:
-        payload, _info = build_match_payload(extracted_by_lead[pr.lead_id], profiles)
+        e = extracted_by_lead[pr.lead_id]
+        payload, info = build_match_payload(e, profiles)
         if payload is None:
             counts["dropped_no_company_name"] = counts.get("dropped_no_company_name", 0) + 1
             continue
         cases.append(WideCase(lead_id=pr.lead_id, task_id=pr.task_id,
                               predicted_at=str(pr.predicted_at), rule=pr.rule,
-                              payload=payload))
+                              payload=payload, extracted=e,
+                              feed_country_code=info.country_code if info else None))
     counts["replayed"] = len(cases)
     log.info("Wide-match backtest: replaying %d of %d replayable lead(s) (%s)",
              len(cases), len(selected),

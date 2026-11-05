@@ -643,3 +643,26 @@ def test_write_workbook_carries_conversion_rows(tmp_path):
                           conversion=_conversion_rows()[:1])
     ws = load_workbook(path)["Conversion"]
     assert [r[0] for r in _rows(ws)] == ["00Q000000000001"]
+
+
+def test_admitted_domain_rescue_is_flagged_with_its_own_pass_name():
+    # A domain-rescued match (2026-11-05) rides the same allow_wide_match switch as the
+    # wide pass but must be distinguishable on the sheet: yes_domain_match, and its
+    # lf_rescue outcome is a column of its own.
+    rescued = _result("00Q1", decision="create_new")
+    rescued.enriched.match_pass = "domain"
+    rescued.enriched.lf_rescue = "recovered"
+    wb = build_workbook([rescued], [], meta={},
+                        settings=_settings(decisions=["create_new"],
+                                           max_kununu_score=None, allow_wide_match=True))
+    idx = {h: i for i, h in enumerate(_headers(wb["Review"]))}
+    row = _rows(wb["Review"])[0]
+    assert row[idx["live_scope"]] == "yes_domain_match"
+    assert row[idx["lf_rescue"]] == "recovered"
+    held = _result("00Q2", decision="create_new")
+    held.enriched.match_pass = "domain"
+    wb = build_workbook([held], [], meta={},
+                        settings=_settings(decisions=["create_new"], max_kununu_score=None,
+                                           allow_wide_match=False))
+    idx = {h: i for i, h in enumerate(_headers(wb["Review"]))}
+    assert _rows(wb["Review"])[0][idx["live_scope"]] == "match_pass_domain"

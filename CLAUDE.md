@@ -45,6 +45,10 @@ $env:PYTHONPATH = "src"; python -m leadauto shadow-compare
 # Backtest skipped (contact-reparented) tasks; LF needs Actions (key only in GH Secrets):
 #   gh workflow run backtest-skipped.yml   — locally only the no-credit plumbing check works:
 $env:PYTHONPATH = "src"; python -m leadauto backtest-skipped --no-leadfeeder
+# Replay the sanity-gate-rejected leads through the domain rescue (free match calls,
+# 0 credits; LEADFEEDER_API_KEY from kununu.env via Import-Env). --predictions <file>
+# when the local checkout lags origin (git show origin/master:state/predictions.jsonl).
+$env:PYTHONPATH = "src"; python -m leadauto domain-rescue-backtest --xlsx <scratch>.xlsx
 
 # Read-only org inspection (alias `headless`); aggregates need --json, NOT csv
 sf data query --query "SELECT ... FROM Lead WHERE ..." --target-org headless --result-format json
@@ -454,6 +458,21 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   `Contact Presence Check`, `url` moved 8 and lost 4, `vat_id` 5/2, `city+postal` 4/4: LF
   reads an extra identifier as a request for a more specific (emptier) legal entity.
   `MATCH_RESULTS_PRIMARY = 3` is a named constant for that reason.
+- **Domain rescue (2026-11-05, `enrich.build_rescue_payload`, config
+  `leadfeeder.match_domain_rescue: true`):** a primary match the sanity gate rejected as
+  `country_conflict` is re-asked ONCE with the lead's corporate email domain as `url`
+  (no `email`, no `country_code`), and the candidate counts only when `_best_match`'s
+  name gate passes AND LF's own website for it is that domain; a summary country that
+  still conflicts is refused BEFORE the retrieve. Cause: lead 00QMz00000rhynBMAQ
+  "Baustein GmbH" (kundenservice@baustein.com, /de/) — name+email returned ONLY the
+  Austrian namesake, while LF held the German company whose website IS baustein.com.
+  **Backtest the same day: 15 of 41 still-conflicting leads recovered, 0 credits**
+  (`python -m leadauto domain-rescue-backtest`, `2026-11-05-domain-rescue-match.md`).
+  Rescued matches carry `match_pass = "domain"`, follow `allow_wide_match` and show as
+  `yes_domain_match` / `match_pass_domain` on the QA sheet; `lf_rescue` is a Review
+  column. Freemail leads and acronym rejections are never rescued; the primary pass is
+  untouched. The match summary now carries `url` + `address.country_code`
+  (`matched_url` / `matched_country_code` in `_best_match`, only when present).
 - **Contact-search cascade returns only NAME-VERIFIED hits (fixed 2026-08-10).** All four
   attempts of `client.search_contact` now filter candidates through one predicate
   (`_all_parts_ok`: every part of the searched name must appear in LF's `full_name`, hyphen

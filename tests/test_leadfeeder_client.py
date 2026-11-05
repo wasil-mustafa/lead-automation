@@ -839,3 +839,24 @@ def test_find_contact_data_empty_input_no_calls():
     client = _client({})
     assert client.find_contact_data([]) is False
     assert client.session.calls == []
+
+
+# --- match summary website / country (domain rescue, 2026-11-05) -------------------
+
+def test_best_match_carries_website_and_country_only_when_the_summary_has_them():
+    def handler(params, body):
+        return {"data": [[
+            {"id": "c1", "attributes": {"match_score": 0.89},
+             "relationships": {"company_summary": {"attributes": {
+                 "name": "Baustein GmbH", "url": "https://www.baustein-gmbh.at/",
+                 "address": {"city": "Engerwitzdorf", "country_code": "AT"}}}}},
+        ], [
+            {"id": "c2", "attributes": {"match_score": 0.9},
+             "relationships": {"company_summary": {"attributes": {"name": "Acme GmbH"}}}},
+        ]]}
+    client = _client({("POST", "/companies/match"): handler})
+    with_summary, bare = client.match_companies([{"company_name": "Baustein GmbH"},
+                                                 {"company_name": "Acme GmbH"}])
+    assert with_summary["matched_url"] == "https://www.baustein-gmbh.at/"
+    assert with_summary["matched_country_code"] == "AT"
+    assert "matched_url" not in bare and "matched_country_code" not in bare

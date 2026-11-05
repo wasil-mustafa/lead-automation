@@ -33,6 +33,15 @@ leadfeeder:
   # to 20 to re-enable — the code and `wide-match-backtest` stay, the mechanism is real in
   # Contact Presence Check's data, it just does not bite on this population.
   match_wide_results: 0
+  # Domain rescue (2026-11-05): a primary match the post-retrieve sanity gate rejected as
+  # `country_conflict` is re-asked ONCE with the lead's corporate email domain as `url`
+  # (no email, no country_code), and the candidate counts only when LF's own website for
+  # it is that domain. Found on lead 00QMz00000rhynBMAQ "Baustein GmbH": name+email
+  # returned only the Austrian namesake while LF held the German company whose website
+  # IS the lead's domain. 17 leads since 2026-10-19 (50 all-time) lost a match this way.
+  # Rescued matches carry match_pass "domain" and follow pipeline.live_scope
+  # .allow_wide_match. Freemail leads are never rescued. See leadfeeder/enrich.py.
+  match_domain_rescue: true
   # Run the contact cascade (search, 1-credit retrieve, find-contact-data) ONLY for
   # leads whose Lead record still lacks an email or a phone — the fields it feeds
   # (both fill-only-blank in writeback.py). false = look up every matched lead, which

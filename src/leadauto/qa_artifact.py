@@ -22,6 +22,7 @@ from .campaigns import BUCKETS, campaign_bucket
 from .convert.preflight import check_lead
 from .models import CONTACT_SKIP_NOT_NEEDED
 from .live_scope import (campaign_gate_reason, is_wide_match, live_scope_reason,
+                         match_pass_flag,
                          writeback_reason)
 from .textnorm import country_iso2, normalize_city, normalize_postal
 from .match import RULE_DECISIONS
@@ -32,7 +33,7 @@ REVIEW_COLUMNS = [
     "company", "kununu_url", "kununu_profile_uuid", "region", "kununu_score",
     "contact_name", "contact_email",
     "lf_matched", "lf_matched_name", "lf_match_score", "lf_name_agreement", "lf_agreed_via",
-    "lf_match_pass", "lf_rejected",
+    "lf_match_pass", "lf_rejected", "lf_rescue",
     "lf_city", "lf_employees", "lf_industry", "predicted_industry", "lf_website", "lf_company_id",
     "lf_contact_email",
     "match_rule", "match_evidence",
@@ -176,13 +177,14 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
     con = result.contact
     # live_scope: "yes" when the row would be processed live, else the exclusion
     # reason (see live_scope.py). Blank when no settings were passed (legacy callers).
-    # A second-chance ("wide") match admitted by `allow_wide_match` is flagged
-    # `yes_wide_match`, so a reviewer can tell the weaker claim from a primary one.
+    # A non-primary match admitted by `allow_wide_match` is flagged with its pass —
+    # `yes_wide_match` (second chance) / `yes_domain_match` (domain rescue) — so a
+    # reviewer can tell it from a primary one.
     # live_writeback is the same verdict for the narrower-or-equal write-back gate:
     # "yes" with live_scope "decision_link" = enriched live, converted by a human.
     live = live_wb = ""
     if settings is not None:
-        yes = "yes_wide_match" if is_wide_match(result) else "yes"
+        yes = match_pass_flag(result, "yes") if is_wide_match(result) else "yes"
         live_wb = writeback_reason(result, settings) or yes
     # lf_campaign: the LeadFeeder-outcome campaign a live run tags this lead with
     # (campaigns.py), judged as if the write-back succeeded. Blank when the lead is not
@@ -208,6 +210,7 @@ def _review_row(result, settings=None, payload: dict | None = None) -> dict:
         "lf_agreed_via": enr.agreed_via,
         "lf_match_pass": enr.match_pass,
         "lf_rejected": enr.lf_rejected,
+        "lf_rescue": enr.lf_rescue,
         "lf_city": company.get("City"), "lf_employees": company.get("Employee_Count"),
         "lf_industry": company.get("Industry"), "predicted_industry": payload.get("Industry"),
         "lf_website": company.get("Website"),
