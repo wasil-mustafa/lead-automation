@@ -473,6 +473,18 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   column. Freemail leads and acronym rejections are never rescued; the primary pass is
   untouched. The match summary now carries `url` + `address.country_code`
   (`matched_url` / `matched_country_code` in `_best_match`, only when present).
+  **Widened 2026-11-06 to leads with NO candidate** (lead 00QMz00000rhwTdMAI
+  "PAU-Söhne Gesellschaft mit beschränkter Haftung": name+email returned nothing,
+  name+url the right company): the same pass, same two-axis acceptance, re-asks every
+  lead the primary (and wide) pass matched nothing for; a hit is `lf_rescue =
+  recovered_unmatched` so the arms score apart. Backtest the same day over all 201
+  historical `no_lf_match` leads: **16 of 126 still-unmatched corporate-domain leads
+  recovered, 0 credits** (`domain_rescue_backtest_2026-11-06.xlsx`, `arm` column;
+  same doc). The same miss also added **`textnorm.abbreviate_legal_form`**: LF's name
+  search returns zero candidates for a spelled-out German legal form, so the name sent
+  to LF and `normalize_name` both collapse "Gesellschaft mit beschränkter Haftung" →
+  GmbH (plus AG/KG/KGaA/OHG/UG/eG/e.V./e.K.). Only 1 of 201 unmatched leads carried
+  one — the rescue widening is the recall win, the abbreviation is the root-cause fix.
 - **Contact-search cascade returns only NAME-VERIFIED hits (fixed 2026-08-10).** All four
   attempts of `client.search_contact` now filter candidates through one predicate
   (`_all_parts_ok`: every part of the searched name must appear in LF's `full_name`, hyphen

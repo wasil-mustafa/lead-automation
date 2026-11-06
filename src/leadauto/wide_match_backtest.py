@@ -76,6 +76,9 @@ class WideCase:
     # sanity gate does (`enrich.lead_country`), so it needs both.
     extracted: object = None
     feed_country_code: str | None = None
+    # The prediction's LF company (set = LF matched and the sanity gate rejected; None =
+    # LF returned no candidate). The domain-rescue backtest scores the two arms apart.
+    lf_company_id: str | None = None
 
 
 def select_cases(predictions, rules=REPLAYABLE_RULES) -> list:
@@ -163,7 +166,8 @@ def build_cases(sf_client, settings, predictions, *, profiles=None,
         cases.append(WideCase(lead_id=pr.lead_id, task_id=pr.task_id,
                               predicted_at=str(pr.predicted_at), rule=pr.rule,
                               payload=payload, extracted=e,
-                              feed_country_code=info.country_code if info else None))
+                              feed_country_code=info.country_code if info else None,
+                              lf_company_id=pr.lf_company_id or None))
     counts["replayed"] = len(cases)
     log.info("Wide-match backtest: replaying %d of %d replayable lead(s) (%s)",
              len(cases), len(selected),

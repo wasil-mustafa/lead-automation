@@ -16,8 +16,8 @@ from ..models import (CONTACT_SKIP_NO_NAME, CONTACT_SKIP_NOT_NEEDED,
                       CONTACT_SKIP_SEARCH_FAILED, EnrichedLead, ExtractedLead)
 from ..kununu_feed import base_slug, load_profiles_for_leads
 from ..logging import get_logger
-from ..textnorm import (FREEMAIL_DOMAINS, country_iso2, email_domain, is_blank,
-                        normalize_host, normalize_name)
+from ..textnorm import (FREEMAIL_DOMAINS, abbreviate_legal_form, country_iso2,
+                        email_domain, is_blank, normalize_host, normalize_name)
 from .client import (MATCH_RESULTS_PRIMARY, flatten_company, flatten_contact_details,
                      match_email)
 
@@ -112,8 +112,14 @@ def build_match_payload(e: ExtractedLead, profiles: dict) -> tuple[dict | None, 
         400 fails the WHOLE chunk (`client.match_api_payload` enforces this at the
         transport boundary too — this keeps the payload honest at source).
     `alt_names` is a LOCAL gate input; `match_api_payload` strips it before the call.
+
+    The name goes out with its legal form ABBREVIATED (`textnorm.abbreviate_legal_form`,
+    2026-11-06): LF returns zero candidates for "PAU-Söhne Gesellschaft mit beschränkter
+    Haftung" and the right company for "PAU-Söhne GmbH". The local name gate normalizes
+    both spellings to the same tokens, so this changes what LF is asked, not what the
+    gate accepts.
     """
-    company_name = e.best_company
+    company_name = abbreviate_legal_form(e.best_company)
     info = (profiles.get(e.kununu_profile_uuid or "")
             or profiles.get(base_slug(e.kununu_url) or ""))
     if not company_name:
@@ -334,24 +340,40 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
     # `match_batch` candidates, 1 credit per rescued company at the retrieve.
     # `leadfeeder.match_domain_rescue` turns it on; the acronym rejection is never
     # rescued (its corroboration already failed on this very domain).
+    #
+    # Since 2026-11-06 the SAME pass also re-asks a lead whose primary (and wide) match
+    # returned NO candidate at all — `no_lf_match`, the pipeline's largest terminal
+    # loss (201 of 883 latest predictions). Found on 00QMz00000rhwTdMAI "PAU-Söhne
+    # Gesellschaft mit beschränkter Haftung": name+email returned nothing, name+url
+    # returned the company whose website IS pau-maschinenbau.de. Replayed over all 201
+    # the same day: 13 of 117 still-unmatched corporate-domain leads recovered, 4 URL
+    # mismatches and 1 foreign hit refused, 0 credits (`domain-rescue-backtest`, arm
+    # `unmatched`). Such a recovery is `lf_rescue = recovered_unmatched` so the two
+    # populations can be scored apart. A lead whose primary CHUNK failed was never
+    # judged and is not re-asked (same rule as the wide pass).
     if settings.lf_match_domain_rescue:
         payload_of = {match_index[i]: p for i, p in enumerate(match_payloads)}
-        rescue: list[tuple[EnrichedLead, dict, str]] = []
+        unmatched_idx = {match_index[i] for i, m in enumerate(matches) if m is None}
+        rescue: list[tuple[EnrichedLead, dict, str, bool]] = []
         for idx, r in enumerate(results):
-            if not (r.lf_rejected or "").startswith(COUNTRY_CONFLICT):
+            conflict = (r.lf_rejected or "").startswith(COUNTRY_CONFLICT)
+            no_candidate = idx in unmatched_idx and not r.matched and not r.lf_rejected
+            if not (conflict or no_candidate):
                 continue
             rp = build_rescue_payload(r.extracted, payload_of.get(idx))
             if rp is None:
                 r.lf_rescue = "no_corporate_domain"
                 continue
-            rescue.append((r, rp, rp["url"]))
+            rescue.append((r, rp, rp["url"], no_candidate))
         if rescue:
-            log.info("Domain rescue: re-asking %d country-conflict lead(s) with their "
-                     "email domain as url", len(rescue))
-            rescue_matches = client.match_companies([rp for _, rp, _ in rescue],
+            log.info("Domain rescue: re-asking %d lead(s) with their email domain as url "
+                     "(%d country-conflict, %d without any candidate)", len(rescue),
+                     sum(1 for *_, nc in rescue if not nc),
+                     sum(1 for *_, nc in rescue if nc))
+            rescue_matches = client.match_companies([rp for _, rp, _, _ in rescue],
                                                     max_results=MATCH_RESULTS_PRIMARY)
             rescued: list[EnrichedLead] = []
-            for (r, rp, dom), match in zip(rescue, rescue_matches):
+            for (r, rp, dom, no_candidate), match in zip(rescue, rescue_matches):
                 # Website agrees but the summary already says the company sits in
                 # another country (a .com registered abroad, a foreign subsidiary on
                 # the group domain): the sanity gate would reject it after the
@@ -363,11 +385,11 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
                     r.lf_rescue = f"foreign:{foreign}!={lead_cc}"
                 elif rescue_accepts(match, dom):
                     log.info("Domain rescue recovered %r: %s -> %r (lf %s, %s, score %s)",
-                             rp["company_name"], r.lf_rejected, match.get("matched_name"),
-                             match.get("company_id"), match.get("matched_url"),
-                             match.get("match_score"))
+                             rp["company_name"], r.lf_rejected or "no candidate",
+                             match.get("matched_name"), match.get("company_id"),
+                             match.get("matched_url"), match.get("match_score"))
                     r.lf_rejected = None
-                    r.lf_rescue = "recovered"
+                    r.lf_rescue = "recovered_unmatched" if no_candidate else "recovered"
                     _accept_result(r, match, MATCH_PASS_DOMAIN)
                     rescued.append(r)
                 elif match:

@@ -41,6 +41,10 @@ leadfeeder:
   # IS the lead's domain. 17 leads since 2026-10-19 (50 all-time) lost a match this way.
   # Rescued matches carry match_pass "domain" and follow pipeline.live_scope
   # .allow_wide_match. Freemail leads are never rescued. See leadfeeder/enrich.py.
+  # Since 2026-11-06 the same pass also re-asks a lead LF returned NO candidate for
+  # (lead 00QMz00000rhwTdMAI "PAU-Söhne ..."; backtest: 16 of 126 still-unmatched
+  # corporate-domain leads recovered, 0 credits). Such a hit is lf_rescue
+  # "recovered_unmatched" so the two arms score apart. One flag covers both arms.
   match_domain_rescue: true
   # Run the contact cascade (search, 1-credit retrieve, find-contact-data) ONLY for
   # leads whose Lead record still lacks an email or a phone — the fields it feeds

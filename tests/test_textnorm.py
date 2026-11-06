@@ -15,6 +15,28 @@ def test_normalize_name_strips_legal_suffixes_and_punctuation():
     assert normalize_name("") is None
 
 
+def test_abbreviate_legal_form_collapses_the_spelled_out_german_forms():
+    # 2026-11-06: LF returned nothing for the long form of lead 00QMz00000rhwTdMAI.
+    from leadauto.textnorm import abbreviate_legal_form as abbr
+    assert abbr("PAU-Söhne Gesellschaft mit beschränkter Haftung") == "PAU-Söhne GmbH"
+    assert abbr("Foo Gesellschaft mit beschraenkter Haftung & Co. KG") == "Foo GmbH & Co. KG"
+    assert abbr("Bar Aktiengesellschaft") == "Bar AG"
+    assert abbr("Baz Kommanditgesellschaft auf Aktien") == "Baz KGaA"
+    assert abbr("Qux Eingetragene Genossenschaft") == "Qux eG"
+    assert abbr("Verein Eingetragener Verein") == "Verein e.V."
+    assert abbr("Acme GmbH") == "Acme GmbH"                  # byte-equal when nothing applies
+    assert abbr("Haftungsgesellschaft") == "Haftungsgesellschaft"   # no partial-word hit
+    assert abbr(None) is None and abbr("") == ""
+
+
+def test_normalize_name_sees_the_long_and_short_legal_form_as_one_name():
+    # The dedupe rules compare normalized names for EQUALITY: an Account "PAU-Söhne
+    # GmbH" must be the same company as the profile's long-form name.
+    assert normalize_name("PAU-Söhne Gesellschaft mit beschränkter Haftung") == "pau söhne"
+    assert normalize_name("PAU-Söhne GmbH") == "pau söhne"
+    assert normalize_name("Muster Aktiengesellschaft") == normalize_name("Muster AG")
+
+
 def test_alnum_squashes_to_lowercase_alphanumerics():
     assert alnum("Web.de GmbH & Co!") == "webdegmbhco"
     assert alnum(None) == ""

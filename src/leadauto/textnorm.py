@@ -21,6 +21,43 @@ LEGAL_SUFFIXES = {
     "haftungsbeschraenkt", "haftungsbeschränkt",
 }
 
+# Spelled-out German legal forms -> the abbreviation everyone else uses. kununu profile
+# names (and so our Task "Profile-Name") carry the register's long form for some
+# companies; LeadFeeder's name search returns NOTHING for it. Measured 2026-11-06 on
+# lead 00QMz00000rhwTdMAI: "PAU-Söhne Gesellschaft mit beschränkter Haftung" -> 0
+# candidates, "PAU-Söhne GmbH" -> the right company at 0.8 / agreement 100. Applied
+# BEFORE tokenizing in `normalize_name` (so the dedupe rules see the same name an
+# Account carries) and to the name sent to LF (`enrich.build_match_payload`).
+# Order matters: the "& Co." compound forms before their bare parents.
+_LEGAL_FORM_LONG = [
+    (r"gesellschaft\s+mit\s+beschr(?:ä|ae|a)nkter\s+haftung\s*&\s*co\.?\s*kg", "GmbH & Co. KG"),
+    (r"gesellschaft\s+mit\s+beschr(?:ä|ae|a)nkter\s+haftung", "GmbH"),
+    (r"aktiengesellschaft\s*&\s*co\.?\s*kg", "AG & Co. KG"),
+    (r"aktiengesellschaft", "AG"),
+    (r"kommanditgesellschaft\s+auf\s+aktien", "KGaA"),
+    (r"kommanditgesellschaft", "KG"),
+    (r"offene\s+handelsgesellschaft", "OHG"),
+    (r"unternehmergesellschaft", "UG"),
+    (r"eingetragene\s+genossenschaft", "eG"),
+    (r"eingetragener\s+verein", "e.V."),
+    (r"eingetragener\s+kaufmann", "e.K."),
+    (r"eingetragene\s+kauffrau", "e.K."),
+]
+_LEGAL_FORM_LONG_RE = [(re.compile(rf"(?<!\w){p}(?!\w)", re.IGNORECASE), a)
+                       for p, a in _LEGAL_FORM_LONG]
+
+
+def abbreviate_legal_form(value: str | None) -> str | None:
+    """`value` with every spelled-out German legal form replaced by its abbreviation
+    ("X Gesellschaft mit beschränkter Haftung" -> "X GmbH"); unchanged otherwise.
+    Whitespace is left as found, so a name without a long form is returned byte-equal."""
+    if not value:
+        return value
+    out = value
+    for rx, abbr in _LEGAL_FORM_LONG_RE:
+        out = rx.sub(abbr, out)
+    return out
+
 
 def _strip_scheme_www(value: str) -> str:
     if "://" in value:
@@ -85,7 +122,7 @@ def normalize_name(value: str | None) -> str | None:
     """Casefold a company name and drop punctuation + legal-form tokens for fuzzy compare."""
     if not value:
         return None
-    v = re.sub(r"[^\w\s&]", " ", value.lower(), flags=re.UNICODE)
+    v = re.sub(r"[^\w\s&]", " ", abbreviate_legal_form(value).lower(), flags=re.UNICODE)
     tokens = [t for t in v.split() if t and t not in LEGAL_SUFFIXES]
     return " ".join(tokens) or None
 
