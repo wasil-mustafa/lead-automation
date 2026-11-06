@@ -374,7 +374,7 @@ CONVERSION_SUMMARY_KEYS = (
     "convert_targets_run", "convert_targets_sweep", "converted",
     "convert_already_converted", "convert_failed", "convert_missing",
     "convert_preflight_skipped", "convert_left_to_human", "convert_dry_run",
-    "sweep_dbid_ticked", "convert_error",
+    "sweep_dbid_ticked", "convert_held_out", "convert_error",
 )
 
 

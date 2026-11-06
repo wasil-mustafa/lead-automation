@@ -925,3 +925,83 @@ def test_sweep_uses_the_newest_prediction_per_lead(tmp_path, monkeypatch):
                     (OLD1, {"decision": "review", "predicted_at": "2026-10-30T00:00:00Z"})])
     assert sf.convert_calls == []
     assert _conversion_rows(tmp_path)[0]["detail"] == "sweep_decision_review"
+
+
+# --- Conversion holdouts (2026-11-07): lead 00QMz00000rov6DMAQ failed SOAP with
+# DUPLICATES_DETECTED on four runs in a row and every run exited 1. A permanent failure
+# is recorded beside the watermark; the next sweep leaves the lead to a human.
+
+class DuplicateSf(FakeSfClient):
+    def convert_lead(self, conversions, *, converted_status, owner_id):
+        self.convert_calls.append(conversions)
+        return [{"leadId": c["lead_id"], "success": False,
+                 "errors": ["DUPLICATES_DETECTED: Duplicate detected!"]}
+                for c in conversions]
+
+
+def _holdouts(tmp_path):
+    p = tmp_path / "convert_holdouts.jsonl"
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()] if p.exists() else None
+
+
+def test_duplicate_rule_failure_is_recorded_as_a_holdout_and_still_fails_this_run(
+        tmp_path, monkeypatch):
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})
+    preds = tmp_path / "predictions.jsonl"
+    _write_prediction(preds, OLD1)
+    sf = DuplicateSf(tasks=[_task(who="00Q000000000001")],
+                     leads=[_lead("00Q000000000001"), _old_lead(OLD1)], members=[_member(OLD1)])
+    res = run_pipeline(sf, object(), SETTINGS, state=State(None, []),
+                       since="2026-05-01T00:00:00Z", dry_run=False,
+                       qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                       predictions_path=preds)
+    assert [c["lead_id"] for call in sf.convert_calls for c in call] == [OLD1]
+    assert res.conversion["result"]["failed"] == 1          # the CLI exits 1 on this run
+    assert res.conversion["held_out"] == [OLD1]
+    rows = _holdouts(tmp_path)
+    assert rows and rows[0]["lead_id"] == OLD1 and rows[0]["company"] == "Alt GmbH"
+    assert rows[0]["reason"] == "convert_duplicate_detected"
+    assert rows[0]["error"] == "DUPLICATES_DETECTED: Duplicate detected!"
+    conv = {r["lead_id"]: r for r in _conversion_rows(tmp_path)}
+    assert conv[OLD1]["outcome"] == "failed"
+    assert conv[OLD1]["detail"].endswith("[held out: left to a human from the next run on]")
+    assert _summary(tmp_path)["convert_held_out"] == 1
+    # still shadow evidence: a human converts it, the prediction stays pending
+    assert [q.status for q in load_predictions(preds) if q.lead_id == OLD1] == ["pending"]
+
+    # NEXT run: same member, same decision -> left to a human, no SOAP call, green
+    sf2 = DuplicateSf(tasks=[_task(who="00Q000000000001")],
+                      leads=[_lead("00Q000000000001"), _old_lead(OLD1)], members=[_member(OLD1)])
+    res2 = run_pipeline(sf2, object(), SETTINGS, state=State(None, []),
+                        since="2026-05-01T00:00:00Z", dry_run=False,
+                        qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                        predictions_path=preds)
+    assert sf2.convert_calls == []
+    assert res2.conversion["result"]["failed"] == 0 and res2.conversion["held_out"] == []
+    assert not any("KN_NoOwnDBID__c" in recs[0] and recs[0]["Id"] == OLD1
+                   for _, recs in sf2.updates if recs)
+    conv2 = {r["lead_id"]: r for r in _conversion_rows(tmp_path)}
+    assert conv2[OLD1]["outcome"] == "left_to_human"
+    assert conv2[OLD1]["detail"].startswith("sweep_held_out: convert_duplicate_detected")
+    assert _summary(tmp_path)["convert_left_to_human"] == 1
+    assert len(_holdouts(tmp_path)) == 1                      # not re-appended
+
+
+def test_transient_failure_and_dry_run_record_no_holdout(tmp_path, monkeypatch):
+    class LimitSf(FakeSfClient):
+        def convert_lead(self, conversions, *, converted_status, owner_id):
+            return [{"leadId": c["lead_id"], "success": False,
+                     "errors": ["LIMIT_EXCEEDED: Apex CPU time limit"]} for c in conversions]
+
+    _enrich_with(monkeypatch, company={"Street": "Hauptstr. 1"})
+    preds = tmp_path / "predictions.jsonl"
+    _write_prediction(preds, OLD1)
+    for cls, dry in ((LimitSf, False), (DuplicateSf, True)):
+        sf = cls(tasks=[_task(who="00Q000000000001")],
+                 leads=[_lead("00Q000000000001"), _old_lead(OLD1)], members=[_member(OLD1)])
+        res = run_pipeline(sf, object(), SETTINGS, state=State(None, []),
+                           since="2026-05-01T00:00:00Z", dry_run=dry,
+                           qa_path=tmp_path / "qa.xlsx", state_path=tmp_path / "wm.json",
+                           predictions_path=preds)
+        assert res.conversion["held_out"] == []
+        assert _holdouts(tmp_path) is None                    # the next sweep retries it

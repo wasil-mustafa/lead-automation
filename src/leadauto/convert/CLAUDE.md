@@ -32,6 +32,22 @@ run 2026-11-01 (run 41294697597: 16 swept backlog leads converted, 0 failed). Th
    through the preflight `overlay`); a rejected row ⇒ `sweep_dbid_tick_failed`, left.
    Sweep targets carry `lf_company_id` + kununu URL from the prediction but no
    `lf_contact_email` (no `KN_Email2__c` for them).
+   **Holdouts (2026-11-07, `holdouts.py`, committed `state/convert_holdouts.jsonl`):** a
+   member listed there is `sweep_held_out`, left to a human and never ticked — read
+   BEFORE the decision. The file is written by the run itself: after a live conversion,
+   every result that failed with a code in `HOLDOUT_ERROR_CODES` (`DUPLICATES_DETECTED`
+   only) is appended (`record_holdouts`; Summary `convert_held_out`, Conversion row
+   `failed … [held out …]`). That run still exits 1 — the one red run is the signal —
+   every later run is green. Cause: lead 00QMz00000rov6DMAQ (TÜV Saarland
+   Immobilienbewertung GmbH) failed SOAP with `DUPLICATES_DETECTED` on four runs in a
+   row on 2026-11-06 (four sibling "TÜV Saarland …" Accounts; conversion cannot send
+   the allow-save header), and the sweep retried it every run. A human converts a
+   held-out lead in the UI (an Alert-mode rule lets them save), which makes it
+   `IsConverted` and the row inert; delete the row to make the pipeline retry instead.
+   Other SOAP failures (governor, transient, validation) are NOT held out and retry.
+   `run_pipeline(holdouts_path=)` defaults to the file beside `state_path`, so a test
+   with `state_path` under `tmp_path` never touches the repo's file; `state_path=None`
+   disables it. `pipeline.yml` commits it with the shadow files.
 2. The link rules, applied to both sources (`targets_from_results`; the sweep never links a
    Contact):
    - Rows with `decision == "skip"` (no LeadFeeder match) are dropped even if approved — a
