@@ -239,3 +239,28 @@ def test_sweep_null_dbid_is_blank_not_missing(tmp_path):
     out = sweep_targets(sf, SETTINGS, predictions_path=_preds(
         tmp_path, (LEAD1, "create_new", "x")), dry_run=False)
     assert [t.lead_id for t in out.targets] == [LEAD1] and out.ticked == 1
+
+
+# --- holdouts (2026-11-07): a permanent SOAP failure is left to a human, never retried
+
+def test_sweep_leaves_held_out_member_to_a_human_without_ticking(tmp_path):
+    from leadauto.convert.targets import SWEEP_HELD_OUT
+    h = tmp_path / "convert_holdouts.jsonl"
+    h.write_text(json.dumps({"lead_id": LEAD1 + "AAA", "reason": "convert_duplicate_detected",
+                             "error": "DUPLICATES_DETECTED: Duplicate detected!",
+                             "company": "Alt GmbH", "recorded_at": "2026-11-07T00:00:00+00:00"})
+                 + "\n", encoding="utf-8")
+    sf = FakeSf([_member(LEAD1), _member(LEAD2)])
+    preds = _preds(tmp_path, (LEAD1, "create_new", "2026-10-30T07:53:54Z"),
+                   (LEAD2, "create_new", "2026-10-30T07:53:54Z"))
+    out = sweep_targets(sf, SETTINGS, predictions_path=preds, holdouts_path=h, dry_run=False)
+    assert [t.lead_id for t in out.targets] == [LEAD2]
+    assert [(l["lead_id"], l["reason"]) for l in out.left] == [(LEAD1, SWEEP_HELD_OUT)]
+    assert out.left[0]["error"].startswith("convert_duplicate_detected (2026-11-07")
+    assert out.left[0]["decision"] == "create_new"          # reported, not acted on
+    assert [r["Id"] for _, recs, _ in sf.updates for r in recs] == [LEAD2]   # LEAD1 never ticked
+    # no holdout file at all (None, or a path that does not exist) = nothing held out
+    for hp in (None, tmp_path / "missing.jsonl"):
+        out = sweep_targets(FakeSf([_member(LEAD1)]), SETTINGS, predictions_path=preds,
+                            holdouts_path=hp, dry_run=False)
+        assert [t.lead_id for t in out.targets] == [LEAD1]

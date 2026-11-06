@@ -185,7 +185,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          for f in state/predictions.jsonl state/shadow_results.jsonl state/shadow_state.json; do
+          for f in state/predictions.jsonl state/shadow_results.jsonl state/shadow_state.json state/convert_holdouts.jsonl; do
             [ -f "$f" ] && git add "$f"
           done
           if [ "${{ needs.gate.outputs.dry_run }}" != "true" ]; then

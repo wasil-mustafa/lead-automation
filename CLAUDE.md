@@ -77,7 +77,11 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   Then preflight → pool-link gate → SOAP (`pipeline.convert_batch_size: 3`) → `KN_Email2__c`,
   fenced: ANY exception is recorded (`conversion.error`, Summary `convert_error`), the
   workbook and watermark are still written, and the CLI exits 1 afterwards — `pipeline.yml`
-  commits state with `if: always()` for that reason. Predictions: recorded for every live
+  commits state with `if: always()` for that reason. **A SOAP failure no retry can clear
+  (`DUPLICATES_DETECTED`) is written to committed `state/convert_holdouts.jsonl`
+  (`convert/holdouts.py`, 2026-11-07) and the sweep leaves that lead to a human from the
+  next run on (`sweep_held_out`; Summary `convert_held_out`) — before that, lead
+  00QMz00000rov6DMAQ failed four runs in a row on 2026-11-06.** Predictions: recorded for every live
   lead NOT converted (failed / preflight-skipped included, so the next sweep retries them);
   every pipeline-converted lead's pending row is `excluded`
   (`predictions.exclude_predictions`, reason `pipeline_converted`) so shadow-compare never
@@ -702,16 +706,18 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
    retry.
 7. **Minor:** `sf/auth.py` writes the auth URL to a predictable temp path; `pipeline.yml`
    push lacks rebase/retry (mitigated by the concurrency group); add `caplog` assertions
-   to the LF chunk-failure tests; a swept lead that fails preflight or SOAP is re-read and
-   retried on every run (5/day) — remember failed ids in `state/` if that ever costs
-   real calls;
+   to the LF chunk-failure tests; a swept lead that fails preflight or a RETRIABLE SOAP
+   error is re-read and retried on every run (5/day) — a `DUPLICATES_DETECTED` failure
+   is held out since 2026-11-07 (`state/convert_holdouts.jsonl`); widen
+   `HOLDOUT_ERROR_CODES` if another permanent code shows up;
    `qa_artifact._convert_blockers` false-positives `postal_length` when the payload changes the
    country (it merges payload `CountryCode` over the lead's stale `Country` name — leads default
    to Germany; the real preflight reads post-write-back state and passes, proven on the go-live
    run). **Test gotcha (keep honoring it):** any `dry_run=False` `run_pipeline` test MUST
    pass `state_path=` and `predictions_path=` under `tmp_path` (or `None`) — otherwise it
    writes a fake watermark/prediction into the repo's real `state/`, which CI commits and
-   the conversion sweep reads as a decision. A `run_pipeline` test with `sf_client=None`
+   the conversion sweep reads as a decision (the holdout file follows `state_path`, so
+   the same rule covers it). A `run_pipeline` test with `sf_client=None`
    must also pass `convert=False` (the sweep queries the client, dry runs included).
 
 ## Git

@@ -27,6 +27,7 @@ from ..sf.client import SfError
 from ..textnorm import is_blank, is_true
 from ..writeback import lf_contact_email
 from .converter import ConversionTarget
+from .holdouts import load_holdouts
 
 # Ids here come straight from the org (query rows), never from a hand-edited file; the
 # converter re-guards every Id before embedding it in SOQL/SOAP (`sf.client.guard_sf_id`).
@@ -40,6 +41,7 @@ CONTACT_LINK_REASONS = {"kununu_user_uuid", "contact_email_in_account"}
 SWEEP_NO_DECISION = "sweep_no_recorded_decision"
 SWEEP_TICK_FAILED = "sweep_dbid_tick_failed"
 SWEEP_DBID_UNKNOWN = "sweep_dbid_fields_missing"   # query row carried neither DBID field
+SWEEP_HELD_OUT = "sweep_held_out"   # state/convert_holdouts.jsonl: a permanent SOAP failure
 
 
 def _short_id(sf_id) -> str:
@@ -113,7 +115,7 @@ class SweepResult:
 
 
 def sweep_targets(sf_client, settings, *, exclude_ids=(), predictions_path=None,
-                  dry_run: bool, logger=None) -> SweepResult:
+                  holdouts_path=None, dry_run: bool, logger=None) -> SweepResult:
     """Unconverted members of the auto-convert campaigns, minus this run's own leads,
     turned into targets where a recorded decision allows it. One read; one PATCH on a
     live run when any target still needs its `KN_NoOwnDBID__c` tick.
@@ -121,6 +123,11 @@ def sweep_targets(sf_client, settings, *, exclude_ids=(), predictions_path=None,
     `exclude_ids` must be EVERY lead this run extracted, not only its targets: a
     this-run `review` lead is already a member when this reads, and a stale
     `create_new` prediction from an earlier task must not convert it.
+
+    `holdouts_path` (`convert/holdouts.py`): members listed there failed SOAP for a
+    reason no retry clears (a duplicate rule) and are left to a human every run
+    instead of being re-converted — read BEFORE the decision, so a held-out lead is
+    never ticked either. None = no holdout file (tests); the file missing = none.
     """
     log = logger or get_logger("convert.sweep")
     out = SweepResult()
@@ -158,6 +165,7 @@ def sweep_targets(sf_client, settings, *, exclude_ids=(), predictions_path=None,
     if predictions_path is not None:
         preds = {_short_id(k): v for k, v in
                  latest_by_lead(load_predictions(predictions_path)).items()}
+    holdouts = load_holdouts(holdouts_path) if holdouts_path is not None else {}
     allowed = set(settings.live_decisions)
     need_tick: list[str] = []
     for key, m in members.items():
@@ -165,6 +173,12 @@ def sweep_targets(sf_client, settings, *, exclude_ids=(), predictions_path=None,
         info = {"company": m["company"], "decision": pr.decision if pr else None,
                 "predicted_at": pr.predicted_at if pr else None}
         out.info[m["lead_id"]] = info
+        held = holdouts.get(key)
+        if held is not None:
+            out.left.append({"lead_id": m["lead_id"], "reason": SWEEP_HELD_OUT,
+                             "error": f"{held.reason} ({held.recorded_at}): {held.error}",
+                             **info})
+            continue
         if pr is None:
             out.left.append({"lead_id": m["lead_id"], "reason": SWEEP_NO_DECISION, **info})
             continue

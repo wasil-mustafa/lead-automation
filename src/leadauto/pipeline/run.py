@@ -30,6 +30,7 @@ from ..campaigns import campaign_bucket, campaign_buckets, duplicate_failure_ids
 from ..convert import ConversionTarget, convert_leads, enrich_contact_email2
 from ..convert.pool_enrich import resolve_pool_links
 from ..convert.preflight import run_preflight
+from ..convert.holdouts import HOLDOUTS_FILENAME, record_holdouts
 from ..convert.targets import SweepResult, sweep_targets, targets_from_results
 from ..extract.reader import Skipped, read_extracted_leads
 from ..leadfeeder.enrich import enrich_leads
@@ -85,16 +86,23 @@ def run_pipeline(
     state_path: str | Path | None = None,
     kununu_feed: bool = True,
     predictions_path: str | Path | None = DEFAULT_PREDICTIONS_PATH,
+    holdouts_path: str | Path | None = None,
     convert: bool = True,
     batch_size: int | None = None,
     logger=None,
 ) -> PipelineResult:
     """One pipeline run. `convert=False` stops after the campaign tagging (the one-off
     event runner keeps conversion a separate, deliberate step); `batch_size` overrides
-    `pipeline.convert_batch_size`."""
+    `pipeline.convert_batch_size`. `holdouts_path` = the committed list of swept leads
+    whose conversion failed permanently (`convert/holdouts.py`); None = the file beside
+    `state_path` (`state/convert_holdouts.jsonl` in production, `tmp_path` in tests —
+    the same rule that keeps a test's watermark out of the repo), and no `state_path`
+    disables both reading and recording it."""
     log = logger or get_logger("pipeline")
     dry_run = settings.dry_run if dry_run is None else dry_run
     state = state if state is not None else load_state(state_path)
+    if holdouts_path is None and state_path is not None:
+        holdouts_path = Path(state_path).parent / HOLDOUTS_FILENAME
     if since is None:
         since = compute_since(state, settings.task_lookback_days, now)
     if not limit:
@@ -210,12 +218,28 @@ def run_pipeline(
         sweep = sweep_targets(
             sf_client, settings,
             exclude_ids=[r.enriched.extracted.lead_id for r in results],
-            predictions_path=predictions_path, dry_run=dry_run, logger=log)
+            predictions_path=predictions_path, holdouts_path=holdouts_path,
+            dry_run=dry_run, logger=log)
         targets = run_targets + sweep.targets
         conversion = _convert(sf_client, targets, settings, dry_run=dry_run,
                               batch_size=batch_size, overlay=_tick_overlay(sweep), log=log)
         conversion["targets_run"] = len(run_targets)
         conversion["targets_sweep"] = len(sweep.targets)
+        conversion["held_out"] = []
+        if not dry_run and holdouts_path is not None:
+            # A permanent SOAP failure (DUPLICATES_DETECTED) is written to the holdout
+            # file so the next sweep leaves the lead to a human instead of retrying it
+            # five times a day; THIS run still reports it `failed` (and exits 1 once).
+            companies = {r.enriched.extracted.lead_id[:15]: r.enriched.extracted.best_company
+                         for r in results}
+            companies.update({k[:15]: v.get("company") for k, v in sweep.info.items()})
+            held = record_holdouts((conversion.get("result") or {}).get("results", []),
+                                   companies, holdouts_path,
+                                   recorded_at=(now or datetime.now(timezone.utc)).isoformat())
+            conversion["held_out"] = [h.lead_id for h in held]
+            for h in held:
+                log.warning("Lead %s held out of future sweeps (%s): %s — a human converts it",
+                            h.lead_id, h.reason, h.error)
     converted = _converted_ids(conversion)
 
     # Shadow predictions: on a dry run every lead is recorded (nothing was touched);
@@ -405,6 +429,7 @@ def _conversion_rows(results, targets, sweep: SweepResult, conversion: dict,
     for r in (conversion.get("result") or {}).get("results", []):
         outcome_by_lead[str(r.get("leadId") or "")[:15]] = r
     missing = {str(i)[:15] for i in (conversion.get("result") or {}).get("missing_ids", [])}
+    held_out = {str(i)[:15] for i in conversion.get("held_out", [])}
     rows: list[dict] = []
     for t in targets:
         key = t.lead_id[:15]
@@ -433,6 +458,8 @@ def _conversion_rows(results, targets, sweep: SweepResult, conversion: dict,
                 account_id, contact_id = res.get("accountId"), res.get("contactId")
             else:
                 outcome, detail = "failed", "; ".join(res.get("errors") or [])
+                if key in held_out:
+                    detail += " [held out: left to a human from the next run on]"
         elif key in missing:
             outcome, detail = "missing", "no conversion result returned"
         else:
@@ -469,6 +496,7 @@ def _conversion_meta(conversion: dict, sweep: SweepResult, rows: list[dict]) -> 
         "convert_left_to_human": outcomes["left_to_human"],
         "convert_dry_run": outcomes["dry_run"],
         "sweep_dbid_ticked": sweep.ticked,
+        "convert_held_out": len(conversion.get("held_out", [])),
     }
     if conversion.get("error"):
         meta["convert_error"] = conversion["error"]
