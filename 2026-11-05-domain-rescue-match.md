@@ -87,3 +87,90 @@ replay would spend 7 credits on companies the gate rejects anyway.
 
 Per run: one free match call per ≤200 rescue candidates; 1 LF credit per rescued
 company at the retrieve (free again for 12 months). Zero Salesforce calls added.
+
+## Live follow-up on the 15 recovered leads (2026-11-05, Wasil: "remove the campaign and do enrichment")
+
+Checked against the org the same afternoon, before touching anything:
+
+| live state | n | leads |
+|---|---|---|
+| converted by a human (Qualified, user-owned) | 8 | Navera, mosaic IT, Opus Solutions, Precident, Zesavi, Intervista, Lang Energie, GenTwo |
+| `No Demand`, queue-owned | 6 | Volksbank Hohenlimburg, AZS, public vision, Leasing Union, ZOOM Entertainment, Spieloase |
+| `New`, queue-owned | 1 | Baustein GmbH `00QMz00000rhynBMAQ` |
+
+Only 4 of the 15 carried the pipeline's "EnrichLeadmanually" membership (the other 11
+were predicted by DRY runs before tagging began on 2026-10-19). Done, one-off script in
+the session scratchpad (`rescue_enrich.py`, pipeline modules, no watermark / prediction /
+campaign re-tag / conversion):
+
+- deleted the 4 memberships (Baustein + the three converted ones; one composite DELETE);
+- enriched Baustein through the real path: primary match rejected `country_conflict:AT!=DE`,
+  rescue hit 253467134 (baustein.com, DE), `create_new` / `no_match`, written back
+  `KN_Employee__c 11-50`, `KN_VATNumber__c DE268985208`, Website, Industry, Region,
+  kununu link, CountryCode DE — 0 LF credits, 0 failures. LF holds no address or phone
+  for it, so Street stays blank (= `matched_incomplete` had it been tagged).
+- the 6 `No Demand` leads were NOT enriched: `pipeline.lead_statuses: [New]` (Wasil,
+  2026-09-28 — any other status means a human already worked the lead). Enrich by hand
+  or say so explicitly.
+
+Baustein is now an enriched `New` lead in no LF campaign: the scheduled run will not
+re-read it (task processed) and the sweep will not see it (not a campaign member), so it
+stays with a human unless it is tagged + given a `create_new` prediction row.
+
+## Widened to leads with NO candidate (2026-11-06, lead 00QMz00000rhwTdMAI)
+
+**The miss.** "PAU-Söhne Gesellschaft mit beschränkter Haftung" (s.pau@pau-maschinenbau.de,
+/de/, claimer task of 2026-11-03) was predicted `no_lf_match` on 2026-11-04 and tagged
+EnrichLeadmanually. Wasil found it by hand in LF as "PAU-Söhne GmbH". Replayed the same
+day (free calls): LF returns **zero candidates** for the spelled-out name and the right
+company (1231563, pau-maschinenbau.de, DE) at 0.8 / agreement 100 for the "GmbH" form.
+Not a gate problem — LF's own name search chokes on the register's long form.
+
+**Two fixes, both shipped the same day:**
+
+1. `textnorm.abbreviate_legal_form` collapses the spelled-out German legal forms
+   ("Gesellschaft mit beschränkter Haftung" → GmbH, Aktiengesellschaft → AG,
+   Kommanditgesellschaft → KG, KGaA, OHG, UG, eG, e.V., e.K.). Applied to the name
+   `build_match_payload` sends to LF AND inside `normalize_name`, so the dedupe rules
+   see an Account "PAU-Söhne GmbH" as the same name. Only 1 of the 201 historical
+   `no_lf_match` leads carried a long form, so this is the narrow fix.
+2. The domain rescue now also re-asks a lead whose primary (and wide) pass returned
+   **no candidate at all** — same payload (`company_name` + `url=<email domain>`), same
+   two-axis acceptance (`_best_match` name gate + `rescue_accepts` website), same
+   foreign-country refusal before the retrieve. A recovery here is
+   `lf_rescue = recovered_unmatched` (vs `recovered` for the conflict arm) so the two
+   populations can be scored apart on the QA sheet and in shadow-compare. A lead whose
+   primary chunk FAILED is never re-asked (same rule as the wide pass).
+
+**Backtest 2026-11-06 (`domain_rescue_backtest_2026-11-06.xlsx`, 0 credits).** Population
+widened to every latest `no_lf_match` prediction: 201 leads, 200 replayed (1 dropped:
+task type no longer enabled), production payload with feed alt names, `arm` column.
+
+| outcome | n |
+|---|---|
+| `unmatched_recovered` (control matches nothing, rescue hits the lead's domain, country agrees) | **16** |
+| `unmatched_no_match` | 105 |
+| `unmatched_url_mismatch` (refused, 0 credits) | 5 |
+| `drifted_matched_today` (control matches at width 3 today — PAU-Söhne is one, via fix 1) | 18 |
+| `no_corporate_domain` (freemail, never asked) | 10 |
+| conflict arm: `recovered` / `recovered_foreign` / `rescue_url_mismatch` / `rescue_no_match` / `drifted_no_conflict` | 15 / 7 / 7 / 12 / 5 |
+
+Recovery rate of the still-unmatched arm: **16 / 126 = 12.7 %**. Eyeballed all 16: the
+hits are the lead's own company or its legal entity on the same website
+(Cgs Flughafen Zürich → CGS Customer Ground Service AG on cgs-ltd.com; elektro4000 Hagen
+E-Commerce GmbH → Hagen E-Commerce GmbH on elektro4000.de; AWO Bezirksverband Schwaben
+e.V. → Arbeiterwohlfahrt Bezirksverband Schwaben e. V.). Two are the known
+`lf_name_dropped` class — a sibling entity on the group domain (Verkehrsakademie &
+Fahrschule **Hamburg** → **SH** GmbH on verkehrsakademie-group.de) — which the gate was
+calibrated to accept for lead matching. Rescued matches stay `match_pass = "domain"`
+and so follow `allow_wide_match`; watch `lf_rescue` on the next runs' QA sheets.
+
+The earlier scratch replay the same day (Lead.Company + email, no alt names) gave
+13 of 117 — the production payload is both wider (alt names) and asked less (control
+matched 18, not 74), so the committed number is the backtest's, not the probe's.
+
+**Cost.** One more free match call per ≤200 unmatched leads per run; 1 credit per
+recovered company at the retrieve. Zero Salesforce calls added. The PAU-Söhne lead
+itself is NOT revisited by the pipeline — the EnrichLeadmanually tag anti-joins it out
+of every later read — so it stays a human's (Wasil found it by hand, which is how this
+started).

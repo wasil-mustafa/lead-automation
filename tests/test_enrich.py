@@ -646,6 +646,9 @@ def _wide_settings(width):
     import copy
     raw = copy.deepcopy(SETTINGS.raw)
     raw["leadfeeder"]["match_wide_results"] = width
+    # The domain rescue (on in the shipped config) also re-asks an unmatched lead
+    # since 2026-11-06; off here so these tests see the wide pass alone.
+    raw["leadfeeder"]["match_domain_rescue"] = False
     return Settings(raw=raw, leadfeeder_api_key=None, sf_auth_url=None)
 
 
@@ -816,8 +819,8 @@ def test_gate_off_keeps_looking_up_fully_enriched_leads():
 # domain as `url` and never `country_code`, accepts only when LF's website is that
 # domain, and a rescued company still faces the retrieve + sanity gate.
 
-from leadauto.leadfeeder.enrich import (MATCH_PASS_DOMAIN, build_rescue_payload,
-                                        rescue_accepts)
+from leadauto.leadfeeder.enrich import (MATCH_PASS_DOMAIN, build_match_payload,
+                                        build_rescue_payload, rescue_accepts)
 
 
 def _rescue_settings(on: bool):
@@ -995,3 +998,86 @@ def test_domain_rescue_refuses_a_foreign_hit_before_paying_for_it():
     assert r.lf_rescue == "foreign:CH!=DE"
     assert r.match_pass == "primary"
     assert ("retrieve", ("ch1",)) not in fc.calls          # no credit spent
+
+
+# --- domain rescue of a lead with NO candidate (2026-11-06, PAU-Söhne) ---------------------
+
+def _pau():
+    return _extracted(company="PAU-Söhne Gesellschaft mit beschränkter Haftung",
+                      contact_name=None, contact_email="s.pau@pau-maschinenbau.de",
+                      region="Germany", cc="DE")
+
+
+PAU_HIT = {"company_id": "1231563", "match_score": 0.8, "matched_name": "PAU-Söhne GmbH",
+           "name_agreement": 100, "agreed_via": "company_name",
+           "matched_url": "https://pau-maschinenbau.de", "matched_country_code": "DE"}
+
+
+def test_the_name_sent_to_lf_carries_the_abbreviated_legal_form():
+    # LF returned 0 candidates for the long form and the right company for "GmbH"
+    # (measured 2026-11-06); the gate normalizes both the same, so only the ask changes.
+    payload, _ = build_match_payload(_pau(), {})
+    assert payload["company_name"] == "PAU-Söhne GmbH"
+
+
+def test_domain_rescue_recovers_a_lead_lf_had_no_candidate_for():
+    fc = FakeClient()                                   # name table empty: no candidate
+    fc.rescue_by_url = {"pau-maschinenbau.de": PAU_HIT}
+    fc.company_attrs = {"1231563": {"url": "https://pau-maschinenbau.de",
+                                    "address": {"country": "Germany", "city": "Lauingen"}}}
+    [r] = enrich_leads(fc, [_pau()], _rescue_settings(True))
+    assert r.matched is True
+    assert r.lf_company_id == "1231563"
+    assert r.match_pass == MATCH_PASS_DOMAIN
+    assert r.lf_rescue == "recovered_unmatched"         # scored apart from the conflict arm
+    assert r.lf_rejected is None
+    assert r.company["City"] == "Lauingen"
+    assert fc.match_widths == [3, 3]
+    assert [c for c in fc.calls if c[0] == "retrieve"] == [("retrieve", ("1231563",))]
+
+
+def test_domain_rescue_refuses_an_unmatched_lead_whose_hit_is_another_website():
+    fc = FakeClient()
+    fc.rescue_by_url = {"pau-maschinenbau.de": {**PAU_HIT, "company_id": "x9",
+                                                "matched_url": "https://pau-soehne.at"}}
+    [r] = enrich_leads(fc, [_pau()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rescue == "url_mismatch:pau-soehne.at"
+    assert r.match_pass == ""
+    assert not any(c[0] == "retrieve" for c in fc.calls)
+
+
+def test_domain_rescue_of_an_unmatched_lead_needs_a_corporate_domain():
+    fc = FakeClient()
+    fc.rescue_by_url = {"gmx.de": PAU_HIT}             # would hit, must never be asked
+    [r] = enrich_leads(fc, [_extracted(contact_name=None, contact_email="x@gmx.de")],
+                       _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rescue == "no_corporate_domain"
+    assert fc.match_widths == [3]
+
+
+def test_domain_rescue_never_re_asks_a_lead_whose_primary_chunk_failed():
+    # MATCH_CHUNK_FAILED = never judged. Re-asking it would label a hit "domain" and
+    # hold it out of live scope for a reason that is not true of it.
+    from leadauto.leadfeeder.client import MATCH_CHUNK_FAILED
+
+    class ChunkFails(FakeClient):
+        def match_companies(self, payloads, max_results=3):
+            self.match_widths.append(max_results)
+            return [MATCH_CHUNK_FAILED] * len(payloads)
+
+    fc = ChunkFails()
+    fc.rescue_by_url = {"pau-maschinenbau.de": PAU_HIT}
+    [r] = enrich_leads(fc, [_pau()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rescue is None
+    assert fc.match_widths == [3]
+
+
+def test_domain_rescue_off_leaves_an_unmatched_lead_unmatched():
+    fc = FakeClient()
+    fc.rescue_by_url = {"pau-maschinenbau.de": PAU_HIT}
+    [r] = enrich_leads(fc, [_pau()], _rescue_settings(False))
+    assert r.matched is False and r.lf_rescue is None
+    assert fc.match_widths == [3]
