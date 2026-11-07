@@ -16,7 +16,8 @@ import requests
 from rapidfuzz import fuzz
 
 from ..logging import get_logger
-from ..textnorm import alnum, domain_root, normalize_name
+from ..textnorm import (FREEMAIL_DOMAINS, alnum, domain_root, domains_agree, email_domain,
+                        normalize_host, normalize_name)
 
 DEFAULT_BASE_URL = "https://api.leadfeeder.com/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -34,8 +35,11 @@ RETRYABLE_TRANSPORT = (
 # generous because `/companies/match` with 200 companies is genuinely slow.
 DEFAULT_TIMEOUT = (10, 180)
 _PHONE_EXCLUDE_TYPES = {"fax"}
-# Keys the gate uses locally that the match endpoint must never receive.
-_LOCAL_ONLY_MATCH_KEYS = {"alt_names"}
+# Keys the gate uses locally that the match endpoint must never receive:
+# `alt_names` (name gate), `lead_country_code` (candidate preference in `_best_match`;
+# sent as `country_code` it would SUPPRESS matches — see `enrich.build_match_payload`),
+# `url_only` (the payload is asked by `url` alone; `company_name` stays local for the gate).
+_LOCAL_ONLY_MATCH_KEYS = {"alt_names", "lead_country_code", "url_only"}
 
 # `max_results_per_company` on POST /companies/match. The primary pass asks for 3 and
 # must keep asking for 3: the calibration (6-month control set 2026-07-02 + the 283-case
@@ -84,10 +88,26 @@ def match_api_payload(payload: dict) -> dict:
     a batch by passing `email or ''`.
     """
     out = {k: v for k, v in payload.items() if k not in _LOCAL_ONLY_MATCH_KEYS}
+    if payload.get("url_only"):
+        # The url-only rescue (2026-11-07): LF's name+url match still ranks foreign
+        # namesakes first ("IWK Communication Partner" + iwk-cp.com -> a Korean "IWK");
+        # asked by url alone it returns the company that OWNS the domain. The name is
+        # kept locally so `_best_match`'s name gate still judges the answer.
+        out.pop("company_name", None)
     email = match_email(out.pop("email", None))
     if email:
         out["email"] = email
     return out
+
+
+def payload_domain(payload: dict) -> str | None:
+    """The corporate domain a match payload identifies the lead by: its `url` (the
+    rescue passes) or its email's domain when that is not freemail. None otherwise."""
+    url = normalize_host(payload.get("url"))
+    if url:
+        return url
+    dom = email_domain(payload.get("email"))
+    return dom if dom and dom not in FREEMAIL_DOMAINS else None
 
 
 # --- pure flatteners ---------------------------------------------------------
@@ -386,7 +406,19 @@ class LeadfeederClient:
             unreliably low for small companies even on exact name hits).
         A high LF score alone is NOT trusted: 0.9+ scores were observed on entirely
         wrong companies, so score-only acceptance would write a stranger's firmographics.
+
+        Among the candidates that PASS the gate (2026-11-07): the one whose website is
+        the lead's corporate domain wins first, then one in the lead's country
+        (`lead_country_code`, local-only), then LF's (score, agreement). Before that the
+        order was (score, agreement) alone and the first of a tie won, which picked a
+        namesake over the lead's own company three times in one review of 8 hand-found
+        leads: three "AGS GmbH" all at 0.85 with autoglas-spezialist.com second; two
+        Danish "Cloud Studios" ahead of "Cloud Studios UG" on cloudstudios.online at
+        0.82; a US "qubitec.io" placeholder ahead of "qubitec funding GmbH" (AT) on the
+        same website. The gate itself is unchanged — nothing is accepted that was not.
         """
+        lead_dom = payload_domain(payload)
+        lead_cc = (payload.get("lead_country_code") or "").upper() or None
         best_key, best = None, None
         for m in matches or []:
             score = m.get("attributes", {}).get("match_score", 0)
@@ -395,7 +427,10 @@ class LeadfeederClient:
             if not ((score >= self.min_match_score and agree >= self.name_agree_min)
                     or agree >= self.name_agree_rescue):
                 continue
-            key = (score, agree)
+            site = normalize_host(summary.get("url"))
+            cc = ((summary.get("address") or {}).get("country_code") or "").upper()
+            key = (domains_agree(site, lead_dom), bool(lead_cc) and cc == lead_cc,
+                   score, agree)
             if best_key is None or key > best_key:
                 best_key = key
                 best = {"company_id": m["id"], "match_score": score,

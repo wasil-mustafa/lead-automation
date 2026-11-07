@@ -174,3 +174,55 @@ recovered company at the retrieve. Zero Salesforce calls added. The PAU-Söhne l
 itself is NOT revisited by the pipeline — the EnrichLeadmanually tag anti-joins it out
 of every later read — so it stays a human's (Wasil found it by hand, which is how this
 started).
+
+## 2026-11-07 — candidate preference + url-only third ask (from the hand review)
+
+Wasil checked the 43 remaining no-match leads by hand in LF Target
+(`docs/no_match_leads_2026-11-07.xlsx`, first 22 done: 8 exist in LF, 14 are sole
+traders / municipalities / micro shops that do not). Replaying the 8 with free match
+calls showed why each was lost:
+
+| class | leads | fix |
+|---|---|---|
+| right record was IN LF's answer, `_best_match` took a namesake on a score tie | AGS GmbH, Cloud Studios, qubitec | (a) candidate preference |
+| only a url-ONLY match returns the company; name+url still ranks foreign namesakes first | IWK (agreement 100), IRS Holding (61), koelnistkool/KRANZ (40) | (b) url-only ask — IWK only; the other two fail the name gate by design |
+| LF record has no website | Stiftung Alterssiedlung Root | open |
+| TLD placeholder (country "IO") vs legal entity that surfaces only with "GmbH" in the name | GreenStone Energy | open (human) |
+
+**(a) `_best_match` key is now (website == lead domain, country == lead country, score,
+agreement)** over the gate-passing candidates; the gate itself is unchanged. The lead's
+country travels as local-only `lead_country_code` (never sent — `country_code`
+suppresses matches). Replay of all 685 matched predictions
+(`candidate_preference_backtest_2026-11-07.xlsx`, 0 credits): 634 judged, **16 picks
+change (2.5 %)**, 51 match nothing today either way. 6 of the 16 replaced a foreign
+namesake the sanity gate would have rejected after the retrieve (NAMAC namac.ch →
+nodogroup.de DE; Rasia DE → CH; Kinaree kinaree.fr → kinaree.de; anybill abos.ae →
+anybill.de; Creakom DE → AT on the same creakom.de; Deutscher Kinderschutzbund US → DE),
+10 moved a same-country record to the one on the lead's own domain (EASYTEC →
+easytecgmbh.de, Transportschule → transportschule.ch, CONSENSUS → consensus-group.com,
+tinana → tinana.de, Ferkinghoff .org → .de, Apvento, Heitzmann, Digital Heaven, Kita
+Wirbelwind, Kreis Plön). Ambiguous: the Kinderschutzbund (a DE record with no website
+at 0.12 for the Berlin Landesverband — the `lf_name_dropped` parent class) and Kreis
+Plön (an Abfallwirtschaft mbH on kreis-ploen.de for the Kreis itself). None clearly
+worse.
+
+**(b) url-only third ask** (`enrich.build_url_only_payload`): every lead the name+url
+rescue did not recover is asked once more by `url` alone; the name stays in the payload
+for the local gate, acceptance is the same two axes + country. Backtest over the 203
+historical `no_lf_match` leads (`domain_rescue_backtest_2026-11-07.xlsx`, 0 credits):
+
+| arm | name+url | url only | total |
+|---|---|---|---|
+| still conflicting with a domain | 11 | **3** | 14 / 44 |
+| still unmatched with a domain | 16 | **1** | 17 / 127 |
+
+The 4 url-only hits: Aquis Systems GmbH (AT, the lead is /at/; name+url gave the CH
+AG), Ionbond - IHI Group (CH, name+url gave Ionbond Germany GmbH), Leopold Michel GmbH
+on michel-logistik.com for "Spedition michel GmbH", Cocon Senyurt on cocon.family for
+"Cocon GmbH" (name+url gave a Cocon GmbH with no website). The conflict arm's
+`drifted_no_conflict` grew from 5 to 14 because (a) already picks the same-country
+candidate at the control stage. Cost: one more free call per ≤200 unrescued leads per
+run; 0 Salesforce calls.
+
+Deliberately NOT done: accepting a website-only hit without name agreement (KRANZ /
+koelnistkool). That is a new axis and needs its own backtest first.

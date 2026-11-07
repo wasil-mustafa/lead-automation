@@ -48,6 +48,11 @@ Outcomes:
     `unmatched_no_match`   — the same four outcomes for a lead the control matched
                              NOTHING for (either arm). `drifted_matched_today` is the
                              unmatched arm's control matching at the primary width.
+  * `url_only_recovered` / `unmatched_url_only_recovered` — (2026-11-07) name+url did
+                             not recover, the url-ONLY third ask did (website is the
+                             domain, name gate passed, country agrees). Any other
+                             url-only outcome keeps the name+url label; the
+                             `url_only_*` columns show what it returned.
 
 **Cost: `/companies/match` calls only — free, 0 credits, and `meta.credits.charged` is
 summed and reported to prove it.** Salesforce is read twice (Tasks, Leads), batched.
@@ -58,8 +63,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .leadfeeder.client import MATCH_RESULTS_PRIMARY
-from .leadfeeder.enrich import (build_rescue_payload, lead_corporate_domain,
-                                lead_country, rescue_accepts)
+from .leadfeeder.enrich import (build_rescue_payload, build_url_only_payload,
+                                lead_corporate_domain, lead_country, rescue_accepts)
 from .logging import get_logger
 from .predictions import load_predictions
 from .qa_artifact import add_sheet
@@ -75,11 +80,14 @@ CASES_COLUMNS = [
     "control_company_id", "control_company_name", "control_match_score",
     "control_country", "control_website",
     "rescue_company_id", "rescue_company_name", "rescue_match_score",
-    "rescue_name_agreement", "rescue_country", "rescue_website", "outcome",
+    "rescue_name_agreement", "rescue_country", "rescue_website",
+    "url_only_company_id", "url_only_company_name", "url_only_match_score",
+    "url_only_name_agreement", "url_only_country", "url_only_website", "outcome",
 ]
 
 RECOVERED = ("recovered", "recovered_foreign", "unmatched_recovered",
-             "unmatched_recovered_foreign")
+             "unmatched_recovered_foreign", "url_only_recovered",
+             "unmatched_url_only_recovered")
 ARM_GATE_REJECTED = "gate_rejected"
 ARM_UNMATCHED = "unmatched"
 
@@ -173,12 +181,31 @@ def run_backtest(sf_client, lf_client, settings, *, xlsx_path: Path | None = Non
         found = lf_client.match_companies(rescue_payloads, max_results=MATCH_RESULTS_PRIMARY)
         rescue_by_idx = dict(zip(rescue_idx, found))
 
+    labels = {i: classify(control[i], lead_cc[i], lead_dom[i], rescue_by_idx.get(i),
+                          i in rescue_by_idx, arm_of(case)) for i, case in enumerate(cases)}
+
+    # Third ask, as production (2026-11-07): the leads name+url did not recover are
+    # asked by url ALONE; accepted on the same two axes + country.
+    url_only_by_idx: dict[int, dict | None] = {}
+    second = [(i, rp) for i, rp in zip(rescue_idx, rescue_payloads)
+              if labels[i] not in ("recovered", "unmatched_recovered")]
+    if second:
+        log.info("Domain-rescue backtest: re-asking %d lead(s) by url alone", len(second))
+        found = lf_client.match_companies([build_url_only_payload(rp) for _, rp in second],
+                                          max_results=MATCH_RESULTS_PRIMARY)
+        url_only_by_idx = dict(zip([i for i, _ in second], found))
+        for i, hit in url_only_by_idx.items():
+            hit_cc = country_iso2((hit or {}).get("matched_country_code"))
+            if rescue_accepts(hit, lead_dom[i]) and (not hit_cc or hit_cc == lead_cc[i]):
+                labels[i] = ("url_only_recovered" if control[i]
+                             else "unmatched_url_only_recovered")
+
     rows, tally = [], {}
     for i, case in enumerate(cases):
-        ctl, res = control[i], rescue_by_idx.get(i)
-        label = classify(ctl, lead_cc[i], lead_dom[i], res, i in rescue_by_idx, arm_of(case))
+        ctl, res, uo = control[i], rescue_by_idx.get(i), url_only_by_idx.get(i)
+        label = labels[i]
         tally[label] = tally.get(label, 0) + 1
-        ctl, res = ctl or {}, res or {}
+        ctl, res, uo = ctl or {}, res or {}, uo or {}
         rows.append({
             "lead_id": case.lead_id, "task_id": case.task_id,
             "predicted_at": case.predicted_at, "arm": arm_of(case),
@@ -196,8 +223,16 @@ def run_backtest(sf_client, lf_client, settings, *, xlsx_path: Path | None = Non
             "rescue_name_agreement": res.get("name_agreement", ""),
             "rescue_country": res.get("matched_country_code") or "",
             "rescue_website": normalize_host(res.get("matched_url")) or "",
+            "url_only_company_id": uo.get("company_id") or "",
+            "url_only_company_name": uo.get("matched_name") or "",
+            "url_only_match_score": uo.get("match_score", ""),
+            "url_only_name_agreement": uo.get("name_agreement", ""),
+            "url_only_country": uo.get("matched_country_code") or "",
+            "url_only_website": normalize_host(uo.get("matched_url")) or "",
             "outcome": label,
         })
+        if label.endswith("url_only_recovered"):
+            res = uo                                     # the hit the log line names
         if label in RECOVERED:
             log.info("%s %r (%s, %s) -> %r (lf %s, %s, %s, score %s)", label.upper(),
                      case.payload.get("company_name"), lead_cc[i], lead_dom[i],
@@ -231,16 +266,23 @@ def _write_xlsx(rows, tally, counts, now, credits, xpath: Path) -> None:
         summary.append([f"outcome_{label}", tally[label]])
     conflicting = sum(v for k, v in tally.items()
                       if k in ("recovered", "recovered_foreign", "rescue_url_mismatch",
-                               "rescue_no_match", "no_corporate_domain"))
-    good = tally.get("recovered", 0)
+                               "rescue_no_match", "no_corporate_domain",
+                               "url_only_recovered"))
+    good = tally.get("recovered", 0) + tally.get("url_only_recovered", 0)
     summary.append(["recovery_rate_of_still_conflicting",
-                    f"{good}/{conflicting} = {100 * good / (conflicting or 1):.1f}%"])
+                    f"{good}/{conflicting} = {100 * good / (conflicting or 1):.1f}% "
+                    f"(name+url {tally.get('recovered', 0)}, "
+                    f"url only {tally.get('url_only_recovered', 0)})"])
     still_unmatched = sum(v for k, v in tally.items()
                           if k in ("unmatched_recovered", "unmatched_recovered_foreign",
-                                   "unmatched_url_mismatch", "unmatched_no_match"))
-    good_u = tally.get("unmatched_recovered", 0)
+                                   "unmatched_url_mismatch", "unmatched_no_match",
+                                   "unmatched_url_only_recovered"))
+    good_u = (tally.get("unmatched_recovered", 0)
+              + tally.get("unmatched_url_only_recovered", 0))
     summary.append(["recovery_rate_of_still_unmatched_with_domain",
-                    f"{good_u}/{still_unmatched} = {100 * good_u / (still_unmatched or 1):.1f}%"])
+                    f"{good_u}/{still_unmatched} = {100 * good_u / (still_unmatched or 1):.1f}% "
+                    f"(name+url {tally.get('unmatched_recovered', 0)}, "
+                    f"url only {tally.get('unmatched_url_only_recovered', 0)})"])
     summary.append(["NOTE", "A `recovered` / `unmatched_recovered` row is what production "
                             "writes back: judge each one (is that company the lead's?) "
                             "before trusting the rate. `*_foreign` is refused by "
