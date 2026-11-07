@@ -23,6 +23,9 @@ class FakeClient:
         # Answers for the domain-rescue pass, keyed by the `url` it sends (the lead's
         # email domain). A rescue payload never falls through to the name tables.
         self.rescue_by_url: dict = {}
+        # Answers for the url-ONLY third ask (payload flagged `url_only`), keyed by url.
+        # Falls back to `rescue_by_url` so the older rescue tests see one answer twice.
+        self.url_only_by_url: dict | None = None
         self.match_widths: list = []      # max_results of every match_companies call
         self.company_attrs: dict = {}     # lf_company_id -> raw attrs
         self.contact_by_name: dict = {}   # name -> {contact_id, full_name} | None
@@ -41,12 +44,14 @@ class FakeClient:
     def match_companies(self, payloads, max_results=3):
         self.calls.append(("match_companies", tuple(
             (p["company_name"], p.get("email"), p.get("country"), p.get("country_code"))
+            + (("url_only",) if p.get("url_only") else ())
             for p in payloads)))
         self.match_widths.append(max_results)
         table = (self.match_by_name if max_results <= 3
                  else {**self.match_by_name, **self.wide_match_by_name})
-        return [self.rescue_by_url.get(p["url"]) if p.get("url")
-                else table.get(p["company_name"]) for p in payloads]
+        url_only = self.rescue_by_url if self.url_only_by_url is None else self.url_only_by_url
+        return [(url_only if p.get("url_only") else self.rescue_by_url).get(p["url"])
+                if p.get("url") else table.get(p["company_name"]) for p in payloads]
 
     def add_company_to_list(self, company_id, list_id):
         self.calls.append(("add_company", company_id, list_id))
@@ -1081,3 +1086,96 @@ def test_domain_rescue_off_leaves_an_unmatched_lead_unmatched():
     [r] = enrich_leads(fc, [_pau()], _rescue_settings(False))
     assert r.matched is False and r.lf_rescue is None
     assert fc.match_widths == [3]
+
+
+# --- url-only third ask (2026-11-07, IWK / KRANZ from Wasil's hand review) ------------------
+
+from leadauto.leadfeeder.enrich import build_url_only_payload  # noqa: E402
+
+
+def _iwk():
+    return _extracted(company="IWK Communication Partner", contact_name=None,
+                      contact_email="steffi.sorg@iwk-cp.com", region="Germany", cc="DE")
+
+
+IWK_KR = {"company_id": "195895839", "match_score": 0.17, "matched_name": "IWK",
+          "name_agreement": 100, "agreed_via": "company_name",
+          "matched_url": "http://www.iwkco.com", "matched_country_code": "KR"}
+IWK_DE = {"company_id": "2397461", "match_score": 0.8, "matched_name": "IWK GmbH",
+          "name_agreement": 100, "agreed_via": "company_name",
+          "matched_url": "https://www.iwk-cp.com", "matched_country_code": "DE"}
+
+
+def test_url_only_payload_keeps_the_name_local_and_sends_the_url_alone():
+    from leadauto.leadfeeder.client import match_api_payload
+    rp = build_rescue_payload(_iwk(), {"company_name": "IWK Communication Partner",
+                                       "email": "steffi.sorg@iwk-cp.com",
+                                       "lead_country_code": "DE"})
+    assert rp == {"company_name": "IWK Communication Partner", "url": "iwk-cp.com",
+                  "lead_country_code": "DE"}
+    uo = build_url_only_payload(rp)
+    assert uo["company_name"] == "IWK Communication Partner"   # the local gate's input
+    assert match_api_payload(uo) == {"url": "iwk-cp.com"}       # what LF receives
+
+
+def test_url_only_ask_recovers_the_domain_owner_name_plus_url_ranked_abroad():
+    # Measured 2026-11-07: name+email and name+url both return only a Korean "IWK";
+    # url alone returns "IWK GmbH" on iwk-cp.com (agreement 100, DE).
+    fc = FakeClient()                                   # primary: no candidate
+    fc.rescue_by_url = {"iwk-cp.com": IWK_KR}           # name+url: the Korean namesake
+    fc.url_only_by_url = {"iwk-cp.com": IWK_DE}
+    fc.company_attrs = {"2397461": {"url": "https://www.iwk-cp.com",
+                                    "address": {"country": "Germany", "city": "Bonn"}}}
+    [r] = enrich_leads(fc, [_iwk()], _rescue_settings(True))
+    assert r.matched is True
+    assert r.lf_company_id == "2397461"
+    assert r.match_pass == MATCH_PASS_DOMAIN
+    assert r.lf_rescue == "url_only_recovered_unmatched"
+    assert r.company["City"] == "Bonn"
+    assert fc.match_widths == [3, 3, 3]
+    asks = [c for c in fc.calls if c[0] == "match_companies"]
+    assert asks[2] == ("match_companies",
+                       (("IWK Communication Partner", None, None, None, "url_only"),))
+    assert [c for c in fc.calls if c[0] == "retrieve"] == [("retrieve", ("2397461",))]
+
+
+def test_url_only_ask_is_skipped_when_name_plus_url_already_recovered():
+    fc = FakeClient()
+    fc.rescue_by_url = {"iwk-cp.com": IWK_DE}
+    fc.url_only_by_url = {"iwk-cp.com": {**IWK_DE, "company_id": "other"}}
+    fc.company_attrs = {"2397461": {"url": "https://www.iwk-cp.com",
+                                    "address": {"country": "Germany"}}}
+    [r] = enrich_leads(fc, [_iwk()], _rescue_settings(True))
+    assert r.lf_company_id == "2397461" and r.lf_rescue == "recovered_unmatched"
+    assert fc.match_widths == [3, 3]
+
+
+def test_url_only_ask_still_refuses_a_stranger_who_owns_the_domain():
+    # KRANZ Agentur / kranz.life is owned by "koelnistkool GmbH" (agreement 40): the
+    # name gate inside _best_match yields None, so the lead stays unmatched and the
+    # label records both refusals.
+    fc = FakeClient()
+    kranz_es = {"company_id": "203811039", "match_score": 0.58, "matched_name": "Kranz",
+                "name_agreement": 100, "agreed_via": "company_name",
+                "matched_url": "https://www.kranz.es", "matched_country_code": "ES"}
+    fc.rescue_by_url = {"kranz.life": kranz_es}
+    fc.url_only_by_url = {}                              # gated out -> None
+    [r] = enrich_leads(fc, [_extracted(company="KRANZ Agentur", contact_name=None,
+                                       contact_email="job@kranz.life")],
+                       _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rescue == "url_mismatch:kranz.es|url_only_no_match"
+    assert fc.match_widths == [3, 3, 3]
+    assert not any(c[0] == "retrieve" for c in fc.calls)
+
+
+def test_url_only_ask_with_the_same_refusal_keeps_the_first_label():
+    fc = _conflict_client()
+    foreign = {"company_id": "ch1", "match_score": 0.88, "matched_name": "Baustein GmbH",
+               "matched_url": "https://www.baustein.com", "matched_country_code": "CH"}
+    fc.rescue_by_url = {"baustein.com": foreign}
+    fc.url_only_by_url = {"baustein.com": foreign}
+    [r] = enrich_leads(fc, [_baustein()], _rescue_settings(True))
+    assert r.matched is False
+    assert r.lf_rescue == "foreign:CH!=DE"
+    assert fc.match_widths == [3, 3, 3]

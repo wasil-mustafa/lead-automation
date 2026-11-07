@@ -489,6 +489,45 @@ $env:PYTHONPATH = "src"; python scripts/leadfeeder_probe.py "<company>" "<cc>"
   to LF and `normalize_name` both collapse "Gesellschaft mit beschränkter Haftung" →
   GmbH (plus AG/KG/KGaA/OHG/UG/eG/e.V./e.K.). Only 1 of 201 unmatched leads carried
   one — the rescue widening is the recall win, the abbreviation is the root-cause fix.
+  **Two more from Wasil's hand review of the 43 no-match leads (2026-11-07,
+  `docs/no_match_leads_2026-11-07.xlsx`; 8 of the first 22 existed in LF Target, the
+  other 14 are sole traders / municipalities genuinely absent):**
+  (a) **`_best_match` now prefers, among gate-PASSING candidates, the one whose website
+  is the lead's corporate domain, then one in the lead's country, then LF's (score,
+  agreement)** — before, the first of a score tie won: three "AGS GmbH" at 0.85 with
+  the lead's autoglas-spezialist.com record second (the acronym gate then rejected the
+  first), two Danish "Cloud Studios" ahead of "Cloud Studios UG" on cloudstudios.online,
+  a US "qubitec.io" placeholder ahead of "qubitec funding GmbH" (AT). The lead's country
+  rides in the payload as local-only `lead_country_code` (stripped with `alt_names` by
+  `match_api_payload`; sent as `country_code` it would suppress matches). The gate is
+  unchanged. Replayed over all 685 matched predictions (`candidate_preference_backtest_
+  2026-11-07.xlsx`, 0 credits): **16 of 634 picks change (2.5 %)** — 6 were a foreign
+  namesake the sanity gate would have rejected (NAMAC CH→DE, Kinaree FR→DE, anybill
+  AE→DE, Creakom DE→AT …), 10 a same-country record without/with another website moved
+  to the one on the lead's own domain; two are ambiguous (a DE "Deutscher
+  Kinderschutzbund" with no website for the Berlin Landesverband, score 0.12; a Kreis
+  Plön Abfallwirtschaft mbH on kreis-ploen.de for the Kreis itself), none clearly worse.
+  (b) **A url-ONLY third ask** (`enrich.build_url_only_payload`, payload flag `url_only`
+  → `match_api_payload` sends `url` alone, the name stays local for the gate): every
+  lead name+url did not recover is re-asked once by domain alone, same two-axis
+  acceptance + country. Cause: "IWK Communication Partner" + iwk-cp.com returned only a
+  Korean "IWK" (0.17) by name+url, and "IWK GmbH" on iwk-cp.com (DE, agreement 100) by
+  url alone; same for IRS Group / KRANZ Agentur — those two still fail the name gate
+  (IRS Holding GmbH 61, three DE firms on irs-group.com; koelnistkool GmbH 40 on
+  kranz.life) and are left to humans on purpose: website-only acceptance without a name
+  is an unmeasured axis. Labels: `lf_rescue = url_only_recovered[_unmatched]`, or the
+  name+url label with `|url_only_<refusal>` appended when the refusals differ
+  (`url_mismatch:kranz.es|url_only_no_match`). Backtest over the 203 historical
+  `no_lf_match` leads (`domain_rescue_backtest_2026-11-07.xlsx`, 0 credits): conflict
+  arm **14 of 44 (name+url 11, url only 3)**, unmatched arm **17 of 127 (16 + 1)**;
+  the 4 url-only hits are Aquis Systems GmbH (AT sibling of the CH AG), Ionbond - IHI
+  Group, Leopold Michel GmbH on michel-logistik.com, Cocon Senyurt on cocon.family.
+  Note the conflict arm shrank from 41 to 44-with-14-`drifted_no_conflict` because (a)
+  already picks the same-country candidate at the control stage. Cost: one more free
+  match call per ≤200 unrescued leads per run, 0 Salesforce calls. Still open from the
+  review: Stiftung Alterssiedlung Root (LF record has no website, so `rescue_accepts`
+  fails closed on a name-100 CH hit) and GreenStone (gsenergy.io record carries country
+  "IO" = the TLD; the GmbH surfaces only with "GmbH" in the name).
 - **Contact-search cascade returns only NAME-VERIFIED hits (fixed 2026-08-10).** All four
   attempts of `client.search_contact` now filter candidates through one predicate
   (`_all_parts_ok`: every part of the searched name must appear in LF's `full_name`, hyphen

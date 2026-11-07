@@ -860,3 +860,94 @@ def test_best_match_carries_website_and_country_only_when_the_summary_has_them()
     assert with_summary["matched_url"] == "https://www.baustein-gmbh.at/"
     assert with_summary["matched_country_code"] == "AT"
     assert "matched_url" not in bare and "matched_country_code" not in bare
+
+
+# --- candidate preference among gate-passing matches (2026-11-07) ---------------------------
+# Real answers from the 2026-11-07 probe of the no-match leads Wasil found by hand.
+
+def _cand(cid, name, score, url=None, cc=None):
+    attrs = {"name": name}
+    if url:
+        attrs["url"] = url
+    if cc:
+        attrs["address"] = {"country_code": cc}
+    return {"id": cid, "attributes": {"match_score": score},
+            "relationships": {"company_summary": {"attributes": attrs}}}
+
+
+def _match_client(candidates, sent):
+    def handler(params, body):
+        sent.append(body["companies"])
+        return {"data": [candidates]}
+    return _client({("POST", "/companies/match"): handler})
+
+
+def test_best_match_prefers_the_candidate_whose_website_is_the_lead_domain():
+    # Three "AGS GmbH" all at 0.85: before, the first (isomatic.net, garage doors) won
+    # and the acronym gate then rejected it; the lead's own company was second.
+    sent = []
+    client = _match_client([
+        _cand("1611366", "AGS GmbH", 0.85, "https://isomatic.net", "DE"),
+        _cand("3051320", "AGS GmbH", 0.85, "https://autoglas-spezialist.com", "DE"),
+        _cand("158885419", "AGS GmbH", 0.83, None, "DE"),
+    ], sent)
+    [m] = client.match_companies([{"company_name": "AGS GmbH",
+                                   "email": "info@autoglas-spezialist.com",
+                                   "lead_country_code": "DE"}])
+    assert m["company_id"] == "3051320"
+    assert m["matched_url"] == "https://autoglas-spezialist.com"
+    assert sent == [[{"company_name": "AGS GmbH", "email": "info@autoglas-spezialist.com"}]]
+
+
+def test_best_match_prefers_the_lead_country_among_website_ties():
+    # qubitec: a US "qubitec.io" placeholder and "qubitec funding GmbH" (AT) both carry
+    # the website qubitec.io at 0.82; the lead is /at/.
+    client = _match_client([
+        _cand("185023068", "qubitec.io", 0.82, "https://www.qubitec.io", "US"),
+        _cand("244237592", "qubitec funding GmbH", 0.82, "https://www.qubitec.io/", "AT"),
+    ], [])
+    [m] = client.match_companies([{"company_name": "qubitec", "url": "qubitec.io",
+                                   "lead_country_code": "AT"}])
+    assert m["company_id"] == "244237592"
+
+
+def test_best_match_prefers_the_lead_country_over_a_higher_scored_namesake_abroad():
+    # Primary ask for qubitec: GB "Qubitec LTD." at 0.7 ahead of the AT company at 0.64.
+    # The GB one would be rejected after the retrieve (country_conflict); the AT one is
+    # what the sanity gate would keep, so it is picked first.
+    client = _match_client([
+        _cand("214884807", "Qubitec LTD.", 0.7, None, "GB"),
+        _cand("244237592", "qubitec funding GmbH", 0.64, "https://www.qubitec.io/", "AT"),
+    ], [])
+    [m] = client.match_companies([{"company_name": "qubitec", "email": "johannes@qubitec.io",
+                                   "lead_country_code": "AT"}])
+    assert m["company_id"] == "244237592"
+
+
+def test_best_match_preference_never_loosens_the_gate():
+    # The domain owner fails the name gate (koelnistkool GmbH vs KRANZ Agentur): still
+    # None. A freemail domain is no preference signal at all.
+    client = _match_client([
+        _cand("157184864", "koelnistkool GmbH", 0.8, "https://www.kranz.life", "DE"),
+    ], [])
+    assert client.match_companies([{"company_name": "KRANZ Agentur", "url": "kranz.life",
+                                    "lead_country_code": "DE"}]) == [None]
+    client = _match_client([
+        _cand("a", "Acme GmbH", 0.9, "https://acme.at", "AT"),
+        _cand("b", "Acme GmbH", 0.9, "https://gmx.de", "DE"),
+    ], [])
+    [m] = client.match_companies([{"company_name": "Acme GmbH", "email": "x@gmx.de"}])
+    assert m["company_id"] == "a"            # (score, agreement) tie -> first, as before
+
+
+def test_match_api_payload_strips_every_local_only_key():
+    from leadauto.leadfeeder.client import match_api_payload, payload_domain
+    p = {"company_name": "IWK Communication Partner", "url": "iwk-cp.com",
+         "alt_names": ["IWK"], "lead_country_code": "DE", "url_only": True}
+    assert match_api_payload(p) == {"url": "iwk-cp.com"}
+    assert match_api_payload({**p, "url_only": False}) == {
+        "company_name": "IWK Communication Partner", "url": "iwk-cp.com"}
+    assert payload_domain(p) == "iwk-cp.com"
+    assert payload_domain({"company_name": "X", "email": "a@shop.acme.de"}) == "shop.acme.de"
+    assert payload_domain({"company_name": "X", "email": "a@gmail.com"}) is None
+    assert payload_domain({"company_name": "X"}) is None

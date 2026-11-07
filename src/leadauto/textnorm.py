@@ -76,6 +76,14 @@ def normalize_host(value: str | None) -> str | None:
     return v or None
 
 
+def domains_agree(a: str | None, b: str | None) -> bool:
+    """True when two hosts/domains identify the same site (subdomain-tolerant):
+    'shop.baustein.com' agrees with 'baustein.com'. Hosts already normalized."""
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
 def email_domain(value: str | None) -> str | None:
     """Lowercase domain of an email address. None if absent or not an address."""
     if not value or "@" not in value:

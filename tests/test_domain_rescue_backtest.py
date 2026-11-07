@@ -28,15 +28,20 @@ def _prediction(lead_id="00Q1", task_id="T1", rule="no_lf_match", lf="at1",
 class FakeLf:
     """Answers name payloads from `by_name`, url payloads from `by_url`."""
 
-    def __init__(self, by_name=None, by_url=None):
+    def __init__(self, by_name=None, by_url=None, by_url_only=None):
         self.by_name, self.by_url = by_name or {}, by_url or {}
+        self.by_url_only = by_url_only or {}      # answers to the url-ONLY third ask
         self.widths, self.asked = [], []
         self.credits_charged = 0
 
     def match_companies(self, payloads, max_results=3):
         self.widths.append(max_results)
         self.asked.append([dict(p) for p in payloads])
-        return [self.by_url.get(p["url"]) if p.get("url")
+        # url-only answers may be keyed (company_name, url) to stand in for the real
+        # client's name gate when two leads share a domain in a test.
+        return [self.by_url_only.get((p["company_name"], p["url"]),
+                                     self.by_url_only.get(p["url"])) if p.get("url_only")
+                else self.by_url.get(p["url"]) if p.get("url")
                 else self.by_name.get(p["company_name"]) for p in payloads]
 
 
@@ -124,8 +129,9 @@ def test_run_rescues_only_the_conflicting_leads_and_sends_the_domain_as_url(tmp_
     preds = [_prediction(), _prediction("00Q2", "T2", lf="b1")]
     res = run_backtest(sf, lf, SETTINGS, xlsx_path=tmp_path / "r.xlsx",
                        predictions_path=_write_preds(tmp_path, preds), profiles={})
-    assert lf.widths == [MATCH_RESULTS_PRIMARY, MATCH_RESULTS_PRIMARY]
-    assert lf.asked[1] == [{"company_name": "Acme GmbH", "url": "acme.de"}]
+    assert lf.widths == [MATCH_RESULTS_PRIMARY, MATCH_RESULTS_PRIMARY]   # no url-only ask
+    assert lf.asked[1] == [{"company_name": "Acme GmbH", "url": "acme.de",
+                            "lead_country_code": "DE"}]       # local-only, never sent
     assert res["tally"] == {"recovered": 1, "drifted_no_conflict": 1}
     assert res["credits"] == 0
     assert (tmp_path / "r.xlsx").exists()
@@ -147,10 +153,43 @@ def test_run_rescues_an_unmatched_lead_and_scores_it_in_its_own_arm(tmp_path):
                        predictions_path=_write_preds(tmp_path, [_prediction("00Q3", "T3",
                                                                             lf=None)]),
                        profiles={})
-    assert lf.asked[1] == [{"company_name": "Pau GmbH", "url": "acme.de"}]
+    assert lf.asked[1] == [{"company_name": "Pau GmbH", "url": "acme.de",
+                            "lead_country_code": "DE"}]
     assert res["tally"] == {"unmatched_recovered": 1}
     [row] = res["rows"]
     assert row["arm"] == "unmatched" and row["rescue_company_id"] == "p1"
+
+
+def test_run_asks_by_url_alone_when_name_plus_url_fails_and_scores_it_apart(tmp_path):
+    # IWK (2026-11-07): control nothing, name+url a Korean namesake on another website,
+    # url alone the German owner of the domain -> `unmatched_url_only_recovered`.
+    # Beta: name+url and url alone both miss -> the name+url label stands.
+    sf = FakeSf(tasks=[_task("T3", "00Q3", company="IWK GmbH"),
+                       _task("T4", "00Q4", company="Beta GmbH")],
+                leads=[_lead("00Q3", "IWK GmbH"),
+                       {**_lead("00Q4", "Beta GmbH"), "Email": "x@beta.de"}])
+    kr = {"company_id": "kr", "match_score": 0.17, "matched_name": "IWK",
+          "name_agreement": 100, "matched_url": "http://www.iwkco.com",
+          "matched_country_code": "KR"}
+    de = {"company_id": "de", "match_score": 0.8, "matched_name": "IWK GmbH",
+          "name_agreement": 100, "matched_url": "https://www.acme.de",
+          "matched_country_code": "DE"}
+    lf = FakeLf(by_url={"acme.de": kr}, by_url_only={("IWK GmbH", "acme.de"): de})
+    res = run_backtest(sf, lf, SETTINGS, xlsx_path=tmp_path / "r.xlsx",
+                       predictions_path=_write_preds(tmp_path, [
+                           _prediction("00Q3", "T3", lf=None),
+                           _prediction("00Q4", "T4", lf=None)]), profiles={})
+    assert lf.widths == [MATCH_RESULTS_PRIMARY] * 3
+    assert lf.asked[2] == [{"company_name": "IWK GmbH", "url": "acme.de",
+                            "lead_country_code": "DE", "url_only": True},
+                           {"company_name": "Beta GmbH", "url": "acme.de",
+                            "lead_country_code": "DE", "url_only": True}]
+    assert res["tally"] == {"unmatched_url_only_recovered": 1, "unmatched_url_mismatch": 1}
+    by_lead = {r["lead_id"]: r for r in res["rows"]}
+    assert by_lead["00Q3"]["url_only_company_id"] == "de"
+    assert by_lead["00Q3"]["rescue_company_id"] == "kr"
+    assert by_lead["00Q4"]["url_only_company_id"] == ""
+    assert res["credits"] == 0
 
 
 def test_run_with_nothing_replayable_writes_no_report(tmp_path):

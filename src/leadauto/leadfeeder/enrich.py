@@ -137,6 +137,12 @@ def build_match_payload(e: ExtractedLead, profiles: dict) -> tuple[dict | None, 
                 alts.append(n)
         if alts:
             payload["alt_names"] = alts
+    # Local-only (stripped by `client.match_api_payload`): `_best_match` prefers a
+    # gate-passing candidate in the lead's country over a namesake abroad. Never sent
+    # as `country_code` — that filter suppresses good matches (first constraint above).
+    lead_cc = lead_country(e, info.country_code if info else None)
+    if lead_cc:
+        payload["lead_country_code"] = lead_cc
     return payload, info
 
 
@@ -178,9 +184,25 @@ def build_rescue_payload(e: ExtractedLead, payload: dict | None) -> dict | None:
     if not dom:
         return None
     out = {"company_name": payload["company_name"], "url": dom}
-    if payload.get("alt_names"):
-        out["alt_names"] = list(payload["alt_names"])
+    for local_key in ("alt_names", "lead_country_code"):
+        if payload.get(local_key):
+            out[local_key] = (list(payload[local_key]) if local_key == "alt_names"
+                              else payload[local_key])
     return out
+
+
+def build_url_only_payload(rescue_payload: dict) -> dict:
+    """The third ask (2026-11-07): the domain-rescue payload flagged `url_only`, so
+    `client.match_api_payload` sends the `url` ALONE. Measured on the 8 no-match leads
+    Wasil found by hand in LF Target: for three of them name+url still returned only
+    foreign namesakes ("IWK Communication Partner" + iwk-cp.com -> a Korean "IWK",
+    0.17), while url alone returned the German company that owns the domain ("IWK
+    GmbH", iwk-cp.com, 0.8). The name stays in the payload for the LOCAL gate: the
+    answer must still agree on name (IWK GmbH does, 100), have the domain as its
+    website (`rescue_accepts`) and sit in the lead's country — so a stranger that
+    merely hosts on the domain ("koelnistkool GmbH" on kranz.life, agreement 40) is
+    refused, by design, until that axis is measured."""
+    return {**rescue_payload, "url_only": True}
 
 
 def rescue_accepts(match: dict | None, lead_domain: str | None) -> bool:
@@ -339,7 +361,11 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
     # rejected again rather than trusted. Cost: one free match call per
     # `match_batch` candidates, 1 credit per rescued company at the retrieve.
     # `leadfeeder.match_domain_rescue` turns it on; the acronym rejection is never
-    # rescued (its corroboration already failed on this very domain).
+    # rescued here. (2026-11-07: that used to lose "AGS GmbH" — three namesakes tied at
+    # 0.85 and the gate rejected the FIRST one, isomatic.net, while the lead's own
+    # autoglas-spezialist.com record was second. `_best_match` now prefers the
+    # candidate whose website is the lead's domain, so the acronym gate judges the
+    # right record; the rescue is still not asked for an acronym rejection.)
     #
     # Since 2026-11-06 the SAME pass also re-asks a lead whose primary (and wide) match
     # returned NO candidate at all — `no_lf_match`, the pipeline's largest terminal
@@ -370,10 +396,11 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
                      "(%d country-conflict, %d without any candidate)", len(rescue),
                      sum(1 for *_, nc in rescue if not nc),
                      sum(1 for *_, nc in rescue if nc))
-            rescue_matches = client.match_companies([rp for _, rp, _, _ in rescue],
-                                                    max_results=MATCH_RESULTS_PRIMARY)
             rescued: list[EnrichedLead] = []
-            for (r, rp, dom, no_candidate), match in zip(rescue, rescue_matches):
+
+            def _judge(r: EnrichedLead, rp: dict, dom: str, no_candidate: bool,
+                       match: dict | None, ask: str) -> tuple[bool, str]:
+                """(accepted, label) for one rescue answer; an accepted one is taken."""
                 # Website agrees but the summary already says the company sits in
                 # another country (a .com registered abroad, a foreign subsidiary on
                 # the group domain): the sanity gate would reject it after the
@@ -382,21 +409,45 @@ def enrich_leads(client, extracteds: list[ExtractedLead], settings, logger=None,
                 foreign = country_iso2((match or {}).get("matched_country_code"))
                 lead_cc = lead_country(r.extracted, r.feed_country_code)
                 if rescue_accepts(match, dom) and foreign and lead_cc and foreign != lead_cc:
-                    r.lf_rescue = f"foreign:{foreign}!={lead_cc}"
-                elif rescue_accepts(match, dom):
-                    log.info("Domain rescue recovered %r: %s -> %r (lf %s, %s, score %s)",
-                             rp["company_name"], r.lf_rejected or "no candidate",
+                    return False, f"foreign:{foreign}!={lead_cc}"
+                if rescue_accepts(match, dom):
+                    log.info("Domain rescue (%s) recovered %r: %s -> %r (lf %s, %s, score %s)",
+                             ask, rp["company_name"], r.lf_rejected or "no candidate",
                              match.get("matched_name"), match.get("company_id"),
                              match.get("matched_url"), match.get("match_score"))
                     r.lf_rejected = None
-                    r.lf_rescue = "recovered_unmatched" if no_candidate else "recovered"
                     _accept_result(r, match, MATCH_PASS_DOMAIN)
                     rescued.append(r)
-                elif match:
-                    r.lf_rescue = ("url_mismatch:"
-                                   f"{normalize_host(match.get('matched_url')) or '-'}")
-                else:
-                    r.lf_rescue = "no_match"
+                    return True, "recovered_unmatched" if no_candidate else "recovered"
+                if match:
+                    return False, f"url_mismatch:{normalize_host(match.get('matched_url')) or '-'}"
+                return False, "no_match"
+
+            rescue_matches = client.match_companies([rp for _, rp, _, _ in rescue],
+                                                    max_results=MATCH_RESULTS_PRIMARY)
+            second: list[tuple[EnrichedLead, dict, str, bool]] = []
+            for (r, rp, dom, nc), m in zip(rescue, rescue_matches):
+                ok, r.lf_rescue = _judge(r, rp, dom, nc, m, "name+url")
+                if not ok:
+                    second.append((r, rp, dom, nc))
+            # Third ask (2026-11-07, `build_url_only_payload`): the leads name+url did
+            # not recover are asked by url ALONE — LF's name+url still ranks foreign
+            # namesakes first, url alone returns the domain's owner. Same two-axis
+            # acceptance (name gate + website == domain + country), same free call.
+            # A recovery is `lf_rescue = url_only_recovered[_unmatched]`; a refusal
+            # that differs from the name+url one is appended (`url_mismatch:kranz.es|
+            # url_only_no_match` = a stranger owns the domain and the name gate held),
+            # the same refusal twice keeps the first label.
+            if second:
+                url_only_matches = client.match_companies(
+                    [build_url_only_payload(rp) for _, rp, _, _ in second],
+                    max_results=MATCH_RESULTS_PRIMARY)
+                for (r, rp, dom, nc), m in zip(second, url_only_matches):
+                    ok, label = _judge(r, rp, dom, nc, m, "url only")
+                    if ok:
+                        r.lf_rescue = f"url_only_{label}"
+                    elif label != r.lf_rescue:
+                        r.lf_rescue = f"{r.lf_rescue}|url_only_{label}"
             if rescued:
                 matched.extend(_retrieve_and_gate(rescued))
                 for r in rescued:
